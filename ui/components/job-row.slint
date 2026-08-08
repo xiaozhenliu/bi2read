@@ -1,0 +1,165 @@
+import { Theme } from "../theme.slint";
+import { ProgressBar } from "progress.slint";
+
+// One row in the task queue list.
+export component JobRowView inherits Rectangle {
+    in property <string> title;
+    in property <string> bvid;
+    in property <int> page;
+    in property <string> stage-label;
+    in property <string> status-label;
+    in property <int> stage-progress;     // 0..100 for current stage
+    in property <int> total-progress;    // 0..100 across whole job
+    in property <bool> indeterminate;
+    in property <bool> selected;
+    in property <bool> has-error;
+    in property <string> elapsed;        // preformatted "MM:SS"
+    property <string> display-elapsed: root.elapsed.is-empty || root.elapsed == "00:00"
+        ? "—" : root.elapsed;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+    callback navigate(int);
+
+    changed selected => {
+        if root.selected {
+            root.focus();
+        }
+    }
+
+    accessible-role: list-item;
+    accessible-enabled: true;
+    accessible-label: root.title + "，" + root.bvid
+        + (root.page > 1 ? " 第" + root.page + "P" : "")
+        + "，状态 " + root.status-label + "，阶段 " + root.stage-label + "，"
+        + (root.has-error ? "错误"
+            : (root.indeterminate
+                ? "处理中，总进度未知"
+                : "阶段进度 " + root.stage-progress + "%，总进度 " + root.total-progress + "%"));
+    accessible-action-default => {
+        root.focus();
+        root.clicked();
+    }
+    forward-focus: focus-scope;
+
+    height: Theme.task-row-height;
+    border-radius: Theme.radius-md;
+    background: root.selected ? Theme.surface-selected
+             : touch.pressed ? Theme.surface-pressed
+             : touch.has-hover ? Theme.surface-hover : Theme.surface;
+    border-color: root.has-focus ? Theme.focus-ring
+                 : (root.has-error ? Theme.danger : transparent);
+    border-width: root.has-focus ? 2px : (root.has-error ? 1px : 0px);
+
+    if root.selected : Rectangle {
+        x: 0px;
+        y: Theme.space-xs;
+        width: 3px;
+        height: parent.height - Theme.space-md;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+
+    HorizontalLayout {
+        spacing: Theme.space-sm;
+        padding-left: Theme.space-sm;
+        padding-right: Theme.space-sm;
+        padding-top: Theme.space-xs;
+        padding-bottom: Theme.space-xs;
+
+        // Status pip
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: self.width / 2;
+            background: root.has-error ? Theme.danger
+                        : root.indeterminate ? Theme.warning
+                        : (root.total-progress >= 100 ? Theme.success : Theme.accent);
+        }
+
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: Theme.space-xs;
+                Text {
+                    text: root.title;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.display-elapsed;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-xs;
+                Text {
+                    text: root.bvid + (root.page > 1 ? "-P" + root.page : "");
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                }
+                Text {
+                    text: "·";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                }
+                Text {
+                    text: root.stage-label
+                        + (root.has-error ? ""
+                            : (root.indeterminate ? " · 处理中" : " · " + root.stage-progress + "%"));
+                    color: root.has-error ? Theme.danger : Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.total-progress >= 100 && !root.has-error
+                          ? "✓"
+                          : (root.indeterminate ? "…" : root.total-progress + "%");
+                    color: root.has-error ? Theme.danger : Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                }
+            }
+            ProgressBar {
+                // The bar and trailing number share one whole-job meaning.
+                value: root.total-progress;
+                indeterminate: root.indeterminate;
+                height: 4px;
+                label: "任务总进度";
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) {
+                root.focus();
+                root.clicked();
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.navigate(-1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.navigate(1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+}

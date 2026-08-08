@@ -1,0 +1,19 @@
+// Shared data types passed between Rust and Slint.
+// These mirror the structs on the Rust side (see src/jobs.rs, src/config.rs).
+
+export struct StageView {
+    name: string,
+    label: string,
+    done: bool,
+    active: bool,
+    progress: int,        // 0..100 for the active stage
+    indeterminate: bool,
+    error: bool,
+    skipped: bool,
+}
+
+export struct SpeakerEntry {
+    speaker-id: int,
+    raw-label: string,
+    name: string,
+}

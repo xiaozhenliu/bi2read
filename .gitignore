@@ -1,0 +1,23 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Local app data (config dir on macOS): App writes config.toml/queue.json here.
+# The path lives in ~/Library, outside the repo, so it is never tracked; this
+# line documents where it is, not a gitignore rule.
+# ~/Library/Application Support/BiMyScribe/
+
+# Local environment / secrets (defensive; LLM keys may live here later).
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# ZCode session/plan artifacts
+.zcode/
+
+# Temporary artifact files (atomic-write leftovers)
+*.tmp

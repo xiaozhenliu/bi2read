@@ -1,0 +1,954 @@
+import { LineEdit, ListView, ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { PrimaryButton, SecondaryButton, DangerButton } from "button.slint";
+import { ProgressBar } from "progress.slint";
+import { StageView, SpeakerEntry } from "../types.slint";
+
+// Compact keyboard-accessible control used to collapse and restore the
+// right-side inspector. The glyph is intentionally paired with a full
+// accessible label so direction is never the only cue.
+component InspectorToggle inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    in property <int> focus-generation: 0;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked;
+
+    changed focus-generation => {
+        root.focus();
+    }
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: true;
+    accessible-action-default => {
+        root.focus();
+        root.clicked();
+    }
+    forward-focus: focus-scope;
+
+    width: Theme.control-height-compact;
+    height: Theme.control-height-compact;
+    border-radius: Theme.radius-md;
+    background: touch.pressed ? Theme.surface-pressed
+        : touch.has-hover ? Theme.surface-selected : transparent;
+
+    Text {
+        text: root.glyph;
+        color: Theme.text-secondary;
+        font-size: Theme.font-section;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.focus();
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus : Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: Theme.radius-md + 2px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+        background: transparent;
+    }
+}
+
+component InspectorTab inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <int> focus-generation: 0;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked;
+    callback navigate(int);
+
+    changed selected => {
+        if root.selected {
+            root.focus();
+        }
+    }
+    changed focus-generation => {
+        if root.selected {
+            root.focus();
+        }
+    }
+
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        root.focus();
+        root.clicked();
+    }
+    forward-focus: focus-scope;
+
+    height: Theme.control-height;
+    min-width: 92px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-md;
+    background: root.selected ? Theme.surface-selected
+        : touch.pressed ? Theme.surface-pressed
+        : touch.has-hover ? Theme.surface-hover : transparent;
+
+    Text {
+        text: root.text;
+        color: root.selected ? Theme.text-primary : Theme.text-secondary;
+        font-size: Theme.font-body;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.focus();
+                root.clicked();
+                return accept;
+            }
+            if event.text == Key.LeftArrow {
+                root.navigate(-1);
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.navigate(1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus : Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: Theme.radius-md + 2px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+        background: transparent;
+    }
+}
+
+export component StageRow inherits Rectangle {
+    in property <StageView> stage;
+
+    accessible-role: list-item;
+    accessible-enabled: true;
+    accessible-label: root.stage.label
+        + (root.stage.error ? "，错误"
+            : root.stage.skipped ? "，已跳过"
+            : root.stage.done ? "，已完成"
+            : root.stage.active
+                ? (root.stage.indeterminate ? "，处理中" : "，进度 " + root.stage.progress + "%")
+                : "，等待中");
+
+    height: 34px;
+
+    HorizontalLayout {
+        spacing: Theme.space-sm;
+        padding-left: Theme.space-xxs;
+        padding-right: Theme.space-xxs;
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            border-radius: self.width / 2;
+            background: root.stage.error ? Theme.danger
+                : root.stage.done ? Theme.success
+                : root.stage.active ? Theme.accent
+                : root.stage.skipped ? Theme.surface-muted : Theme.track;
+            border-color: root.stage.skipped ? Theme.border-strong : transparent;
+            border-width: root.stage.skipped ? 1px : 0px;
+
+            Text {
+                text: root.stage.done ? "✓" : (root.stage.error ? "!" : (root.stage.skipped ? "–" : ""));
+                color: root.stage.skipped ? Theme.text-muted : Theme.on-accent;
+                font-size: Theme.font-caption;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.stage.label;
+            color: root.stage.error ? Theme.danger
+                : root.stage.active ? Theme.text-primary
+                : root.stage.done ? Theme.text-secondary : Theme.text-muted;
+            font-size: Theme.font-body;
+            font-weight: root.stage.active || root.stage.error ? 600 : 400;
+            width: 126px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        if root.stage.active : ProgressBar {
+            value: root.stage.progress;
+            indeterminate: root.stage.indeterminate;
+            height: 5px;
+            y: (parent.height - self.height) / 2;
+            horizontal-stretch: 1;
+            label: root.stage.label + "进度";
+        }
+
+        if !root.stage.active : Rectangle { horizontal-stretch: 1; }
+
+        Text {
+            text: root.stage.error ? "错误"
+                : root.stage.skipped ? (root.stage.name == "screenshots" ? "未启用" : "已跳过")
+                : root.stage.done ? "已完成"
+                : root.stage.active ? (root.stage.indeterminate ? "处理中" : root.stage.progress + "%")
+                : "等待";
+            color: root.stage.error ? Theme.danger : Theme.text-muted;
+            font-size: Theme.font-caption;
+            width: 64px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: parent.width;
+        background: Theme.separator;
+    }
+}
+
+export component SpeakerRow inherits Rectangle {
+    in property <SpeakerEntry> entry;
+    in property <bool> enabled: true;
+    callback name-edited(string);
+
+    accessible-role: list-item;
+    accessible-enabled: true;
+    accessible-label: root.entry.raw-label
+        + (root.entry.name.is-empty ? "，未设置显示名称" : "，显示为 " + root.entry.name);
+
+    height: 52px;
+
+    HorizontalLayout {
+        spacing: Theme.space-sm;
+        padding-left: Theme.space-xs;
+        padding-right: Theme.space-xs;
+        padding-top: Theme.space-xs;
+        padding-bottom: Theme.space-xs;
+
+        Text {
+            text: root.entry.raw-label;
+            color: root.enabled ? Theme.text-secondary : Theme.text-disabled;
+            font-size: Theme.font-caption;
+            width: 88px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        LineEdit {
+            accessible-label: root.entry.raw-label + " 的显示名称";
+            enabled: root.enabled;
+            text: root.entry.name;
+            placeholder-text: "输入显示名称…";
+            font-size: Theme.font-body;
+            height: Theme.control-height;
+            horizontal-stretch: 1;
+            edited(value) => { root.name-edited(value); }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: parent.width;
+        background: Theme.separator;
+    }
+}
+
+component OptionRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> muted: false;
+
+    height: 34px;
+    accessible-role: text;
+    accessible-label: root.label + "，" + root.value;
+
+    HorizontalLayout {
+        spacing: Theme.space-xs;
+        Text {
+            text: root.label;
+            color: Theme.text-muted;
+            font-size: Theme.font-caption;
+            width: 82px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.value;
+            color: root.muted ? Theme.text-disabled : Theme.text-primary;
+            font-size: Theme.font-body;
+            overflow: elide;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Confirmed design C: queue (in App), task status overview (center), and a
+// dedicated collapsible speaker/task-information inspector (right). Each visible pane
+// owns at most one vertical scroller; no same-direction scroller is nested.
+export component JobDetail inherits Rectangle {
+    in property <bool> has-job;
+    in property <string> title;
+    in property <string> bvid;
+    in property <int> page;
+    in property <string> status-label;
+    in property <int> total-progress;
+    in property <string> elapsed;
+    in property <string> error-text;
+    in property <bool> has-error;
+    in property <string> warning-text;
+    in property <[StageView]> stages;
+    in property <[SpeakerEntry]> speakers;
+    in property <bool> can-cancel;
+    in property <bool> can-retry;
+    in property <bool> can-open;
+    in property <bool> can-reveal;
+    in property <bool> can-edit-speakers;
+    in property <bool> screenshots-enabled;
+    in property <string> retention-label;
+    in property <string> created-at;
+    in property <string> started-at;
+    in property <string> finished-at;
+    in property <string> video-duration;
+    in property <string> media-size;
+    in property <string> document-words;
+    in property <string> action-feedback: "";
+    in property <bool> action-pending: false;
+    in property <bool> action-feedback-error: false;
+    in property <string> speaker-feedback: "";
+    in property <bool> speaker-feedback-error: false;
+    in property <string> verification-fixture: "";
+
+    property <bool> fixture-enabled: !root.verification-fixture.is-empty;
+    property <bool> fixture-running: root.verification-fixture == "running";
+    property <bool> fixture-failed: root.verification-fixture == "failed";
+    property <bool> fixture-completed: root.verification-fixture == "completed";
+    property <bool> display-has-job: root.has-job || root.fixture-enabled;
+    property <string> display-title: root.fixture-enabled
+        ? "这是一个用于验证详情滚动的超长视频标题：包含多个说话人、错误信息和任务阶段"
+        : root.title;
+    property <string> display-bvid: root.fixture-enabled ? "BV1UIFIX" : root.bvid;
+    property <int> display-page: root.fixture-enabled ? 2 : root.page;
+    property <string> display-status: root.fixture-running ? "处理中"
+        : root.fixture-failed ? "失败"
+        : root.fixture-completed ? "已完成" : root.status-label;
+    property <int> display-progress: root.fixture-completed ? 100
+        : root.fixture-running ? 48
+        : root.fixture-failed ? 64 : root.total-progress;
+    property <string> display-elapsed: root.fixture-running ? "09:16"
+        : root.fixture-completed ? "24:03"
+        : root.fixture-failed ? "18:42"
+        : (root.elapsed.is-empty || (root.elapsed == "00:00"
+            && root.status-label == "排队中") ? "—" : root.elapsed);
+    property <string> display-error: root.fixture-failed
+        ? "远端服务返回了较长的错误说明。原始转写已安全保存，可以稍后重试；重试不会重新下载或转写音频。\n技术信息：upstream request timed out after 120 seconds。"
+        : root.error-text;
+    property <bool> display-error-visible: root.fixture-failed || (!root.fixture-enabled && root.has-error);
+    property <string> display-warning: root.fixture-enabled ? "" : root.warning-text;
+    property <bool> display-warning-visible: !root.display-warning.is-empty;
+    property <bool> display-can-cancel: root.fixture-running || (!root.fixture-enabled && root.can-cancel);
+    property <bool> display-can-retry: root.fixture-failed || (!root.fixture-enabled && root.can-retry);
+    property <bool> display-can-open: root.fixture-completed || (!root.fixture-enabled && root.can-open);
+    property <bool> display-can-reveal: root.fixture-completed || (!root.fixture-enabled && root.can-reveal);
+    property <bool> display-can-edit-speakers: root.fixture-completed
+        || (!root.fixture-enabled && root.can-edit-speakers);
+    property <string> display-retention: root.fixture-enabled ? "推荐" : root.retention-label;
+    property <string> display-created-at: root.fixture-enabled ? "2026-08-08 10:14:32" : root.created-at;
+    property <string> display-started-at: root.fixture-enabled ? "2026-08-08 10:14:36" : root.started-at;
+    property <string> display-finished-at: root.fixture-running ? "—"
+        : root.fixture-completed ? "2026-08-08 10:38:39"
+        : root.fixture-failed ? "2026-08-08 10:33:18" : root.finished-at;
+    property <string> display-video-duration: root.fixture-enabled ? "47:13" : root.video-duration;
+    property <string> display-media-size: root.fixture-completed
+        ? "已按保留策略清理"
+        : root.fixture-enabled ? "86.4 MB（音频）" : root.media-size;
+    property <string> display-document-words: root.fixture-running
+        ? "尚未生成"
+        : root.fixture-failed ? "18,640 字（原始稿）"
+        : root.fixture-completed ? "15,284 字" : root.document-words;
+    property <bool> display-has-actions: root.display-can-cancel || root.display-can-retry
+        || root.display-can-open || root.display-can-reveal;
+    property <bool> display-completed: root.display-status == "已完成";
+
+    property <[StageView]> fixture-stages: [
+        { name: "metadata", label: "元数据", done: true, active: false, progress: 100, indeterminate: false, error: false, skipped: false },
+        { name: "download_audio", label: "下载音频", done: true, active: false, progress: 100, indeterminate: false, error: false, skipped: false },
+        { name: "normalize_audio", label: "转换音频", done: true, active: false, progress: 100, indeterminate: false, error: false, skipped: false },
+        { name: "transcribe", label: "FunASR 转写", done: !root.fixture-running, active: root.fixture-running, progress: root.fixture-running ? 48 : 100, indeterminate: root.fixture-running, error: false, skipped: false },
+        { name: "raw_document", label: "原始文档", done: root.fixture-failed || root.fixture-completed, active: false, progress: 0, indeterminate: false, error: false, skipped: false },
+        { name: "readable_document", label: "可读文档", done: root.fixture-completed, active: false, progress: 0, indeterminate: false, error: root.fixture-failed, skipped: false },
+        { name: "screenshots", label: "截图", done: false, active: false, progress: 0, indeterminate: false, error: false, skipped: root.fixture-completed },
+        { name: "final_document", label: "最终文档", done: root.fixture-completed, active: false, progress: 0, indeterminate: false, error: false, skipped: false },
+        { name: "cleanup", label: "清理", done: root.fixture-completed, active: false, progress: 0, indeterminate: false, error: false, skipped: false },
+        { name: "completed", label: "完成", done: root.fixture-completed, active: false, progress: 0, indeterminate: false, error: false, skipped: false }
+    ];
+    property <[SpeakerEntry]> fixture-speakers: [
+        { speaker-id: 0, raw-label: "Speaker 0", name: "主持人" },
+        { speaker-id: 1, raw-label: "Speaker 1", name: "嘉宾一号" },
+        { speaker-id: 2, raw-label: "Speaker 2", name: "嘉宾二号" },
+        { speaker-id: 3, raw-label: "Speaker 3", name: "研究员甲" },
+        { speaker-id: 4, raw-label: "Speaker 4", name: "研究员乙" },
+        { speaker-id: 5, raw-label: "Speaker 5", name: "产品负责人" },
+        { speaker-id: 6, raw-label: "Speaker 6", name: "工程师" },
+        { speaker-id: 7, raw-label: "Speaker 7", name: "观察员" },
+        { speaker-id: 8, raw-label: "Speaker 8", name: "现场提问者" },
+        { speaker-id: 9, raw-label: "Speaker 9", name: "记录员" }
+    ];
+    property <[StageView]> display-stages: root.fixture-enabled ? root.fixture-stages : root.stages;
+    property <[SpeakerEntry]> display-speakers: root.fixture-enabled ? root.fixture-speakers : root.speakers;
+
+    // Default to collapsed at compact widths. Direct user interaction breaks
+    // this initial binding and keeps the chosen state for the App session.
+    in-out property <bool> inspector-collapsed: root.width < Theme.inspector-auto-collapse-threshold;
+    in property <int> inspector-toggle-focus-generation: 0;
+    in property <int> inspector-tab-focus-generation: 0;
+    property <int> inspector-page: 0; // 0 speakers, 1 read-only task information
+
+    callback cancel-clicked();
+    callback retry-clicked();
+    callback open-md-clicked();
+    callback reveal-clicked();
+    callback toggle-screenshots(bool);
+    callback speaker-name-edited(int, string);
+    callback inspector-focus-requested(bool);
+
+    accessible-role: main;
+    min-width: 640px;
+    background: Theme.surface;
+
+    if !root.display-has-job : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.surface;
+        Text {
+            text: "选择左侧任务查看状态与说话人配置";
+            color: Theme.text-muted;
+            font-size: Theme.font-body;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
+        }
+    }
+
+    if root.display-has-job : HorizontalLayout {
+        spacing: 0px;
+
+        // Center pane: task status only.
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.surface;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    // Reserve a feedback line whenever actions exist so
+                    // success/error text never moves the stage history.
+                    height: root.display-has-actions ? 160px : 102px;
+                    background: Theme.surface;
+                    vertical-stretch: 0;
+
+                    VerticalLayout {
+                        padding-left: Theme.space-ml;
+                        padding-right: Theme.space-ml;
+                        padding-top: Theme.space-md;
+                        padding-bottom: Theme.space-sm;
+                        spacing: Theme.space-xs;
+
+                        Text {
+                            text: root.display-title;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-title;
+                            font-weight: 700;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.space-xs;
+                            Text {
+                                text: root.display-bvid + (root.display-page > 1 ? "-P" + root.display-page : "");
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                            }
+                            Text { text: "·"; color: Theme.text-muted; font-size: Theme.font-caption; }
+                            Text {
+                                text: root.display-status;
+                                color: root.display-completed ? Theme.success
+                                    : root.display-error-visible ? Theme.danger : Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                font-weight: 600;
+                                accessible-live-region: polite;
+                            }
+                            Text {
+                                text: "耗时 " + root.display-elapsed;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-caption;
+                                horizontal-alignment: right;
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        ProgressBar {
+                            value: root.display-progress;
+                            height: 6px;
+                            bar-color: root.display-error-visible ? Theme.danger
+                                : root.display-completed ? Theme.success : Theme.accent;
+                            label: "任务总进度";
+                        }
+
+                        if root.display-has-actions : HorizontalLayout {
+                            height: Theme.control-height;
+                            spacing: Theme.space-xs;
+                            if root.display-can-retry : PrimaryButton {
+                                text: "重试";
+                                disabled: root.action-pending;
+                                clicked => { root.retry-clicked(); }
+                            }
+                            if !root.display-can-retry && root.display-can-open : PrimaryButton {
+                                text: "打开 Markdown";
+                                disabled: root.action-pending;
+                                clicked => { root.open-md-clicked(); }
+                            }
+                            if root.display-can-retry && root.display-can-open : SecondaryButton {
+                                text: "打开 Markdown";
+                                disabled: root.action-pending;
+                                clicked => { root.open-md-clicked(); }
+                            }
+                            if root.display-can-reveal : SecondaryButton {
+                                text: "访达中显示";
+                                disabled: root.action-pending;
+                                clicked => { root.reveal-clicked(); }
+                            }
+                            if root.display-can-cancel : DangerButton {
+                                text: "取消任务";
+                                disabled: root.action-pending;
+                                clicked => { root.cancel-clicked(); }
+                            }
+                        }
+
+                        if root.display-has-actions : Text {
+                            text: root.action-feedback.is-empty ? " " : root.action-feedback;
+                            color: root.action-feedback-error ? Theme.danger-text
+                                : root.action-pending ? Theme.text-muted : Theme.success;
+                            font-size: Theme.font-caption;
+                            height: 18px;
+                            overflow: elide;
+                            accessible-live-region: polite;
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.separator; }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                    viewport-height: status-content.preferred-height;
+
+                    status-content := VerticalLayout {
+                        width: parent.width;
+                        padding-left: Theme.space-ml;
+                        padding-right: Theme.space-ml;
+                        padding-top: Theme.space-md;
+                        padding-bottom: Theme.space-lg;
+                        spacing: Theme.space-ml;
+
+                        Rectangle {
+                            visible: root.display-error-visible && !root.display-error.is-empty;
+                            height: max(88px, error-message.preferred-height + 62px);
+                            background: Theme.danger-surface;
+                            border-radius: Theme.radius-md;
+                            border-color: Theme.danger-border;
+                            border-width: 1px;
+
+                            Text {
+                                text: "任务失败";
+                                color: Theme.danger-text;
+                                font-size: Theme.font-section;
+                                font-weight: 600;
+                                x: Theme.space-md;
+                                y: Theme.space-sm;
+                            }
+                            error-message := Text {
+                                text: root.display-error;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-body;
+                                wrap: word-wrap;
+                                x: Theme.space-md;
+                                y: 38px;
+                                width: parent.width - Theme.space-xl;
+                                height: self.preferred-height;
+                            }
+                        }
+
+                        Rectangle {
+                            visible: root.display-warning-visible;
+                            height: max(64px, warning-message.preferred-height + 48px);
+                            background: Theme.warning-surface;
+                            border-radius: Theme.radius-md;
+                            border-color: Theme.warning-border;
+                            border-width: 1px;
+
+                            Text {
+                                text: "需要注意";
+                                color: Theme.warning-text;
+                                font-size: Theme.font-section;
+                                font-weight: 600;
+                                x: Theme.space-md;
+                                y: Theme.space-sm;
+                            }
+                            warning-message := Text {
+                                text: root.display-warning;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-body;
+                                wrap: word-wrap;
+                                x: Theme.space-md;
+                                y: 36px;
+                                width: parent.width - Theme.space-xl;
+                                height: self.preferred-height;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: Theme.space-xs;
+                            HorizontalLayout {
+                                height: 22px;
+                                Text {
+                                    text: "阶段历史";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-section;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: root.display-stages.length + " 个阶段";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-caption;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            if root.display-stages.length == 0 : Text {
+                                text: "暂无阶段信息";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-body;
+                                height: 40px;
+                                vertical-alignment: center;
+                            }
+
+                            for st in root.display-stages : StageRow { stage: st; }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            width: 1px;
+            horizontal-stretch: 0;
+            background: Theme.separator;
+        }
+
+        // Collapsed rail: preserves a visible, keyboard-reachable affordance.
+        if root.inspector-collapsed : Rectangle {
+            width: Theme.inspector-collapsed-width;
+            horizontal-stretch: 0;
+            background: Theme.sidebar-background;
+
+            VerticalLayout {
+                padding-top: Theme.space-xs;
+                alignment: start;
+                expand-toggle := InspectorToggle {
+                    glyph: "‹";
+                    label: root.inspector-page == 0 ? "展开说话人配置" : "展开任务信息";
+                    focus-generation: root.inspector-toggle-focus-generation;
+                    x: (parent.width - self.width) / 2;
+                    clicked => {
+                        root.inspector-collapsed = false;
+                        root.inspector-focus-requested(false);
+                    }
+                }
+                Text {
+                    text: root.inspector-page == 0 ? "说\n话\n人\n配\n置" : "任\n务\n信\n息";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    width: parent.width;
+                    height: 112px;
+                }
+            }
+        }
+
+        // Expanded inspector: speaker configuration and read-only task information are
+        // separate pages, so neither is pushed below task status content.
+        if !root.inspector-collapsed : Rectangle {
+            width: Theme.inspector-width;
+            horizontal-stretch: 0;
+            background: Theme.sidebar-background;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: 42px;
+                    background: Theme.sidebar-background;
+                    HorizontalLayout {
+                        padding-left: Theme.space-sm;
+                        padding-right: Theme.space-xs;
+                        spacing: Theme.space-xs;
+                        Text {
+                            text: "检查器";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-caption;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        collapse-toggle := InspectorToggle {
+                            glyph: "›";
+                            label: "收起检查器";
+                            focus-generation: root.inspector-toggle-focus-generation;
+                            clicked => {
+                                root.inspector-collapsed = true;
+                                root.inspector-focus-requested(true);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.separator; }
+
+                Rectangle {
+                    height: 45px;
+                    background: Theme.surface;
+                    accessible-role: tab-list;
+                    accessible-label: "检查器页面";
+
+                    HorizontalLayout {
+                        padding: Theme.space-xs;
+                        spacing: Theme.space-xxs;
+                        speaker-tab := InspectorTab {
+                            text: "说话人 · " + root.display-speakers.length;
+                            selected: root.inspector-page == 0;
+                            focus-generation: root.inspector-tab-focus-generation;
+                            clicked => {
+                                root.inspector-page = 0;
+                            }
+                            navigate(delta) => {
+                                if delta > 0 {
+                                    root.inspector-page = 1;
+                                }
+                            }
+                        }
+                        info-tab := InspectorTab {
+                            text: "任务信息";
+                            selected: root.inspector-page == 1;
+                            focus-generation: root.inspector-tab-focus-generation;
+                            clicked => {
+                                root.inspector-page = 1;
+                            }
+                            navigate(delta) => {
+                                if delta < 0 {
+                                    root.inspector-page = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.separator; }
+
+                if root.inspector-page == 0 : Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.surface;
+                    accessible-role: tab-panel;
+                    accessible-label: "说话人配置";
+
+                    VerticalLayout {
+                        padding-left: Theme.space-sm;
+                        padding-right: Theme.space-sm;
+                        padding-top: Theme.space-sm;
+                        padding-bottom: Theme.space-sm;
+                        spacing: Theme.space-xs;
+
+                        Text {
+                            text: root.display-can-edit-speakers
+                                ? "显示名称会写入 Markdown，编辑后自动更新文档。"
+                                : "转写完成后可编辑说话人显示名称。";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-caption;
+                            wrap: word-wrap;
+                            height: max(34px, self.preferred-height);
+                        }
+
+                        Text {
+                            text: root.speaker-feedback.is-empty ? " " : root.speaker-feedback;
+                            color: root.speaker-feedback-error ? Theme.danger-text
+                                : root.speaker-feedback == "已保存" ? Theme.success : Theme.text-muted;
+                            font-size: Theme.font-caption;
+                            height: 18px;
+                            overflow: elide;
+                            accessible-live-region: polite;
+                        }
+
+                        if root.display-speakers.length == 0 : Text {
+                            text: "尚未识别到说话人";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-body;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            vertical-stretch: 1;
+                        }
+
+                        if root.display-speakers.length > 0 : ListView {
+                            vertical-stretch: 1;
+                            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                            for sp in root.display-speakers : SpeakerRow {
+                                entry: sp;
+                                enabled: root.display-can-edit-speakers;
+                                name-edited(name) => { root.speaker-name-edited(sp.speaker-id, name); }
+                            }
+                        }
+                    }
+                }
+
+                if root.inspector-page == 1 : Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.surface;
+                    accessible-role: tab-panel;
+                    accessible-label: "任务信息";
+
+                    ScrollView {
+                        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                        viewport-height: task-info-content.preferred-height;
+
+                        task-info-content := VerticalLayout {
+                            width: parent.width;
+                            padding: Theme.space-md;
+                            spacing: Theme.space-md;
+                            alignment: start;
+
+                            Text {
+                                text: "只读任务快照；可编辑项仅位于说话人配置与设置。";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-caption;
+                                wrap: word-wrap;
+                                height: self.preferred-height;
+                            }
+
+                            VerticalLayout {
+                                spacing: Theme.space-xxs;
+                                Text {
+                                    text: "时间";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-caption;
+                                    font-weight: 600;
+                                }
+                                OptionRow {
+                                    label: "创建时间";
+                                    value: root.display-created-at;
+                                }
+                                OptionRow {
+                                    label: "开始时间";
+                                    value: root.display-started-at;
+                                }
+                                OptionRow {
+                                    label: "结束时间";
+                                    value: root.display-finished-at;
+                                }
+                                OptionRow {
+                                    label: "处理用时";
+                                    value: root.display-elapsed;
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: Theme.separator; }
+
+                            VerticalLayout {
+                                spacing: Theme.space-xxs;
+                                Text {
+                                    text: "媒体与产出";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-caption;
+                                    font-weight: 600;
+                                }
+                                OptionRow {
+                                    label: "视频时长";
+                                    value: root.display-video-duration;
+                                }
+                                OptionRow {
+                                    label: "媒体占用";
+                                    value: root.display-media-size;
+                                }
+                                OptionRow {
+                                    label: "Markdown";
+                                    value: root.display-document-words;
+                                }
+                                OptionRow {
+                                    label: "保留策略";
+                                    value: root.display-retention;
+                                }
+                                OptionRow {
+                                    label: "截图产物";
+                                    value: root.screenshots-enabled ? "已启用" : "未启用";
+                                    muted: !root.screenshots-enabled;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}

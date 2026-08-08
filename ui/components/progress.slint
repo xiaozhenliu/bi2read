@@ -1,0 +1,53 @@
+import { Theme } from "../theme.slint";
+
+// Determinate progress bar (0..100). When `indeterminate` is true, shows an
+// animated looping bar with no fake percentage.
+// Slint 1.17 exposes no stable public reduced-motion preference to this UI;
+// keep the existing indeterminate animation rather than using private APIs.
+export component ProgressBar inherits Rectangle {
+    in property <int> value: 0;          // 0..100, ignored when indeterminate
+    in property <bool> indeterminate: false;
+    in property <color> bar-color: Theme.accent;
+    in property <string> label: "进度";
+
+    accessible-role: progress-indicator;
+    accessible-label: root.label;
+    accessible-value: root.indeterminate ? "处理中" : clamp(root.value, 0, 100) + "%";
+    accessible-value-minimum: 0;
+    accessible-value-maximum: 100;
+    accessible-read-only: true;
+
+    height: 8px;
+    background: Theme.track;
+    border-radius: Theme.radius-sm;
+    clip: true;
+
+    // Determinate fill
+    Rectangle {
+        visible: !root.indeterminate && root.value > 0;
+        width: parent.width * (clamp(root.value, 0, 100) / 100);
+        height: parent.height;
+        background: root.bar-color;
+        border-radius: Theme.radius-sm;
+        animate width { duration: 220ms; easing: ease-out; }
+    }
+
+    // Indeterminate sliding block
+    Rectangle {
+        visible: root.indeterminate;
+        property <float> indeterminate-offset: 0.0;
+        width: parent.width * 0.32;
+        height: parent.height;
+        background: root.bar-color;
+        border-radius: Theme.radius-sm;
+
+        // Slide from -33% to 100% of the track width.
+        x: parent.width * 0.33 + self.indeterminate-offset * (parent.width * 0.67) - self.width;
+        animate indeterminate-offset {
+            duration: 1100ms;
+            iteration-count: -1;
+            direction: alternate;
+            easing: ease-in-out;
+        }
+    }
+}

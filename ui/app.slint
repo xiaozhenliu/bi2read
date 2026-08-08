@@ -1,0 +1,283 @@
+import { Palette, ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { StageView, SpeakerEntry } from "types.slint";
+import { JobRow, JobDetailData, SettingsView } from "view-model.slint";
+import { AddBar } from "components/add-bar.slint";
+import { JobRowView } from "components/job-row.slint";
+import { JobDetail } from "components/job-detail.slint";
+import { SettingsModal } from "components/settings.slint";
+import { PrimaryButton, SecondaryButton } from "components/button.slint";
+
+// Root application window. Public properties and callbacks are bound from Rust
+// via `slint::include_modules!()`.
+export component App inherits Window {
+    // Keep implementation status in task state, not in the window chrome.
+    title: root.ui-verification-fixture.is-empty
+        ? "BiMyScribe"
+        : "BiMyScribe — UI Fixture (" + root.ui-verification-fixture + ")";
+    preferred-width: Theme.window-width;
+    preferred-height: Theme.window-height;
+    min-width: Theme.window-min-width;
+    min-height: Theme.window-min-height;
+    background: Theme.window-background;
+
+    // Force built-in widgets (LineEdit/CheckBox/SpinBox) into light mode regardless
+    // of the macOS system appearance, so they match our fixed-light Theme tokens.
+    // Local property two-way bound to the Palette global; set to Light from Rust.
+    in-out property <ColorScheme> light-scheme <=> Palette.color-scheme;
+
+    // ---- Public state (set from Rust) ----
+    in property <string> url: "";
+    in property <string> hint: "";
+    in property <string> add-state: "idle"; // idle/submitting/success/error
+    in property <string> add-feedback: "";
+    in property <bool> add-busy: false;
+    in property <string> action-feedback: "";
+    in property <bool> action-pending: false;
+    in property <bool> action-feedback-error: false;
+    in property <string> speaker-feedback: "";
+    in property <bool> speaker-feedback-error: false;
+    in property <string> settings-feedback: "";
+    in property <bool> settings-saving: false;
+    in property <string> settings-error-field: "";
+    in property <string> settings-error-message: "";
+    in property <int> inspector-toggle-focus-generation: 0;
+    in property <int> inspector-tab-focus-generation: 0;
+    in property <[JobRow]> jobs: [];
+    in property <JobDetailData> detail: {
+        has-job: false,
+        title: "", bvid: "", page: 1, status-label: "",
+        total-progress: 0, elapsed-secs: 0, error-text: "", has-error: false,
+        warning-text: "",
+        can-cancel: false, can-retry: false, can-open: false, can-reveal: false,
+        can-edit-speakers: false,
+        screenshots-enabled: false, retention-label: "推荐",
+    };
+    in property <[StageView]> stages: [];
+    in property <[SpeakerEntry]> speakers: [];
+    // Rust computes these from the selected row and queue boundaries so all
+    // input methods share the same capability state.
+    in property <bool> can-move-up: false;
+    in property <bool> can-move-down: false;
+    in property <SettingsView> settings: {
+        working-dir: "",
+        output-dir: "",
+        runtime-project: "",
+        funasr-status: "未配置",
+        runtime-data-dir: "",
+        llm-enabled: false, llm-connection-name: "", llm-model: "",
+        llm-base-url: "", llm-api-format: "openai_chat_completions",
+        llm-remote-warn: false, default-screenshots: false,
+        default-retention: "推荐",
+    };
+    in-out property <bool> settings-visible: false;
+
+    // UI-only long-detail verification state. Empty means normal startup;
+    // visual QA may select running/failed/completed without persistent data.
+    in property <string> ui-verification-fixture: "";
+    // UI-only empty-queue verification switch. Keep false for normal startup;
+    // visual QA may temporarily enable it without mutating persisted jobs.
+    property <bool> ui-verification-empty: false;
+    property <[JobRow]> display-jobs: root.ui-verification-empty ? [] : root.jobs;
+
+    // ---- Public callbacks (handled in Rust) ----
+    callback url-edited(string);
+    callback add-clicked;
+    callback settings-clicked;
+    callback job-selected(int);          // index in jobs
+    callback job-navigate(int, int);     // current index, -1/+1
+    callback move-up;                    // acts on the selected job
+    callback move-down;                  // acts on the selected job
+    callback cancel-job;
+    callback retry-job;
+    callback open-md;
+    callback reveal-in-finder;
+    callback toggle-screenshots(bool);
+    callback speaker-name-edited(int, string);
+    callback save-settings(SettingsView);
+    callback install-runtime(SettingsView);
+    callback cancel-settings;
+    callback choose-directory(string) -> string;
+    callback default-directory(string) -> string;
+    callback inspector-focus-requested(bool);
+
+    VerticalLayout {
+        // Top add-bar
+        AddBar {
+            url: root.url;
+            hint: root.hint;
+            state: root.add-state;
+            feedback: root.add-feedback;
+            busy: root.add-busy;
+            url-edited(v) => { root.url-edited(v); }
+            add-clicked => { root.add-clicked(); }
+            settings-clicked => { root.settings-clicked(); }
+        }
+
+        // Confirmed design C: queue + task status + collapsible inspector.
+        // The JobDetail component owns the latter two panes so status and
+        // speaker configuration stay structurally independent.
+        HorizontalLayout {
+            spacing: 0px;
+            vertical-stretch: 1;
+
+            // Left: task queue
+            Rectangle {
+                background: Theme.sidebar-background;
+                horizontal-stretch: 0;
+                min-width: Theme.sidebar-min-width;
+                preferred-width: Theme.sidebar-width;
+                max-width: Theme.sidebar-max-width;
+
+                VerticalLayout {
+                    padding: Theme.space-md;
+                    spacing: Theme.space-sm;
+
+                    HorizontalLayout {
+                        height: Theme.control-height-compact;
+                        spacing: Theme.space-xs;
+                        Text {
+                            text: "任务队列";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-section;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.display-jobs.length + " 项";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-caption;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        SecondaryButton {
+                            text: "上移";
+                            height: Theme.control-height-compact;
+                            min-width: 52px;
+                            disabled: root.display-jobs.length == 0 || !root.can-move-up;
+                            clicked => { root.move-up(); }
+                        }
+                        SecondaryButton {
+                            text: "下移";
+                            height: Theme.control-height-compact;
+                            min-width: 52px;
+                            disabled: root.display-jobs.length == 0 || !root.can-move-down;
+                            clicked => { root.move-down(); }
+                        }
+                    }
+
+                    if root.display-jobs.length == 0 : Rectangle {
+                        vertical-stretch: 1;
+                        Text {
+                            text: "暂无任务\n在上方粘贴链接开始转写";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-body;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            width: parent.width - Theme.space-xl;
+                            x: Theme.space-md;
+                            height: parent.height;
+                        }
+                    }
+
+                    if root.display-jobs.length > 0 : ListView {
+                        vertical-stretch: 1;
+                        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                        for job[i] in root.display-jobs : JobRowView {
+                            title: job.title;
+                            bvid: job.bvid;
+                            page: job.page;
+                            stage-label: job.stage-label;
+                            status-label: job.status-label;
+                            stage-progress: job.stage-progress;
+                            total-progress: job.total-progress;
+                            indeterminate: job.indeterminate;
+                            selected: job.selected;
+                            has-error: job.has-error;
+                            elapsed: job.elapsed;
+                            clicked => { root.job-selected(i); }
+                            navigate(delta) => { root.job-navigate(i, delta); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                horizontal-stretch: 0;
+                background: Theme.separator;
+            }
+
+            Rectangle {
+                background: Theme.content-background;
+                horizontal-stretch: 1;
+
+                JobDetail {
+                    width: parent.width;
+                    height: parent.height;
+                    has-job: root.detail.has-job;
+                    title: root.detail.title;
+                    bvid: root.detail.bvid;
+                    page: root.detail.page;
+                    status-label: root.detail.status-label;
+                    total-progress: root.detail.total-progress;
+                    elapsed: root.detail.elapsed;
+                    error-text: root.detail.error-text;
+                    has-error: root.detail.has-error;
+                    warning-text: root.detail.warning-text;
+                    stages: root.stages;
+                    speakers: root.speakers;
+                    can-cancel: root.detail.can-cancel;
+                    can-retry: root.detail.can-retry;
+                    can-open: root.detail.can-open;
+                    can-reveal: root.detail.can-reveal;
+                    can-edit-speakers: root.detail.can-edit-speakers;
+                    screenshots-enabled: root.detail.screenshots-enabled;
+                    retention-label: root.detail.retention-label;
+                    created-at: root.detail.created-at;
+                    started-at: root.detail.started-at;
+                    finished-at: root.detail.finished-at;
+                    video-duration: root.detail.video-duration;
+                    media-size: root.detail.media-size;
+                    document-words: root.detail.document-words;
+                    action-feedback: root.action-feedback;
+                    action-pending: root.action-pending;
+                    action-feedback-error: root.action-feedback-error;
+                    speaker-feedback: root.speaker-feedback;
+                    speaker-feedback-error: root.speaker-feedback-error;
+                    verification-fixture: root.ui-verification-fixture;
+                    inspector-toggle-focus-generation: root.inspector-toggle-focus-generation;
+                    inspector-tab-focus-generation: root.inspector-tab-focus-generation;
+
+                    cancel-clicked => { root.cancel-job(); }
+                    retry-clicked => { root.retry-job(); }
+                    open-md-clicked => { root.open-md(); }
+                    reveal-clicked => { root.reveal-in-finder(); }
+                    toggle-screenshots(v) => { root.toggle-screenshots(v); }
+                    speaker-name-edited(id, name) => { root.speaker-name-edited(id, name); }
+                    inspector-focus-requested(collapsed) => {
+                        root.inspector-focus-requested(collapsed);
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal settings overlay on top of everything.
+    SettingsModal {
+        shown <=> root.settings-visible;
+        settings: root.settings;
+        save-feedback: root.settings-feedback;
+        saving: root.settings-saving;
+        error-field: root.settings-error-field;
+        error-message: root.settings-error-message;
+        save(s) => { root.save-settings(s); }
+        install-runtime(s) => { root.install-runtime(s); }
+        cancel => { root.cancel-settings(); }
+        choose-directory(kind) => { root.choose-directory(kind) }
+        default-directory(kind) => { root.default-directory(kind) }
+    }
+}

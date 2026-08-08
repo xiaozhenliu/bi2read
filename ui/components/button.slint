@@ -1,0 +1,99 @@
+import { Theme } from "../theme.slint";
+
+// A native-looking button with primary / secondary / danger variants.
+export component BaseButton inherits Rectangle {
+    in property <string> text;
+    in property <color> base-color: Theme.accent;
+    in property <color> text-color: Theme.on-accent;
+    in property <bool> outlined: false;
+    in property <bool> disabled: false;
+    out property <bool> pressed: !root.disabled && touch.pressed;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-enabled: !root.disabled;
+    accessible-label: root.text;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.focus();
+            root.clicked();
+        }
+    }
+
+    forward-focus: focus-scope;
+
+    height: Theme.control-height;
+    min-width: 72px;
+    preferred-width: max(72px, button-label.preferred-width + Theme.space-lg);
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-md;
+    background: root.disabled ? Theme.surface-disabled
+             : root.outlined
+                ? (touch.pressed ? Theme.surface-pressed
+                    : touch.has-hover ? Theme.surface-hover : Theme.surface)
+             : touch.pressed ? Theme.accent-pressed
+             : touch.has-hover ? Theme.accent-hover
+             : root.base-color;
+    border-color: root.disabled ? Theme.border-strong
+                 : root.outlined ? Theme.border-strong : transparent;
+    border-width: root.disabled ? 1px : (outlined ? 1px : 0px);
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            if (!root.disabled) {
+                root.focus();
+                root.clicked();
+            }
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == " " || event.text == "\n" || event.text == Key.Return)) {
+                root.focus();
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus && !root.disabled : Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: Theme.radius-md + 2px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+        background: transparent;
+    }
+
+    button-label := Text {
+        text: root.text;
+        color: root.disabled ? Theme.text-disabled
+             : root.text-color;
+        font-size: Theme.font-body;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+}
+
+export component PrimaryButton inherits BaseButton {
+    base-color: Theme.accent;
+}
+export component SecondaryButton inherits BaseButton {
+    outlined: true;
+    text-color: Theme.text-primary;
+}
+export component DangerButton inherits BaseButton {
+    base-color: Theme.danger;
+}

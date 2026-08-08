@@ -1,0 +1,89 @@
+// Design tokens shared across the app. Accessed as `Theme.color-xxx` from any
+// component, and `app.global::<Theme>()` from Rust.
+export global Theme {
+    // Window
+    out property <color> window-background: #f3f5f7;
+    out property <color> sidebar-background: #f0f2f5;
+    out property <color> content-background: #ffffff;
+    out property <length> window-width: 1180px;
+    out property <length> window-height: 760px;
+    out property <length> window-min-width: 920px;
+    out property <length> window-min-height: 600px;
+    out property <length> sidebar-width: 268px;
+    out property <length> sidebar-min-width: 252px;
+    out property <length> sidebar-max-width: 292px;
+    out property <length> inspector-width: 300px;
+    out property <length> inspector-collapsed-width: 44px;
+    // App width 1080px minus the 268px queue and 1px divider.
+    out property <length> inspector-auto-collapse-threshold: 811px;
+
+    // Surfaces
+    out property <color> surface: #ffffff;
+    out property <color> surface-muted: #f4f6f8;
+    out property <color> surface-hover: #f7f8fa;
+    out property <color> surface-selected: #e8eefc;
+    out property <color> surface-pressed: #e9edf2;
+    out property <color> surface-disabled: #eef0f2;
+    out property <color> surface-footer: #fbfcfd;
+    out property <color> border: #d9dee5;
+    out property <color> border-strong: #c4cbd4;
+    out property <color> separator: #e3e7ec;
+    out property <color> overlay: #18202b66;
+
+    // Text
+    out property <color> text-primary: #20242a;
+    out property <color> text-secondary: #59626e;
+    out property <color> text-muted: #7c8795;
+    out property <color> text-disabled: #9aa3ad;
+    out property <color> on-accent: #ffffff;
+
+    // Accents / states
+    out property <color> accent: #356cf5;
+    out property <color> accent-hover: #2d5fda;
+    out property <color> accent-pressed: #254fb8;
+    out property <color> success: #158447;
+    out property <color> success-surface: #edf8f1;
+    out property <color> warning: #a65f00;
+    out property <color> warning-surface: #fff7e8;
+    out property <color> warning-border: #ead1a9;
+    out property <color> warning-text: #744300;
+    out property <color> danger: #c93434;
+    out property <color> danger-surface: #fff1f1;
+    out property <color> danger-border: #efb6b6;
+    out property <color> danger-text: #8f2424;
+    out property <color> focus-ring: #6f98ff;
+    out property <color> track: #e3e7ec;
+
+    // Spacing scale
+    out property <length> space-xxs: 4px;
+    out property <length> space-xs: 8px;
+    out property <length> space-sm: 12px;
+    out property <length> space-md: 16px;
+    out property <length> space-ml: 20px;
+    out property <length> space-lg: 24px;
+    out property <length> space-xl: 32px;
+
+    // Radius
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 6px;
+    out property <length> radius-lg: 10px;
+
+    // Control metrics
+    out property <length> control-height: 32px;
+    out property <length> control-height-compact: 28px;
+    out property <length> task-row-height: 68px;
+
+    // Semantic type scale. Interface text below 12px is intentionally banned.
+    out property <length> font-caption: 12px;
+    out property <length> font-body: 13px;
+    out property <length> font-section: 14px;
+    out property <length> font-title: 20px;
+
+    // Compatibility aliases for components that have not yet moved to the
+    // semantic names. Keep the values on the same four-step scale.
+    out property <length> font-xs: 12px;
+    out property <length> font-sm: 13px;
+    out property <length> font-md: 13px;
+    out property <length> font-lg: 14px;
+    out property <length> font-xl: 20px;
+}

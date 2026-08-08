@@ -1,0 +1,81 @@
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { PrimaryButton, SecondaryButton } from "button.slint";
+
+// Top bar: URL input + add button.
+export component AddBar inherits Rectangle {
+    in property <string> url;
+    in property <string> hint;
+    in property <string> state: "idle"; // idle/submitting/success/error
+    in property <string> feedback;
+    in property <bool> busy: false;
+    property <string> display-feedback: !root.hint.is-empty ? root.hint : root.feedback;
+    property <string> display-state: !root.hint.is-empty ? "error" : root.state;
+    callback url-edited(string);
+    callback add-clicked();
+    callback settings-clicked();
+
+    // Keep the normal toolbar compact. Reserve one helper line only when the
+    // controller supplies a local validation/enqueue error.
+    height: root.display-feedback.is-empty ? 60px : 78px;
+    background: Theme.surface;
+
+    VerticalLayout {
+        padding-left: Theme.space-md;
+        padding-right: Theme.space-md;
+        padding-top: Theme.space-sm;
+        padding-bottom: root.display-feedback.is-empty ? Theme.space-sm : Theme.space-xxs;
+        spacing: Theme.space-xxs;
+
+        HorizontalLayout {
+            height: Theme.control-height;
+            spacing: Theme.space-sm;
+            alignment: stretch;
+
+            LineEdit {
+                accessible-label: "B 站链接或 BV 号";
+                placeholder-text: "粘贴 B 站链接或 BV 号…";
+                text: root.url;
+                font-size: Theme.font-body;
+                height: Theme.control-height;
+                min-width: 280px;
+                horizontal-stretch: 1;
+                edited(value) => { root.url-edited(value); }
+                accepted => {
+                    if (!root.url.is-empty) {
+                        root.add-clicked();
+                    }
+                }
+            }
+
+            PrimaryButton {
+                text: root.busy ? "正在添加…" : "添加任务";
+                disabled: root.url.is-empty || root.busy;
+                clicked => { root.add-clicked(); }
+            }
+
+            SecondaryButton {
+                text: "设置";
+                clicked => { root.settings-clicked(); }
+            }
+        }
+
+        if !root.display-feedback.is-empty : Text {
+            text: root.display-feedback;
+            color: root.display-state == "error" ? Theme.danger-text
+                : root.display-state == "success" ? Theme.success
+                : Theme.text-muted;
+            font-size: Theme.font-caption;
+            height: 16px;
+            overflow: elide;
+            accessible-live-region: polite;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: parent.width;
+        background: Theme.separator;
+    }
+}

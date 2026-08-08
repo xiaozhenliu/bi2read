@@ -1,0 +1,70 @@
+import { StageView, SpeakerEntry } from "types.slint";
+
+// View model for one row in the queue list.
+export struct JobRow {
+    id: string,
+    title: string,
+    bvid: string,
+    page: int,
+    stage-name: string,
+    stage-label: string,
+    stage-progress: int,        // 0..100 for current stage
+    total-progress: int,       // 0..100 across whole job
+    indeterminate: bool,
+    elapsed-secs: int,
+    elapsed: string,           // preformatted "MM:SS"
+    selected: bool,
+    has-error: bool,
+    error-text: string,
+    status-label: string,
+}
+
+// Aggregated view for the detail panel of the selected job.
+//
+// The Rust controller is the only producer of this snapshot.  Fields are
+// deliberately preformatted here so Slint never has to guess whether a
+// missing value is a real zero.  A refresh replaces the complete struct when
+// selection changes; background snapshots update the same fields atomically.
+export struct JobDetailData {
+    has-job: bool,             // queue job selected; false shows the empty state
+    title: string,             // Job.title, refreshed on every job snapshot
+    bvid: string,              // Job.bvid
+    page: int,                 // Job.page (1-based)
+    status-label: string,      // JobStatus::label()
+    total-progress: int,       // Job::total_progress(), 0..100
+    elapsed-secs: int,         // started_at..finished_at/now, seconds
+    elapsed: string,           // local display; "—" when started_at is absent
+    error-text: string,        // Job.error; empty means no error
+    has-error: bool,            // Job.error.is_some()
+    warning-text: string,      // JobWarning::label(); empty means none
+    can-cancel: bool,          // JobCapabilities::can_cancel
+    can-retry: bool,           // JobCapabilities::can_retry
+    can-open: bool,             // JobCapabilities::can_open_document
+    can-reveal: bool,           // JobCapabilities::can_reveal
+    can-edit-speakers: bool,    // transcript.raw.json exists
+    screenshots-enabled: bool, // current screenshot capability (false until backend exists)
+    retention-label: string,   // Job.retention.label()
+    created-at: string,        // Job.created_at in local YYYY-MM-DD HH:mm:ss
+    started-at: string,        // Job.started_at in local YYYY-MM-DD HH:mm:ss, or "—"
+    finished-at: string,       // Job.finished_at in local YYYY-MM-DD HH:mm:ss, or "—"
+    video-duration: string,    // Job.duration_ms only; unknown/zero is "—"
+    media-size: string,        // existing source.audio/video bytes or retention placeholder
+    document-words: string,    // final full.md, then raw markdown with "原始稿"
+}
+
+// Settings view model bound to the settings modal.
+export struct SettingsView {
+    working-dir: string,
+    output-dir: string,
+    runtime-project: string,
+    funasr-status: string,
+    runtime-data-dir: string,
+    llm-enabled: bool,
+    llm-connection-name: string,
+    llm-model: string,
+    llm-base-url: string,
+    llm-api-format: string,
+    llm-remote-warn: bool,
+    default-screenshots: bool,
+    default-retention: string,
+}

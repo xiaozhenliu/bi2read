@@ -1,0 +1,38 @@
+[package]
+name = "bimyscribe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Lightweight local app to transcribe Bilibili videos via FunASR"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+slint = "1.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+fs2 = "0.4"
+# Synchronous, lightweight HTTP client (no async runtime) for anonymous Bilibili
+# API calls and optional LLM requests.
+ureq = { version = "2", features = ["tls"] }
+# POSIX process-group signals for subprocess cancellation.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+slint-build = "1.17"
+
+[profile.release]
+# Prefer a compact release binary for a lightweight desktop installation.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
