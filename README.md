@@ -21,7 +21,8 @@ BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录�
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.92 或更高版本
 - [FFmpeg](https://ffmpeg.org/)；命令需要位于 `PATH`
-- [uv](https://docs.astral.sh/uv/)（默认原生 Runtime 使用）
+- [uv](https://docs.astral.sh/uv/)（通过 Cargo 运行原生 Runtime 时需要；构建 App
+  的脚本会自动下载）
 - [BiMyScribe FunASR Runtime v1.0.0](https://github.com/xiaozhenliu/bimyscribe-funasr-runtime/releases/tag/v1.0.0)
 
 Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器镜像不
@@ -43,6 +44,29 @@ cargo run --release
 git clone --branch v1.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
 ```
 
+### 在自己的 Mac 上构建 App
+
+只需要 Rust、Xcode Command Line Tools、Git 和网络连接。脚本会自动下载固定版本
+的 Runtime 与 uv，构建 `BiMyScribe.app`，并在签名前询问签名身份：直接回车会
+使用免费的 ad-hoc 签名，适合在当前 Mac 自用，不需要 Apple Developer 会员。
+
+```bash
+git clone https://github.com/xiaozhenliu/bimyscribe.git
+cd bimyscribe
+scripts/build-macos-local.sh
+```
+
+默认产物位于 `target/macos-local/output/BiMyScribe.app`。空间不足时可以把全部
+构建数据放到其他磁盘：
+
+```bash
+BIMYSCRIBE_BUILD_ROOT=/absolute/path/to/build scripts/build-macos-local.sh
+```
+
+如需使用自己的 Developer ID，在运行前设置
+`BIMYSCRIBE_SIGN_IDENTITY='Developer ID Application: …'`。Developer ID 签名
+之后仍需 Apple 公证才能安全地对外分发；ad-hoc 签名包不应作为公开 Release。
+
 ## 首次配置
 
 启动后打开“设置”。工作目录与 Markdown 输出目录已经使用 macOS 平台默认值，
@@ -50,8 +74,8 @@ git clone --branch v1.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-fu
 
 1. **工作目录**：默认位于应用数据目录的 `Jobs`，保存任务中间产物。
 2. **Markdown 输出目录**：默认为 `~/Documents/BiMyScribe`。
-3. **FunASR Runtime 项目目录**：选择 Runtime v1 项目根目录；保存时会验证
-   契约版本和后端。
+3. **FunASR Runtime 项目目录**：本机构建的 App 会自动使用内置 Runtime；通过
+   Cargo 运行或需要 Docker 后端时，可在此选择自定义 Runtime v1 项目。
 4. **Runtime 数据目录**：保存 Python 环境、依赖、模型与缓存。通常需要数 GB
    空间，可以直接选择外挂盘。
 5. 点击**安装或重新验证 Runtime**。原生 Runtime 会使用冻结的 uv 锁文件；
@@ -84,10 +108,11 @@ git clone --branch v1.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-fu
 
 ## 当前限制
 
-- 暂无预构建的 `.app` 安装包，需要通过 Cargo 启动。
+- 暂不提供官方签名并公证的 DMG；可以运行上方脚本，在自己的 Apple Silicon Mac
+  上生成 ad-hoc 签名的 `.app`。
 - 仅支持匿名访问，不支持需要登录或 Cookie 的视频。
 - 截图提取功能尚未开放。
-- FunASR Runtime 和 FFmpeg 需要单独安装；Docker 只用于可选后端。
+- FFmpeg 仍需单独安装；自构建 App 已内置 Runtime 与 uv，Docker 只用于可选后端。
 
 ## 许可证
 
@@ -117,7 +142,8 @@ speaker information.
 - macOS
 - Rust 1.92 or newer
 - FFmpeg available on `PATH`
-- uv for the default native runtime
+- uv when running the native runtime through Cargo; the app build script
+  downloads it automatically
 - [BiMyScribe FunASR Runtime v1.0.0](https://github.com/xiaozhenliu/bimyscribe-funasr-runtime/releases/tag/v1.0.0)
 
 FunASR models are not bundled. Docker Desktop is required only for the optional
@@ -137,11 +163,32 @@ Download the verified native runtime separately:
 git clone --branch v1.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
 ```
 
+### Build the macOS app locally
+
+With Rust, Xcode Command Line Tools, Git, and network access installed, run:
+
+```bash
+git clone https://github.com/xiaozhenliu/bimyscribe.git
+cd bimyscribe
+scripts/build-macos-local.sh
+```
+
+The script downloads pinned Runtime and uv releases, builds the app, and asks
+for a signing identity. Press Enter for free ad-hoc signing suitable for use on
+the same Mac. The app is written to
+`target/macos-local/output/BiMyScribe.app` by default. Set an absolute
+`BIMYSCRIBE_BUILD_ROOT` to build on another disk.
+
+To use your own Developer ID, set `BIMYSCRIBE_SIGN_IDENTITY` before running the
+script. Developer ID builds still require Apple notarization before public
+distribution. Do not publish the ad-hoc signed build as a Release asset.
+
 ### First-time setup
 
-Open Settings and select a compatible FunASR Runtime project. Choose a Runtime
-Data directory with several gigabytes of free space; it may be on an external
-drive. Install or validate the runtime from Settings. Job data defaults
+The locally built app discovers its bundled FunASR Runtime automatically. When
+running through Cargo or using Docker, select a compatible Runtime project in
+Settings. Choose a Runtime Data directory with several gigabytes of free space;
+it may be on an external drive. Install or validate the runtime from Settings. Job data defaults
 to the macOS Application Support directory, while Markdown defaults to
 `~/Documents/BiMyScribe`; both locations can be changed with the native folder
 picker. Choose a retention policy for intermediate files.
@@ -164,10 +211,12 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document.
 
 ### Current limitations
 
-- No prebuilt `.app` bundle is available yet.
+- No officially signed and notarized DMG is provided yet. Run the script above
+  to create an ad-hoc signed `.app` on your own Apple Silicon Mac.
 - Videos requiring login or cookies are not supported.
 - Screenshot extraction is not available yet.
-- The FunASR runtime and FFmpeg must be installed separately; Docker is optional.
+- FFmpeg must still be installed separately. Locally built apps bundle Runtime
+  and uv; Docker remains optional.
 
 ### License
 

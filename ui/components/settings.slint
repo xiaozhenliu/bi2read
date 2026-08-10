@@ -438,16 +438,30 @@ export component SettingsModal inherits Rectangle {
                                 color: Theme.text-muted;
                                 font-size: Theme.font-caption;
                             }
-                            PathEdit {
-                                label: "FunASR Runtime 项目目录";
-                                value: root.draft.runtime-project;
-                                can-reset: false;
-                                edited(v) => { root.draft.runtime-project = v; }
-                                choose => {
-                                    let path = root.choose-directory("funasr");
-                                    if (!path.is-empty) { root.draft.runtime-project = path; }
+                            if root.draft.runtime-bundled : VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: "转写引擎";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-caption;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: "内置 FunASR Runtime v1";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-body;
                                 }
                             }
+                            if !root.draft.runtime-bundled : PathEdit {
+                                    label: "FunASR Runtime 项目目录";
+                                    value: root.draft.runtime-project;
+                                    can-reset: false;
+                                    edited(v) => { root.draft.runtime-project = v; }
+                                    choose => {
+                                        let path = root.choose-directory("funasr");
+                                        if (!path.is-empty) { root.draft.runtime-project = path; }
+                                    }
+                                }
                             Text {
                                 text: root.error-field == "funasr"
                                     ? root.error-message
@@ -475,7 +489,7 @@ export component SettingsModal inherits Rectangle {
                             }
                             SecondaryButton {
                                 text: root.saving ? "正在处理…" : "安装或重新验证 Runtime";
-                                disabled: root.saving || root.draft.runtime-project.is-empty;
+                                disabled: root.saving || (!root.draft.runtime-bundled && root.draft.runtime-project.is-empty);
                                 clicked => { root.install-runtime(root.draft); }
                             }
                             NoticeCard {

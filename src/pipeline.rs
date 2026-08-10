@@ -510,8 +510,7 @@ fn stage_transcribe(
     let normalized = dir.join("normalized.wav");
     let log = dir.join("logs").join("funasr.log");
     let project_dir = cfg
-        .runtime_project
-        .clone()
+        .effective_runtime_project()
         .ok_or_else(|| PipelineError::Io("FunASR Runtime 未配置".into()))?;
 
     let utterances = match crate::funasr::run(crate::funasr::TranscribeRequest {

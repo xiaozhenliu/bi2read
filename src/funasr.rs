@@ -11,6 +11,58 @@ pub const RUNTIME_MANIFEST: &str = "bimyscribe-runtime.toml";
 pub const SUPPORTED_CONTRACT_VERSION: u32 = 1;
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
+const BUNDLED_RUNTIME_DIR: &str = "runtime";
+const BUNDLED_UV_RELATIVE: [&str; 2] = ["bin", "uv"];
+
+fn bundled_resources_for_executable(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents")
+        .then(|| contents.join("Resources"))
+}
+
+fn bundled_runtime_for_executable(executable: &Path) -> Option<PathBuf> {
+    let resources = bundled_resources_for_executable(executable)?;
+    let runtime = resources.join(BUNDLED_RUNTIME_DIR);
+    let uv = BUNDLED_UV_RELATIVE
+        .iter()
+        .fold(resources, |path, part| path.join(part));
+    (runtime.join(RUNTIME_MANIFEST).is_file() && uv.is_file()).then_some(runtime)
+}
+
+/// Resolve the Runtime used by the application. An explicit project always
+/// wins; packaged builds fall back to their read-only bundled Runtime.
+pub fn resolve_runtime_project(explicit: Option<&Path>) -> Option<PathBuf> {
+    explicit.map(Path::to_path_buf).or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|executable| bundled_runtime_for_executable(&executable))
+    })
+}
+
+pub fn runtime_is_bundled(explicit: Option<&Path>) -> bool {
+    explicit.is_none() && resolve_runtime_project(None).is_some()
+}
+
+fn uv_executable_for_project(project_dir: &Path) -> PathBuf {
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|executable| bundled_runtime_for_executable(&executable));
+    if bundled.as_deref().is_some_and(|path| {
+        matches!(
+            (path.canonicalize(), project_dir.canonicalize()),
+            (Ok(bundled), Ok(project)) if bundled == project
+        )
+    }) {
+        return project_dir
+            .parent()
+            .expect("bundled Runtime has a Resources parent")
+            .join(BUNDLED_UV_RELATIVE[0])
+            .join(BUNDLED_UV_RELATIVE[1]);
+    }
+    PathBuf::from("uv")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Utterance {
     pub id: String,
@@ -163,9 +215,12 @@ fn install_native_uv(
     log_path: &Path,
 ) -> Result<String, FunasrError> {
     prepare_native_data_dirs(runtime_data)?;
+    let uv = uv_executable_for_project(project_dir)
+        .to_string_lossy()
+        .into_owned();
 
     let version = native_uv_environment(
-        crate::process::SubprocessSpec::new(vec!["uv".into(), "--version".into()]),
+        crate::process::SubprocessSpec::new(vec![uv.clone(), "--version".into()]),
         runtime_data,
     )
     .log(log_path);
@@ -177,7 +232,7 @@ fn install_native_uv(
 
     let sync = native_uv_environment(
         crate::process::SubprocessSpec::new(vec![
-            "uv".into(),
+            uv.clone(),
             "sync".into(),
             "--project".into(),
             project_dir.to_string_lossy().into_owned(),
@@ -201,7 +256,7 @@ fn install_native_uv(
         .expect("validated native entrypoint");
     let check = native_uv_environment(
         crate::process::SubprocessSpec::new(vec![
-            "uv".into(),
+            uv,
             "run".into(),
             "--project".into(),
             project_dir.to_string_lossy().into_owned(),
@@ -267,6 +322,7 @@ fn native_uv_environment(
     .env("UV_CACHE_DIR", runtime_data.join("uv-cache").as_os_str())
     .env("UV_NO_CONFIG", "1")
     .env("UV_PYTHON_PREFERENCE", "only-managed")
+    .env("PYTHONDONTWRITEBYTECODE", "1")
     .env(
         "UV_PYTHON_INSTALL_DIR",
         runtime_data.join("python-installations").as_os_str(),
@@ -494,7 +550,9 @@ fn native_uv_spec(
         .expect("validated native entrypoint");
     native_uv_environment(
         crate::process::SubprocessSpec::new(vec![
-            "uv".into(),
+            uv_executable_for_project(project_dir)
+                .to_string_lossy()
+                .into_owned(),
             "run".into(),
             "--project".into(),
             project_dir.to_string_lossy().into_owned(),
@@ -929,6 +987,46 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             environment.get(std::ffi::OsStr::new("UV_PYTHON_PREFERENCE")),
             Some(&std::ffi::OsString::from("only-managed"))
         );
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("PYTHONDONTWRITEBYTECODE")),
+            Some(&std::ffi::OsString::from("1"))
+        );
+    }
+
+    #[test]
+    fn discovers_complete_runtime_next_to_packaged_executable() {
+        let root = std::env::temp_dir().join(format!(
+            "bimyscribe-packaged-runtime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let executable = root.join("BiMyScribe.app/Contents/MacOS/bimyscribe");
+        let resources = root.join("BiMyScribe.app/Contents/Resources");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(resources.join("runtime")).unwrap();
+        std::fs::create_dir_all(resources.join("bin")).unwrap();
+        std::fs::write(resources.join("runtime").join(RUNTIME_MANIFEST), "fixture").unwrap();
+        std::fs::write(resources.join("bin/uv"), "fixture").unwrap();
+
+        assert_eq!(
+            bundled_runtime_for_executable(&executable),
+            Some(resources.join("runtime"))
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn packaged_runtime_requires_both_manifest_and_uv() {
+        let root = std::env::temp_dir().join(format!(
+            "bimyscribe-incomplete-package-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let executable = root.join("BiMyScribe.app/Contents/MacOS/bimyscribe");
+        let resources = root.join("BiMyScribe.app/Contents/Resources");
+        std::fs::create_dir_all(resources.join("runtime")).unwrap();
+        std::fs::write(resources.join("runtime").join(RUNTIME_MANIFEST), "fixture").unwrap();
+
+        assert_eq!(bundled_runtime_for_executable(&executable), None);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

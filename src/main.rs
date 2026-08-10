@@ -54,6 +54,17 @@ fn parse_ui_fixture_position(value: Option<&str>) -> (i32, i32) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--package-self-check")) {
+        let runtime = bimyscribe::funasr::resolve_runtime_project(None)
+            .ok_or("bundled Runtime or uv is missing")?;
+        let manifest = bimyscribe::funasr::load_runtime(&runtime)?;
+        println!(
+            "BiMyScribe package is ready: {} · contract v{}",
+            manifest.backend.label(),
+            manifest.contract_version
+        );
+        return Ok(());
+    }
     env_logger::init();
 
     let app_paths = bimyscribe::paths::AppPaths::discover()?;
@@ -654,7 +665,7 @@ impl Controller {
             }
             candidate
         };
-        let Some(project_dir) = candidate.runtime_project.clone() else {
+        let Some(project_dir) = candidate.effective_runtime_project() else {
             app.set_settings_feedback("请先选择 Runtime 项目目录".into());
             return;
         };
@@ -698,8 +709,8 @@ impl Controller {
         }
         let runtime_ready = {
             let config = self.config.lock().unwrap();
-            config.runtime_project.as_deref().is_some_and(|project| {
-                bimyscribe::funasr::runtime_is_ready(project, &config.runtime_data_dir)
+            config.effective_runtime_project().is_some_and(|project| {
+                bimyscribe::funasr::runtime_is_ready(&project, &config.runtime_data_dir)
             })
         };
         if !runtime_ready {

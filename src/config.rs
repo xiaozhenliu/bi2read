@@ -58,6 +58,10 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn effective_runtime_project(&self) -> Option<PathBuf> {
+        crate::funasr::resolve_runtime_project(self.runtime_project.as_deref())
+    }
+
     pub fn for_paths(paths: &AppPaths) -> Self {
         Self {
             working_dir: paths.jobs_dir(),
@@ -141,6 +145,8 @@ impl Config {
     // ---- Conversions to/from the Slint SettingsView ----
 
     pub fn to_view(&self) -> crate::SettingsView {
+        let effective_runtime = self.effective_runtime_project();
+        let runtime_bundled = crate::funasr::runtime_is_bundled(self.runtime_project.as_deref());
         let conn = self.llm_connection.as_ref();
         let (base_url, api_format, model, name) = match conn {
             Some(c) => (
@@ -162,14 +168,13 @@ impl Config {
         crate::SettingsView {
             working_dir: self.working_dir.to_string_lossy().to_string().into(),
             output_dir: self.output_dir.to_string_lossy().to_string().into(),
-            runtime_project: self
-                .runtime_project
+            runtime_project: effective_runtime
                 .as_deref()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default()
                 .into(),
-            funasr_status: self
-                .runtime_project
+            runtime_bundled,
+            funasr_status: effective_runtime
                 .as_deref()
                 .map(|project| crate::funasr::runtime_status(project, &self.runtime_data_dir))
                 .unwrap_or_else(|| "未配置".into())
@@ -200,7 +205,13 @@ impl Config {
             "Runtime 数据目录",
         )?;
         let runtime_project = s.runtime_project.to_string();
-        self.runtime_project = if runtime_project.trim().is_empty() {
+        self.runtime_project = if s.runtime_bundled {
+            let bundled = crate::funasr::resolve_runtime_project(None)
+                .ok_or_else(|| "内置 FunASR Runtime 不可用".to_string())?;
+            crate::funasr::load_runtime(&bundled)
+                .map_err(|error| format!("内置 FunASR Runtime：{error}"))?;
+            None
+        } else if runtime_project.trim().is_empty() {
             None
         } else {
             let runtime =

@@ -1,55 +1,47 @@
-# BiMyScribe v0.1.0
+# BiMyScribe v0.2.0
 
-Initial open-source release candidate.
+本版本加入可复现的 macOS 本机构建流程。用户无需 Apple Developer 会员，即可从
+源码生成适合当前机器自用的 ad-hoc 签名 `BiMyScribe.app`。
 
-BiMyScribe is a lightweight local desktop application that turns Bilibili
-videos into readable Markdown transcripts. It runs the media-processing and
-speech-recognition pipeline locally and preserves speaker information produced
-by FunASR.
+## 主要变化
 
-## Highlights
+- 新增 `scripts/build-macos-local.sh`，一条命令下载固定版本依赖、构建并签名 App。
+- App 内置 FunASR Runtime v1.0.0 与 uv 0.11.23，并自动发现内置 Runtime。
+- 自定义原生 Runtime 与 Docker Runtime 仍可在设置中选择，并优先于内置 Runtime。
+- Python 环境、模型和缓存继续保存在可配置的 Runtime 数据目录，不写入 App 包。
+- 支持通过环境变量选择 Developer ID；脚本也会在签名前提供交互提示。
 
-- Add videos using Bilibili URLs, BV IDs, AV IDs, or `b23.tv` short links.
-- Process multi-part videos through a persistent task queue.
-- Download audio and normalize it to 16 kHz mono WAV with FFmpeg.
-- Transcribe locally through a versioned FunASR Runtime with speaker separation.
-- Preserve detected speaker labels and rename speakers from the desktop UI.
-- Rebuild Markdown after speaker renaming without running transcription again.
-- Generate raw transcripts and readable Markdown with clickable Bilibili
-  timestamp links.
-- Recover queued and interrupted work after restarting the application.
-- Cancel active download, FFmpeg, and transcription subprocesses.
-- Optionally refine readable output through a local, unauthenticated
-  OpenAI-compatible LLM endpoint such as Ollama.
-- Keep working output on a configured external drive with selectable retention
-  policies.
+## 安装
 
-## Requirements
-
-- macOS
-- Rust 1.92 or newer when building from source
-- FFmpeg available on `PATH`
-- uv for the default native Runtime, or Docker Desktop for the optional Docker backend
-- [BiMyScribe FunASR Runtime v1.0.0](https://github.com/xiaozhenliu/bimyscribe-funasr-runtime/releases/tag/v1.0.0)
-- A writable location for task data and Markdown output. Platform defaults are
-  used automatically and can be changed in Settings.
-- Several gigabytes for the Runtime environment and models; this directory can
-  be placed on an external drive.
-
-## Known limitations
-
-- No packaged `.app` bundle is provided yet; run the application with Cargo.
-- A second application instance exits without modifying persisted state.
-- Screenshot extraction is currently skipped.
-- Bilibili access is anonymous; videos requiring authentication are not
-  supported.
-- Remote LLM endpoints requiring authentication are not supported.
-- FunASR setup and model assets are not bundled with the application.
-
-## Build and run
+本 Release 不提供官方签名并经 Apple 公证的 DMG。请在 Apple Silicon Mac 上从
+源码运行：
 
 ```bash
-cargo run --release
+scripts/build-macos-local.sh
 ```
 
-This release is licensed under the MIT License.
+直接回车可使用免费的 ad-hoc 签名。生成的 App 适合在构建它的 Mac 上自用，不应
+作为面向其他用户的 Release 安装包。FFmpeg 仍需单独安装并位于 `PATH`。
+
+## 兼容性与升级
+
+- 当前仅支持 Apple Silicon macOS。
+- 已有设置、任务数据和 Markdown 输出不会因升级而删除。
+- Runtime 指纹变化时，应用可能要求重新安装或验证 Runtime。
+- Docker 仍是可选后端，不是运行本机构建 App 的必要条件。
+
+## English
+
+BiMyScribe v0.2.0 adds a reproducible local macOS app build. The new
+`scripts/build-macos-local.sh` command downloads pinned Runtime v1.0.0 and uv
+0.11.23 releases, assembles `BiMyScribe.app`, and prompts for signing. Press
+Enter for free ad-hoc signing suitable for use on the Mac that built the app.
+
+The app automatically discovers its bundled Runtime. Python environments,
+models, and caches remain in the configurable Runtime Data directory. Custom
+native and Docker runtimes are still supported and take precedence when set.
+
+This source release does not include an officially signed and Apple-notarized
+DMG. Apple Silicon macOS and FFmpeg on `PATH` are currently required.
+
+BiMyScribe is licensed under the MIT License.
