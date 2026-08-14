@@ -44,7 +44,7 @@ PY
 
 issue=""; build_root=""; runtime_repo=""; app=""; dmg=""; sha_file=""
 repo_slug=""; tag=""; public_revision=""; private_revision=""; download_dir=""; candidate="private"
-release_check_root=""; e2e_evidence=""; protected_paths=(); frozen_sha256=""; approval_file=""
+release_check_root=""; e2e_evidence=""; protected_paths=(); authorized_actions=(); frozen_sha256=""; approval_file=""
 runtime_evidence=""
 publicignore=""
 evidence_out=""; private_source_evidence=""; public_source_evidence=""; runtime_gate_evidence=""; app_evidence=""; dmg_evidence=""
@@ -67,6 +67,7 @@ while [ "$#" -gt 0 ]; do
         --release-check-root) release_check_root=${2:?}; shift 2 ;;
         --e2e-evidence) e2e_evidence=${2:?}; shift 2 ;;
         --protected-path) protected_paths+=("${2:?}"); shift 2 ;;
+        --authorized-action) authorized_actions+=("${2:?}"); shift 2 ;;
         --frozen-sha256) frozen_sha256=${2:?}; shift 2 ;;
         --approval-file) approval_file=${2:?}; shift 2 ;;
         --runtime-evidence) runtime_evidence=${2:?}; shift 2 ;;
@@ -422,16 +423,27 @@ PY
 approve)
     [ -n "$issue" ] && [ -f "$issue" ] || fail "release issue" "${issue:-missing}" "pass --issue"
     issue_value() { sed -n "s/^$1:[[:space:]]*//p" "$issue" | head -n 1; }
+    if [ "${#authorized_actions[@]}" -gt 0 ]; then
+        for action in "${authorized_actions[@]}"; do
+            case "$action" in tag|push|release) ;; *) fail "authorized action tag, push or release" "$action" "remove the unknown authorization" ;; esac
+        done
+    fi
+    for action in tag push release; do
+        action_found=false
+        if [ "${#authorized_actions[@]}" -gt 0 ]; then
+            for supplied_action in "${authorized_actions[@]}"; do
+                [ "$supplied_action" = "$action" ] && action_found=true
+            done
+        fi
+        [ "$action_found" = true ] || fail "explicit authorization for $action" missing "pass --authorized-action $action after user approval"
+    done
+    authorized_joined=$(IFS=,; printf '%s' "${authorized_actions[*]-}")
     if [ "$distribution_mode" = source-only ]; then
         [ -n "$evidence_out" ] || fail "approval evidence output" missing "pass --evidence-out"
         case "$evidence_out" in /*) ;; *) fail "absolute approval evidence output" "$evidence_out" "use an approved absolute evidence path" ;; esac
         [ ! -e "$evidence_out" ] || fail "nonexistent approval evidence output" exists "choose a new path"
         for evidence in "$private_source_evidence" "$public_source_evidence" "$runtime_gate_evidence"; do
             [ -n "$evidence" ] && [ -f "$evidence" ] || fail "private/public/runtime evidence files" "${evidence:-missing}" "pass every source-only stage evidence path"
-        done
-        authorized=$(issue_value AUTHORIZED_ACTIONS)
-        for action in tag push release; do
-            printf '%s' "$authorized" | rg -q "(^|,)[[:space:]]*$action([[:space:]]*,|$)" || fail "authorization for $action" "$authorized" "obtain explicit publication authorization"
         done
         [ -n "$private_revision" ] || fail "source private revision" missing "pass --private-revision from private source evidence"
         printf '%s' "$private_revision" | rg -q '^[0-9a-f]{40}$' || fail "full private revision" "$private_revision" "pass the frozen private candidate SHA"
@@ -454,13 +466,14 @@ PY
             "$expected_public_revision" "$private_revision" "$config_sha256" \
             "$(shasum -a 256 "$private_source_evidence" | awk '{print $1}')" \
             "$(shasum -a 256 "$public_source_evidence" | awk '{print $1}')" \
-            "$(shasum -a 256 "$runtime_gate_evidence" | awk '{print $1}')" <<'PY'
+            "$(shasum -a 256 "$runtime_gate_evidence" | awk '{print $1}')" "$authorized_joined" <<'PY'
 import json, sys
 path=sys.argv[1]
 data={"distribution_mode":"source-only","app_version":sys.argv[2],"build_number":int(sys.argv[3]),
       "runtime_tag":sys.argv[4],"runtime_revision":sys.argv[5],"public_revision":sys.argv[6],
       "private_revision":sys.argv[7],"release_config_sha256":sys.argv[8],
-      "evidence_sha256":{"private_source":sys.argv[9],"public_source":sys.argv[10],"runtime":sys.argv[11]}}
+      "evidence_sha256":{"private_source":sys.argv[9],"public_source":sys.argv[10],"runtime":sys.argv[11]},
+      "authorized_actions":sys.argv[12].split(",")}
 with open(path,"x",encoding="utf-8") as handle: json.dump(data,handle,sort_keys=True); handle.write("\n")
 print(json.dumps(data,sort_keys=True))
 PY
@@ -480,10 +493,6 @@ PY
         [ "$actual_status" = passed ] || fail "STEP_${number}_STATUS=passed" "${actual_status:-missing}" "complete the earliest missing release gate"
     done
     [ "$(issue_value UNEXPLAINED_SKIPS)" = none ] || fail "UNEXPLAINED_SKIPS=none" "$(issue_value UNEXPLAINED_SKIPS)" "resolve every skipped gate"
-    authorized=$(issue_value AUTHORIZED_ACTIONS)
-    for action in tag push release; do
-        printf '%s' "$authorized" | rg -q "(^|,)[[:space:]]*$action([[:space:]]*,|$)" || fail "authorization for $action" "$authorized" "obtain explicit Step 12 authorization"
-    done
     actual_sha=$(shasum -a 256 "$dmg" | awk '{print $1}')
     [ "$(issue_value DMG_SHA256)" = "$actual_sha" ] || fail "recorded DMG SHA-256 $actual_sha" "$(issue_value DMG_SHA256)" "freeze the DMG and update the issue"
     e2e_sha=$(shasum -a 256 "$e2e_evidence" | awk '{print $1}')
@@ -516,7 +525,7 @@ PY
         "$expected_private_revision" "$config_sha256" "$(shasum -a 256 "$private_source_evidence" | awk '{print $1}')" \
         "$(shasum -a 256 "$public_source_evidence" | awk '{print $1}')" "$(shasum -a 256 "$runtime_gate_evidence" | awk '{print $1}')" \
         "$(shasum -a 256 "$app_evidence" | awk '{print $1}')" "$(shasum -a 256 "$dmg_evidence" | awk '{print $1}')" "$approval_protected_paths" \
-        "$(shasum -a 256 "$signing_evidence" | awk '{print $1}')" <<'PY'
+        "$(shasum -a 256 "$signing_evidence" | awk '{print $1}')" "$authorized_joined" <<'PY'
 import json, sys
 path=sys.argv[1]
 keys=("app_version","build_number","runtime_tag","runtime_revision","dmg_sha256","dmg_size","public_revision")
@@ -525,6 +534,7 @@ data["private_revision"]=sys.argv[9]; data["release_config_sha256"]=sys.argv[10]
 data["evidence_sha256"]={key:value for key,value in zip(("private_source","public_source","runtime","app","dmg"),sys.argv[11:16])}
 data["protected_paths"]=sys.argv[16]
 data["signing_evidence_sha256"]=sys.argv[17]
+data["authorized_actions"]=sys.argv[18].split(",")
 with open(path,"x",encoding="utf-8") as handle: json.dump(data,handle,sort_keys=True); handle.write("\n")
 print(json.dumps(data,sort_keys=True))
 PY
@@ -547,6 +557,7 @@ expected={"distribution_mode":"source-only","app_version":sys.argv[2],"build_num
           "runtime_tag":sys.argv[4],"runtime_revision":sys.argv[5],"public_revision":sys.argv[6],
           "private_revision":sys.argv[7],"release_config_sha256":sys.argv[8]}
 assert all(data.get(k)==v for k,v in expected.items())
+assert set(data.get("authorized_actions",[]))=={"tag","push","release"}
 paths=sys.argv[9:12]; names=("private_source","public_source","runtime")
 assert data.get("evidence_sha256")=={n:hashlib.sha256(open(p,"rb").read()).hexdigest() for n,p in zip(names,paths)}
 PY
@@ -595,6 +606,7 @@ expected={"app_version":sys.argv[2],"build_number":int(sys.argv[3]),"runtime_tag
           "runtime_revision":sys.argv[5],"dmg_sha256":sys.argv[6],"public_revision":sys.argv[7],"private_revision":sys.argv[9]}
 assert all(data.get(k)==v for k,v in expected.items())
 assert data.get("release_config_sha256")==sys.argv[8]
+assert set(data.get("authorized_actions",[]))=={"tag","push","release"}
 paths=sys.argv[10:15]; names=("private_source","public_source","runtime","app","dmg")
 actual={name:hashlib.sha256(open(path,"rb").read()).hexdigest() for name,path in zip(names,paths)}
 assert data.get("evidence_sha256")==actual
