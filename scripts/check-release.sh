@@ -85,6 +85,8 @@ done
 
 [ -f "$config" ] || fail "release config" missing "create packaging/release.toml"
 app_version=$(sed -n '/^\[package\]/,/^\[/{s/^version = "\([^"]*\)"/\1/p;}' "$repo_root/Cargo.toml" | head -n 1)
+distribution_mode=$(value distribution_mode) || fail "distribution_mode" missing "update packaging/release.toml"
+case "$distribution_mode" in source-only|notarized-dmg) ;; *) fail "source-only or notarized-dmg distribution" "$distribution_mode" "fix packaging/release.toml" ;; esac
 build_number=$(value build_number) || fail "build_number" missing "update packaging/release.toml"
 previous_build_number=$(value previous_build_number) || fail "previous_build_number" missing "update packaging/release.toml"
 runtime_tag=$(value runtime_tag) || fail "runtime_tag" missing "update packaging/release.toml"
@@ -135,7 +137,7 @@ PY
     done
     cmp -s "$repo_root/RELEASE_NOTES.md" "$repo_root/$notes_path" || fail "RELEASE_NOTES.md byte-identical to $notes_path" different "regenerate the compatibility file from versioned notes"
     rg -q "## $app_version" "$repo_root/CHANGELOG.md" || fail "Changelog entry $app_version" missing "update CHANGELOG.md"
-    for key in APP_VERSION BUILD_NUMBER PREVIOUS_RELEASE PREVIOUS_PRIVATE_REVISION PREVIOUS_BUILD_NUMBER CHANGE_CLASSIFICATION SEMVER_IMPACT RUNTIME_TAG RUNTIME_REVISION UV_VERSION TARGET_PLATFORM TARGET_ARCH RELEASE_NOTES_PATH BUILD_ROOT AUTHORIZED_ACTIONS; do
+    for key in DISTRIBUTION_MODE APP_VERSION BUILD_NUMBER PREVIOUS_RELEASE PREVIOUS_PRIVATE_REVISION PREVIOUS_BUILD_NUMBER CHANGE_CLASSIFICATION SEMVER_IMPACT RUNTIME_TAG RUNTIME_REVISION UV_VERSION TARGET_PLATFORM TARGET_ARCH RELEASE_NOTES_PATH BUILD_ROOT AUTHORIZED_ACTIONS; do
         rg -q "^$key:" "$issue" || fail "release issue field $key" missing "record all frozen inputs in the release issue"
     done
     issue_value() { sed -n "s/^$1:[[:space:]]*//p" "$issue" | head -n 1; }
@@ -153,7 +155,7 @@ PY
         expected_private_revision=$private_revision
     fi
     for pair in \
-        "APP_VERSION:$app_version" "BUILD_NUMBER:$build_number" "PREVIOUS_BUILD_NUMBER:$previous_build_number" \
+        "DISTRIBUTION_MODE:$distribution_mode" "APP_VERSION:$app_version" "BUILD_NUMBER:$build_number" "PREVIOUS_BUILD_NUMBER:$previous_build_number" \
         "RUNTIME_TAG:$runtime_tag" "RUNTIME_REVISION:$runtime_revision" \
         "UV_VERSION:$uv_version" "TARGET_PLATFORM:$target_platform" \
         "TARGET_ARCH:$target_arch" "RELEASE_NOTES_PATH:$notes_path" "BUILD_ROOT:$build_root"; do
@@ -419,6 +421,51 @@ PY
     ;;
 approve)
     [ -n "$issue" ] && [ -f "$issue" ] || fail "release issue" "${issue:-missing}" "pass --issue"
+    issue_value() { sed -n "s/^$1:[[:space:]]*//p" "$issue" | head -n 1; }
+    if [ "$distribution_mode" = source-only ]; then
+        [ -n "$evidence_out" ] || fail "approval evidence output" missing "pass --evidence-out"
+        case "$evidence_out" in /*) ;; *) fail "absolute approval evidence output" "$evidence_out" "use an approved absolute evidence path" ;; esac
+        [ ! -e "$evidence_out" ] || fail "nonexistent approval evidence output" exists "choose a new path"
+        for evidence in "$private_source_evidence" "$public_source_evidence" "$runtime_gate_evidence"; do
+            [ -n "$evidence" ] && [ -f "$evidence" ] || fail "private/public/runtime evidence files" "${evidence:-missing}" "pass every source-only stage evidence path"
+        done
+        authorized=$(issue_value AUTHORIZED_ACTIONS)
+        for action in tag push release; do
+            printf '%s' "$authorized" | rg -q "(^|,)[[:space:]]*$action([[:space:]]*,|$)" || fail "authorization for $action" "$authorized" "obtain explicit publication authorization"
+        done
+        [ -n "$private_revision" ] || fail "source private revision" missing "pass --private-revision from private source evidence"
+        printf '%s' "$private_revision" | rg -q '^[0-9a-f]{40}$' || fail "full private revision" "$private_revision" "pass the frozen private candidate SHA"
+        expected_public_revision=$(git -C "$repo_root" rev-parse HEAD)
+        python3 - "$private_source_evidence" "$public_source_evidence" "$runtime_gate_evidence" \
+            "$config_sha256" "$private_revision" "$expected_public_revision" <<'PY' || fail "source-only evidence chain" mismatch "rerun the earliest invalidated gate"
+import json, sys
+items=[]
+for path in sys.argv[1:4]:
+    with open(path,encoding="utf-8") as handle: items.append(json.load(handle))
+config_sha,private_rev,public_rev=sys.argv[4:]
+assert [x.get("stage") for x in items]==["source","source","runtime"]
+assert items[0].get("candidate")=="private" and items[0].get("repository_revision")==private_rev
+assert items[1].get("candidate")=="public" and items[1].get("repository_revision")==public_rev
+assert items[1].get("private_revision")==private_rev
+assert all(x.get("status")=="passed" and x.get("inputs",{}).get("release_config_sha256")==config_sha for x in items)
+PY
+        mkdir -p "$(dirname "$evidence_out")"
+        python3 - "$evidence_out" "$app_version" "$build_number" "$runtime_tag" "$runtime_revision" \
+            "$expected_public_revision" "$private_revision" "$config_sha256" \
+            "$(shasum -a 256 "$private_source_evidence" | awk '{print $1}')" \
+            "$(shasum -a 256 "$public_source_evidence" | awk '{print $1}')" \
+            "$(shasum -a 256 "$runtime_gate_evidence" | awk '{print $1}')" <<'PY'
+import json, sys
+path=sys.argv[1]
+data={"distribution_mode":"source-only","app_version":sys.argv[2],"build_number":int(sys.argv[3]),
+      "runtime_tag":sys.argv[4],"runtime_revision":sys.argv[5],"public_revision":sys.argv[6],
+      "private_revision":sys.argv[7],"release_config_sha256":sys.argv[8],
+      "evidence_sha256":{"private_source":sys.argv[9],"public_source":sys.argv[10],"runtime":sys.argv[11]}}
+with open(path,"x",encoding="utf-8") as handle: json.dump(data,handle,sort_keys=True); handle.write("\n")
+print(json.dumps(data,sort_keys=True))
+PY
+        exit 0
+    fi
     [ -n "$dmg" ] && [ -f "$dmg" ] || fail "frozen DMG" "${dmg:-missing}" "pass --dmg"
     [ -n "$e2e_evidence" ] && [ -f "$e2e_evidence" ] || fail "final E2E evidence" "${e2e_evidence:-missing}" "pass --e2e-evidence"
     [ -n "$signing_evidence" ] && [ -f "$signing_evidence" ] || fail "signing/notarization evidence" "${signing_evidence:-missing}" "pass --signing-evidence"
@@ -428,7 +475,6 @@ approve)
     for evidence in "$private_source_evidence" "$public_source_evidence" "$runtime_gate_evidence" "$app_evidence" "$dmg_evidence"; do
         [ -n "$evidence" ] && [ -f "$evidence" ] || fail "all source/runtime/app/dmg evidence files" "${evidence:-missing}" "pass every stage evidence path"
     done
-    issue_value() { sed -n "s/^$1:[[:space:]]*//p" "$issue" | head -n 1; }
     for number in $(seq 0 11); do
         actual_status=$(issue_value "STEP_${number}_STATUS")
         [ "$actual_status" = passed ] || fail "STEP_${number}_STATUS=passed" "${actual_status:-missing}" "complete the earliest missing release gate"
@@ -486,6 +532,50 @@ PY
 published)
     [ -n "$repo_slug" ] && [ -n "$tag" ] && [ -n "$public_revision" ] && [ -n "$download_dir" ] || fail "repo, tag, public revision and download dir" missing "pass all published-stage inputs"
     [ -n "$approval_file" ] && [ -f "$approval_file" ] || fail "Step 12 approval result" "${approval_file:-missing}" "run approve and save its JSON output"
+    if [ "$distribution_mode" = source-only ]; then
+        [ -n "$issue" ] && [ -f "$issue" ] || fail "release issue" "${issue:-missing}" "pass --issue"
+        [ -n "$private_revision" ] || fail "source private revision" missing "pass --private-revision from approved evidence"
+        for evidence in "$private_source_evidence" "$public_source_evidence" "$runtime_gate_evidence"; do
+            [ -n "$evidence" ] && [ -f "$evidence" ] || fail "approved source-only evidence files" "${evidence:-missing}" "pass the exact approval evidence paths"
+        done
+        python3 - "$approval_file" "$app_version" "$build_number" "$runtime_tag" "$runtime_revision" \
+            "$public_revision" "$private_revision" "$config_sha256" "$private_source_evidence" \
+            "$public_source_evidence" "$runtime_gate_evidence" <<'PY' || fail "source-only approval matching published inputs" mismatch "return to approval"
+import hashlib, json, sys
+with open(sys.argv[1],encoding="utf-8") as handle: data=json.load(handle)
+expected={"distribution_mode":"source-only","app_version":sys.argv[2],"build_number":int(sys.argv[3]),
+          "runtime_tag":sys.argv[4],"runtime_revision":sys.argv[5],"public_revision":sys.argv[6],
+          "private_revision":sys.argv[7],"release_config_sha256":sys.argv[8]}
+assert all(data.get(k)==v for k,v in expected.items())
+paths=sys.argv[9:12]; names=("private_source","public_source","runtime")
+assert data.get("evidence_sha256")=={n:hashlib.sha256(open(p,"rb").read()).hexdigest() for n,p in zip(names,paths)}
+PY
+        case "$download_dir" in /*) ;; *) fail "absolute fresh download dir" "$download_dir" "choose a new absolute directory" ;; esac
+        [ ! -e "$download_dir" ] || fail "nonexistent download directory" exists "choose a fresh path"
+        release_json=$(curl --fail --silent --show-error -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$repo_slug/releases/tags/$tag" 2>/dev/null || true)
+        [ -n "$release_json" ] || fail "public Release API" unavailable "publish the GitHub Release"
+        remote_revision=$(git ls-remote "https://github.com/$repo_slug.git" "refs/tags/$tag^{}" 2>/dev/null | awk 'NR==1 {print $1}')
+        [ "$remote_revision" = "$public_revision" ] || fail "annotated tag at $public_revision" "${remote_revision:-missing-or-lightweight}" "publish the immutable annotated tag"
+        published_title=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))' <<<"$release_json")
+        [ "$published_title" = "BiMyScribe v$app_version" ] || fail "BiMyScribe v$app_version" "$published_title" "correct the Release title"
+        published_body=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("body", ""), end="")' <<<"$release_json")
+        [ "$published_body" = "$(cat "$repo_root/$notes_path")" ] || fail "versioned Release Notes body" different "create the Release from $notes_path"
+        asset_count=$(python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("assets", [])))' <<<"$release_json")
+        [ "$asset_count" = 0 ] || fail "source-only Release without binary assets" "$asset_count assets" "remove binary assets or publish a new corrective release"
+        mkdir -p "$download_dir/source"
+        curl --fail --location --silent --show-error --output "$download_dir/public-source.tar.gz" \
+            "https://github.com/$repo_slug/archive/refs/tags/$tag.tar.gz" || fail "anonymous public source snapshot" unavailable "fix public tag access"
+        tar -xzf "$download_dir/public-source.tar.gz" --strip-components=1 -C "$download_dir/source"
+        for path in README.md CHANGELOG.md "$notes_path" scripts/build-macos-local.sh; do
+            [ -f "$download_dir/source/$path" ] || fail "tagged source file $path" missing "publish the complete source snapshot"
+        done
+        rg -q 'ad-hoc' "$download_dir/source/README.md" || fail "README ad-hoc build guidance" missing "document community self-signing"
+        write_evidence "distribution_mode=source-only" "public_revision=$public_revision" \
+            "source_archive_sha256=$(shasum -a 256 "$download_dir/public-source.tar.gz" | awk '{print $1}')"
+        pass "annotated tag, source-only Release, public docs and anonymous source archive"
+        exit 0
+    fi
     [ -n "$frozen_sha256" ] || fail "pre-publication frozen SHA-256" missing "pass --frozen-sha256 from Step 12"
     [ -n "$release_check_root" ] && [ -n "$e2e_evidence" ] || fail "fresh published-check root and evidence path" missing "pass post-download verification paths"
     [ -n "$postdownload_dmg_evidence" ] || fail "post-download DMG evidence path" missing "pass --postdownload-dmg-evidence"

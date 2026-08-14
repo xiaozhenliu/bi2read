@@ -1,5 +1,6 @@
 # Persistent inputs for the next macOS public package. App version is read only
 # from Cargo.toml. Changes to these values invalidate downstream evidence.
+distribution_mode = "source-only"
 build_number = 6
 previous_build_number = 5
 runtime_tag = "v1.0.0"
