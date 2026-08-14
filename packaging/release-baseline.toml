@@ -1,0 +1,10 @@
+# One-time migration baseline for the last package created before release.toml
+# existed. Later releases read their historical inputs from their committed
+# packaging/release.toml instead.
+release = "v0.2.1"
+private_revision = "62e1afd72dcfc3a6329db10f4b8204c06b02fbaa"
+app_version = "0.2.1"
+build_number = 5
+runtime_tag = "v1.0.0"
+runtime_revision = "01981341107400bf73f8c1fd97fb4e8abf6a7990"
+

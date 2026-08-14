@@ -1,6 +1,6 @@
 [package]
 name = "bimyscribe"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.92"
 description = "Lightweight local app to transcribe Bilibili videos via FunASR"
@@ -19,6 +19,7 @@ thiserror = "1"
 log = "0.4"
 env_logger = "0.11"
 fs2 = "0.4"
+clap = { version = "4", features = ["derive"] }
 # Synchronous, lightweight HTTP client (no async runtime) for anonymous Bilibili
 # API calls and optional LLM requests.
 ureq = { version = "2", features = ["tls"] }

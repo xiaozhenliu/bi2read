@@ -1,0 +1,18 @@
+# Persistent inputs for the next macOS public package. App version is read only
+# from Cargo.toml. Changes to these values invalidate downstream evidence.
+build_number = 6
+previous_build_number = 5
+runtime_tag = "v1.0.0"
+runtime_revision = "01981341107400bf73f8c1fd97fb4e8abf6a7990"
+runtime_contract = 1
+uv_version = "0.11.23"
+target_platform = "macos"
+target_arch = "arm64"
+release_notes_path = "docs/releases/v0.2.2.md"
+
+[fixture]
+url = "https://www.bilibili.com/video/BV1GJ411x7h7"
+bvid = "BV1GJ411x7h7"
+page = 1
+minimum_utterances = 1
+maximum_duration_ms = 7200000

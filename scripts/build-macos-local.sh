@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-runtime_tag="${BIMYSCRIBE_RUNTIME_TAG:-v1.0.0}"
-uv_version="${BIMYSCRIBE_UV_VERSION:-0.11.23}"
 repo_root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+release_values=$(python3 - "$repo_root/packaging/release.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as handle: data = tomllib.load(handle)
+print(data["runtime_tag"]); print(data["uv_version"])
+PY
+)
+runtime_tag=$(printf '%s\n' "$release_values" | sed -n '1p')
+uv_version=$(printf '%s\n' "$release_values" | sed -n '2p')
 build_root="${BIMYSCRIBE_BUILD_ROOT:-$repo_root/target/macos-local}"
 
 case "$build_root" in /*) ;; *) printf 'BIMYSCRIBE_BUILD_ROOT must be absolute.\n' >&2; exit 2 ;; esac
@@ -54,13 +60,11 @@ if [ ! -x "$uv_bin" ]; then
 fi
 
 export CARGO_TARGET_DIR="$build_root/cargo-target"
-export BIMYSCRIBE_RUNTIME_TAG="$runtime_tag"
-export BIMYSCRIBE_UV_VERSION="$uv_version"
 "$repo_root/scripts/package-macos-app.sh" \
     --output-dir "$output_dir" \
     --runtime-repo "$runtime_repo" \
     --uv-bin "$uv_bin" \
-    --build-number "${BIMYSCRIBE_BUILD_NUMBER:-1}"
+    --private-revision "$(git -C "$repo_root" rev-parse HEAD)"
 
 identity="${BIMYSCRIBE_SIGN_IDENTITY:-}"
 if [ -z "$identity" ] && [ -t 0 ]; then
@@ -80,6 +84,7 @@ fi
 
 codesign "${sign_args[@]}" "$app/Contents/Resources/bin/uv"
 codesign "${sign_args[@]}" "$app/Contents/MacOS/bimyscribe"
+"$repo_root/scripts/finalize-release-manifest.sh" "$app"
 codesign "${sign_args[@]}" \
     --entitlements "$repo_root/packaging/macos/entitlements.plist" \
     "$app"

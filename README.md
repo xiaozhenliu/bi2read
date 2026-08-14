@@ -30,6 +30,8 @@ Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器�
 
 ## 安装与启动
 
+当前源码版本为 **v0.2.2**；完整中英文变化、兼容性与限制见 [`docs/releases/v0.2.2.md`](docs/releases/v0.2.2.md)。
+
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
 cd bimyscribe
@@ -66,6 +68,39 @@ BIMYSCRIBE_BUILD_ROOT=/absolute/path/to/build scripts/build-macos-local.sh
 如需使用自己的 Developer ID，在运行前设置
 `BIMYSCRIBE_SIGN_IDENTITY='Developer ID Application: …'`。Developer ID 签名
 之后仍需 Apple 公证才能安全地对外分发；ad-hoc 签名包不应作为公开 Release。
+
+### 通过终端转录
+
+App 内的同一个可执行文件也提供无界面命令。以下示例先用完整路径；如果已将 App
+放入 `/Applications`，可以按实际位置修改：
+
+```bash
+CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
+"$CLI" --help
+"$CLI" transcribe 'https://www.bilibili.com/video/BV...'
+```
+
+命令会读取与桌面界面相同的设置，等待下载、转码、转录和文档生成全部完成，然后
+在标准输出中返回最终 `full.md` 的路径。首次使用前可在桌面界面安装 Runtime，也
+可以完全通过终端完成：
+
+```bash
+"$CLI" runtime status
+"$CLI" runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime
+```
+
+需要把大文件明确放到外挂盘，或让 Agent 读取结构化结果时，可以运行：
+
+```bash
+"$CLI" transcribe 'BV...' \
+  --work-dir /Volumes/Data/BiMyScribe-Jobs \
+  --output-dir /Volumes/Data/BiMyScribe-Markdown \
+  --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime \
+  --json
+```
+
+使用 `"$CLI" <命令> --help` 可查看每个命令的完整参数。CLI 和桌面界面共享任务
+状态及单实例锁；运行终端任务前请退出桌面 App，同一时间只运行一个实例。
 
 ## 首次配置
 
@@ -114,6 +149,10 @@ BIMYSCRIBE_BUILD_ROOT=/absolute/path/to/build scripts/build-macos-local.sh
 - 截图提取功能尚未开放。
 - FFmpeg 仍需单独安装；自构建 App 已内置 Runtime 与 uv，Docker 只用于可选后端。
 
+## 产品与设计文档
+
+- [界面设计规范](docs/design/bimyscribe-design-spec.md)
+
 ## 许可证
 
 [MIT License](LICENSE)
@@ -151,6 +190,8 @@ Docker runtime.
 
 ### Install and run
 
+The current source version is **v0.2.2**. See [`docs/releases/v0.2.2.md`](docs/releases/v0.2.2.md) for bilingual changes, compatibility notes, and limitations.
+
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
 cd bimyscribe
@@ -182,6 +223,31 @@ the same Mac. The app is written to
 To use your own Developer ID, set `BIMYSCRIBE_SIGN_IDENTITY` before running the
 script. Developer ID builds still require Apple notarization before public
 distribution. Do not publish the ad-hoc signed build as a Release asset.
+
+### Transcribe from the terminal
+
+The executable inside the app also provides a non-interactive CLI:
+
+```bash
+CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
+"$CLI" --help
+"$CLI" transcribe 'https://www.bilibili.com/video/BV...'
+```
+
+It uses the same saved settings as the desktop app, waits for the production
+pipeline to finish, and prints the final `full.md` path. Runtime setup is also
+available without opening the GUI:
+
+```bash
+"$CLI" runtime status
+"$CLI" runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime
+```
+
+Use `--work-dir`, `--output-dir`, and `--runtime-data-dir` to keep large data on
+another disk. Add `--json` for machine-readable output. Run
+`"$CLI" <command> --help` for all options. The CLI and desktop app share state
+and a single-instance lock, so quit the desktop app before starting a terminal
+job.
 
 ### First-time setup
 
@@ -217,6 +283,10 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document.
 - Screenshot extraction is not available yet.
 - FFmpeg must still be installed separately. Locally built apps bundle Runtime
   and uv; Docker remains optional.
+
+### Product and design documents
+
+- [UI design specification (Chinese)](docs/design/bimyscribe-design-spec.md)
 
 ### License
 

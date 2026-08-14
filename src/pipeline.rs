@@ -305,17 +305,58 @@ fn ensure_work_dir(
     job: &mut crate::jobs::Job,
     cfg: &crate::config::Config,
 ) -> Result<std::path::PathBuf, PipelineError> {
-    if !drive_mounted(&cfg.working_dir) {
+    let configured_or_existing = job.work_dir.as_ref().unwrap_or(&cfg.working_dir);
+    if !drive_mounted(configured_or_existing) {
         job.stage = Stage::WaitingForDrive;
         job.status = crate::jobs::JobStatus::WaitingForDrive;
         return Err(PipelineError::DriveNotMounted);
     }
-    let dir = cfg.working_dir.join(job.id.to_string());
+
+    let dir = match &job.work_dir {
+        Some(existing) => existing.clone(),
+        None => {
+            let readable = cfg.working_dir.join(job_directory_name(job, false));
+            if readable.exists() {
+                cfg.working_dir.join(job_directory_name(job, true))
+            } else {
+                readable
+            }
+        }
+    };
     std::fs::create_dir_all(&dir)?;
     let logs = dir.join("logs");
     std::fs::create_dir_all(&logs)?;
     job.work_dir = Some(dir.clone());
     Ok(dir)
+}
+
+fn job_directory_name(job: &crate::jobs::Job, full_uuid: bool) -> String {
+    let created = job.created_at.unwrap_or_else(chrono::Utc::now);
+    let mut source: String = job
+        .bvid
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(40)
+        .collect();
+    if source.is_empty() {
+        source.push_str("job");
+    }
+    let uuid = job.id.simple().to_string();
+    let suffix = if full_uuid { &uuid[..] } else { &uuid[..8] };
+
+    format!(
+        "{}_{}_P{}_{}",
+        created.format("%Y%m%d-%H%M%SZ"),
+        source,
+        job.page,
+        suffix
+    )
 }
 
 // ---- Individual stages ----
@@ -945,6 +986,66 @@ fn recompute_total(stage_name: &str, stage_progress: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_directory_name_is_readable_and_stable() {
+        let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let mut job = crate::jobs::Job::new(id, "BV1GJ411x7h7".into(), 3);
+        job.created_at = Some("2026-08-11T06:35:42Z".parse().unwrap());
+
+        assert_eq!(
+            job_directory_name(&job, false),
+            "20260811-063542Z_BV1GJ411x7h7_P3_550e8400"
+        );
+    }
+
+    #[test]
+    fn job_directory_name_sanitizes_path_separators() {
+        let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let mut job = crate::jobs::Job::new(id, "b23:../abc/def".into(), 1);
+        job.created_at = Some("2026-08-11T06:35:42Z".parse().unwrap());
+
+        let name = job_directory_name(&job, false);
+        assert_eq!(name, "20260811-063542Z_b23----abc-def_P1_550e8400");
+        assert!(!name.contains('/'));
+    }
+
+    #[test]
+    fn duplicate_video_jobs_have_distinct_directory_names() {
+        let mut first = crate::jobs::Job::new(
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            "BV1GJ411x7h7".into(),
+            1,
+        );
+        let mut second = crate::jobs::Job::new(
+            Uuid::parse_str("6ba7b810-9dad-41d1-80b4-00c04fd430c8").unwrap(),
+            "BV1GJ411x7h7".into(),
+            1,
+        );
+        let created = Some("2026-08-11T06:35:42Z".parse().unwrap());
+        first.created_at = created;
+        second.created_at = created;
+
+        assert_ne!(
+            job_directory_name(&first, false),
+            job_directory_name(&second, false)
+        );
+    }
+
+    #[test]
+    fn ensure_work_dir_preserves_an_existing_job_path() {
+        let root = std::env::temp_dir().join(format!("bimyscribe-readable-job-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("550e8400-e29b-41d4-a716-446655440000");
+        let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1test".into(), 1);
+        job.work_dir = Some(legacy.clone());
+        let mut cfg = crate::config::Config::default();
+        cfg.working_dir = root.join("new-location");
+
+        assert_eq!(ensure_work_dir(&mut job, &cfg).unwrap(), legacy);
+        assert!(legacy.join("logs").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn resolved_short_link_applies_redirect_page() {

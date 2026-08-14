@@ -3,6 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,44 @@ use crate::jobs::Queue;
 const APP_NAME: &str = "BiMyScribe";
 const LEGACY_APP_NAME: &str = "Bilibili Reader";
 const STATE_SCHEMA: u32 = 1;
+static RELEASE_CHECK_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_release_check_root(root: PathBuf, token: &str) -> io::Result<()> {
+    if !root.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "release-check root must be absolute",
+        ));
+    }
+    if token.len() < 32 || !token.chars().all(|value| value.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "release-check token must be at least 32 hexadecimal characters",
+        ));
+    }
+    let marker = root.join(".bimyscribe-release-check");
+    if root.exists() {
+        if fs::read_to_string(&marker).ok().as_deref() != Some(token) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "existing release-check root belongs to another validation run",
+            ));
+        }
+    } else {
+        fs::create_dir(&root)?;
+        write_synced(&marker, token.as_bytes())?;
+    }
+    RELEASE_CHECK_ROOT.set(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "release-check root is already set",
+        )
+    })
+}
+
+pub fn is_release_check() -> bool {
+    RELEASE_CHECK_ROOT.get().is_some()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
@@ -22,6 +61,9 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn discover() -> io::Result<Self> {
+        if let Some(root) = RELEASE_CHECK_ROOT.get() {
+            return Ok(Self::for_home(root));
+        }
         let home = std::env::var_os("HOME")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)

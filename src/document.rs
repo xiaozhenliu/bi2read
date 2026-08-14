@@ -101,9 +101,39 @@ pub fn render_readable_body(
     utterances: &[Utterance],
     refined: Option<&[String]>,
 ) -> String {
-    // Refined text replaces only utterance content; speaker labels and seek
-    // links always come from the durable transcript metadata.
-    render_utterances(job, utterances, refined)
+    let refined = refined.filter(|items| items.len() == utterances.len());
+    let mut body = String::new();
+    let mut index = 0;
+
+    while index < utterances.len() {
+        let first = &utterances[index];
+        let speaker_id = first.speaker_id;
+        let mut text = String::new();
+
+        while index < utterances.len() && utterances[index].speaker_id == speaker_id {
+            let utterance = &utterances[index];
+            let segment = refined
+                .and_then(|items| items.get(index))
+                .filter(|candidate| !candidate.trim().is_empty())
+                .map(String::as_str)
+                .unwrap_or(&utterance.text);
+            // Deliberately add no separator or punctuation: the readable body
+            // must preserve the selected segment text byte-for-byte and only
+            // remove repeated metadata between adjacent segments.
+            text.push_str(segment);
+            index += 1;
+        }
+
+        body.push_str(&format!(
+            "**[{}]** [{}]({})\n{}\n\n",
+            job.speaker_name(speaker_id),
+            fmt_ts(first.start_ms),
+            timestamp_url(&job.bvid, job.page, first.start_ms),
+            text
+        ));
+    }
+
+    body
 }
 
 /// Generate `full.md`. Embeds the job id for recovery verification.
@@ -272,6 +302,55 @@ mod tests {
     }
 
     #[test]
+    fn readable_body_groups_only_adjacent_segments_from_the_same_speaker() {
+        let job = sample_job();
+        let utterances = vec![
+            Utterance {
+                id: "u001".into(),
+                text: "第一段，".into(),
+                start_ms: 1_000,
+                end_ms: 2_000,
+                speaker_id: 0,
+            },
+            Utterance {
+                id: "u002".into(),
+                text: "紧接第二段。".into(),
+                start_ms: 2_000,
+                end_ms: 3_000,
+                speaker_id: 0,
+            },
+            Utterance {
+                id: "u003".into(),
+                text: "Bob 发言。".into(),
+                start_ms: 3_000,
+                end_ms: 4_000,
+                speaker_id: 1,
+            },
+            Utterance {
+                id: "u004".into(),
+                text: "Alice 再次发言。".into(),
+                start_ms: 4_000,
+                end_ms: 5_000,
+                speaker_id: 0,
+            },
+        ];
+
+        let body = render_readable_body(&job, &utterances, None);
+
+        assert!(body.contains("第一段，紧接第二段。"));
+        assert!(!body.contains("[00:00:02]"));
+        assert_eq!(body.matches("**[Alice]**").count(), 2);
+        assert_eq!(body.matches("**[Bob]**").count(), 1);
+        assert!(body.contains("[00:00:01]"));
+        assert!(body.contains("[00:00:03]"));
+        assert!(body.contains("[00:00:04]"));
+
+        let raw = render_raw_markdown(&job, &utterances);
+        assert_eq!(raw.matches("**[Alice]**").count(), 3);
+        assert!(raw.contains("[00:00:02]"));
+    }
+
+    #[test]
     fn doc_meta_video_url_canonicalizes_bare_bvid_input() {
         let meta = DocMeta {
             title: "t".into(),
@@ -362,13 +441,14 @@ mod tests {
         ];
 
         let raw = render_raw_markdown(&job, &utterances);
-        let fallback = render_readable_body(&job, &utterances, None);
-        for markdown in [&raw, &fallback] {
-            assert!(markdown
-                .contains("[00:00:00](https://www.bilibili.com/video/BV1GJ411x7h7?p=2&t=0)"));
-            assert!(markdown
-                .contains("[01:01:01](https://www.bilibili.com/video/BV1GJ411x7h7?p=2&t=3661)"));
-        }
+        assert!(raw.contains("[00:00:00](https://www.bilibili.com/video/BV1GJ411x7h7?p=2&t=0)"));
+        assert!(raw.contains("[01:01:01](https://www.bilibili.com/video/BV1GJ411x7h7?p=2&t=3661)"));
+
+        let readable = render_readable_body(&job, &utterances, None);
+        assert!(
+            readable.contains("[00:00:00](https://www.bilibili.com/video/BV1GJ411x7h7?p=2&t=0)")
+        );
+        assert!(!readable.contains("[01:01:01]"));
     }
 
     // silence unused import of StageState in test fixture if not referenced
