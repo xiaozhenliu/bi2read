@@ -1,12 +1,19 @@
 import { Palette, ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { StageStyle } from "stage-style.slint";
 import { StageView, SpeakerEntry } from "types.slint";
 import { JobRow, JobDetailData, SettingsView } from "view-model.slint";
 import { AddBar } from "components/add-bar.slint";
 import { JobRowView } from "components/job-row.slint";
 import { JobDetail } from "components/job-detail.slint";
 import { SettingsModal } from "components/settings.slint";
-import { PrimaryButton, SecondaryButton } from "components/button.slint";
+import { PrimaryButton, DangerOutlineButton } from "components/button.slint";
+// Not yet wired into any screen (integration is a later issue); imported so
+// these new components are type-checked by `cargo check` / clippy, which
+// only compile what's transitively reachable from this file.
+import { StatusBadge, CountPill } from "components/badge.slint";
+import { IconButton } from "components/icon-button.slint";
+import { AppSwitch } from "components/switch.slint";
 
 // Root application window. Public properties and callbacks are bound from Rust
 // via `slint::include_modules!()`.
@@ -47,6 +54,8 @@ export component App inherits Window {
     in property <JobDetailData> detail: {
         has-job: false,
         title: "", bvid: "", page: 1, status-label: "",
+        stage-name: "",
+        status-name: "",
         total-progress: 0, elapsed-secs: 0, error-text: "", has-error: false,
         warning-text: "",
         can-cancel: false, can-retry: false, can-open: false, can-reveal: false,
@@ -131,7 +140,21 @@ export component App inherits Window {
                 max-width: Theme.sidebar-max-width;
 
                 VerticalLayout {
-                    padding: Theme.space-md;
+                    padding-left: Theme.space-md;
+                    padding-right: Theme.space-md;
+                    padding-top: Theme.space-md;
+                    // JobRowView reserves `task-row-height + task-row-gap` per row so
+                    // the gap renders below each card (ListView itself has no
+                    // `spacing`, see job-row.slint's header comment). That leaves the
+                    // *last* card with an orphaned trailing task-row-gap that has no
+                    // following card to separate from. Shrinking padding-bottom by
+                    // that same gap (only while the list is non-empty; the empty
+                    // state has no trailing-gap row to compensate for) keeps the
+                    // whitespace below the last card equal to `Theme.space-md`,
+                    // matching padding-top above the header instead of stacking an
+                    // extra 8px on top of the full padding.
+                    padding-bottom: root.display-jobs.length > 0
+                        ? Theme.space-md - Theme.task-row-gap : Theme.space-md;
                     spacing: Theme.space-sm;
 
                     HorizontalLayout {
@@ -144,24 +167,23 @@ export component App inherits Window {
                             font-weight: 600;
                             vertical-alignment: center;
                         }
-                        Text {
-                            text: root.display-jobs.length + " 项";
-                            color: Theme.text-muted;
-                            font-size: Theme.font-caption;
-                            vertical-alignment: center;
+                        CountPill {
+                            text: root.display-jobs.length + "";
+                        }
+                        Rectangle {
                             horizontal-stretch: 1;
                         }
-                        SecondaryButton {
-                            text: "上移";
-                            height: Theme.control-height-compact;
-                            min-width: 52px;
+                        IconButton {
+                            size: Theme.control-height-compact;
+                            icon: @image-url("icons/chevron-up.svg");
+                            label: "上移选中任务";
                             disabled: root.display-jobs.length == 0 || !root.can-move-up;
                             clicked => { root.move-up(); }
                         }
-                        SecondaryButton {
-                            text: "下移";
-                            height: Theme.control-height-compact;
-                            min-width: 52px;
+                        IconButton {
+                            size: Theme.control-height-compact;
+                            icon: @image-url("icons/chevron-down.svg");
+                            label: "下移选中任务";
                             disabled: root.display-jobs.length == 0 || !root.can-move-down;
                             clicked => { root.move-down(); }
                         }
@@ -191,8 +213,10 @@ export component App inherits Window {
                             title: job.title;
                             bvid: job.bvid;
                             page: job.page;
+                            stage-name: job.stage-name;
                             stage-label: job.stage-label;
                             status-label: job.status-label;
+                            status-name: job.status-name;
                             stage-progress: job.stage-progress;
                             total-progress: job.total-progress;
                             indeterminate: job.indeterminate;
@@ -224,6 +248,8 @@ export component App inherits Window {
                     bvid: root.detail.bvid;
                     page: root.detail.page;
                     status-label: root.detail.status-label;
+                    stage-name: root.detail.stage-name;
+                    status-name: root.detail.status-name;
                     total-progress: root.detail.total-progress;
                     elapsed: root.detail.elapsed;
                     error-text: root.detail.error-text;

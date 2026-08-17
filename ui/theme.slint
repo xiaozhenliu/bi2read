@@ -2,8 +2,8 @@
 // component, and `app.global::<Theme>()` from Rust.
 export global Theme {
     // Window
-    out property <color> window-background: #f3f5f7;
-    out property <color> sidebar-background: #f0f2f5;
+    out property <color> window-background: #F8F5F6;
+    out property <color> sidebar-background: #F3EEF0;
     out property <color> content-background: #ffffff;
     out property <length> window-width: 1180px;
     out property <length> window-height: 760px;
@@ -19,40 +19,69 @@ export global Theme {
 
     // Surfaces
     out property <color> surface: #ffffff;
-    out property <color> surface-muted: #f4f6f8;
-    out property <color> surface-hover: #f7f8fa;
-    out property <color> surface-selected: #e8eefc;
-    out property <color> surface-pressed: #e9edf2;
-    out property <color> surface-disabled: #eef0f2;
-    out property <color> surface-footer: #fbfcfd;
-    out property <color> border: #d9dee5;
-    out property <color> border-strong: #c4cbd4;
-    out property <color> separator: #e3e7ec;
-    out property <color> overlay: #18202b66;
+    out property <color> surface-muted: #F7F3F5;
+    out property <color> surface-hover: #FAF6F8;
+    out property <color> surface-selected: #FDEBF2;
+    out property <color> surface-pressed: #F5E4EC;
+    out property <color> surface-disabled: #F1EBEE;
+    out property <color> surface-footer: #FDFAFB;
+    out property <color> border: #E6DEE2;
+    out property <color> border-strong: #D8CED3;
+    out property <color> separator: #EFE9EC;
+    out property <color> overlay: #2B242966;
+    // Shadows. `shadow-subtle` lifts small controls (switch thumb, selected
+    // segment); `shadow-modal` is the settings dialog elevation.
+    out property <color> shadow-subtle: #00000030;
+    // The selected segment uses an 8% black lift for visible depth.
+    out property <color> shadow-segment: #00000014;
+    out property <color> shadow-modal: #0000002e;
 
     // Text
-    out property <color> text-primary: #20242a;
-    out property <color> text-secondary: #59626e;
-    out property <color> text-muted: #7c8795;
-    out property <color> text-disabled: #9aa3ad;
+    out property <color> text-primary: #2B2429;
+    out property <color> text-secondary: #6E646B;
+    // WCAG AA contrast adjustment: design spec value #9B929A is only 3.01:1 on
+    // white; #776D75 restores 5.02:1 while staying visually close.
+    out property <color> text-muted: #776D75;
+    out property <color> text-disabled: #C0B8BE;
     out property <color> on-accent: #ffffff;
 
     // Accents / states
-    out property <color> accent: #356cf5;
-    out property <color> accent-hover: #2d5fda;
-    out property <color> accent-pressed: #254fb8;
-    out property <color> success: #158447;
-    out property <color> success-surface: #edf8f1;
-    out property <color> warning: #a65f00;
-    out property <color> warning-surface: #fff7e8;
-    out property <color> warning-border: #ead1a9;
-    out property <color> warning-text: #744300;
-    out property <color> danger: #c93434;
-    out property <color> danger-surface: #fff1f1;
-    out property <color> danger-border: #efb6b6;
-    out property <color> danger-text: #8f2424;
-    out property <color> focus-ring: #6f98ff;
-    out property <color> track: #e3e7ec;
+    out property <color> accent: #FB7299;
+    out property <color> accent-hover: #FA5C8A;
+    out property <color> accent-pressed: #F0447A;
+    // WCAG AA contrast adjustment: design spec value #E1476F is only 3.46:1 on
+    // surface-selected; #C2325A restores 4.70:1 on surface-selected (5.38:1 on white).
+    out property <color> accent-text: #C2325A;
+    out property <color> success: #1F9D66;
+    out property <color> success-surface: #E9F6F0;
+    out property <color> success-text: #17744C;
+    out property <color> warning: #B7791F;
+    out property <color> warning-surface: #FBF2DF;
+    out property <color> warning-border: #EBDCB4;
+    out property <color> warning-text: #8A5A12;
+    out property <color> danger: #E5484D;
+    out property <color> danger-surface: #FDEDED;
+    out property <color> danger-border: #F5C4C5;
+    out property <color> danger-text: #C23334;
+    // WCAG AA / 1.4.11 contrast adjustment: design spec has focus-ring follow
+    // accent (#FB7299), which is only 2.64:1 on white — below the 3:1 non-text
+    // threshold and nearly invisible. #C2325A restores 5.38:1.
+    out property <color> focus-ring: #C2325A;
+    out property <color> track: #EFE7EB;
+    out property <color> selected-track: #F5DCE7;
+    out property <color> segment-track: #EAE3E7;
+
+    // Download stage (bilibili blue)
+    out property <color> info: #23ADE5;
+    out property <color> info-surface: #E5F5FC;
+    // WCAG AA contrast adjustment: design spec value #1B7FA8 is only 4.07:1 on
+    // info-surface; #16708F restores 5.06:1.
+    out property <color> info-text: #16708F;
+
+    // AI polish stage (purple)
+    out property <color> polish: #7C5CFC;
+    out property <color> polish-surface: #EFEBFE;
+    out property <color> polish-text: #5B3ED6;
 
     // Spacing scale
     out property <length> space-xxs: 4px;
@@ -64,14 +93,19 @@ export global Theme {
     out property <length> space-xl: 32px;
 
     // Radius
-    out property <length> radius-sm: 4px;
-    out property <length> radius-md: 6px;
-    out property <length> radius-lg: 10px;
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+    out property <length> pill-radius: 12px;
 
     // Control metrics
     out property <length> control-height: 32px;
+    out property <length> control-height-lg: 36px;
     out property <length> control-height-compact: 28px;
     out property <length> task-row-height: 68px;
+    out property <length> task-row-gap: 8px;
+    out property <length> pill-height: 24px;
+    out property <length> icon-button-size: 36px;
 
     // Semantic type scale. Interface text below 12px is intentionally banned.
     out property <length> font-caption: 12px;

@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-app=${1:-}
+app=""
+signed=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --signed) signed=1; shift ;;
+        *) app=$1; shift ;;
+    esac
+done
 [ -n "$app" ] && [ -d "$app/Contents" ] || {
-    printf 'Usage: %s /absolute/path/BiMyScribe.app\n' "$0" >&2
+    printf 'Usage: %s [--signed] /absolute/path/BiMyScribe.app\n' "$0" >&2
     exit 2
 }
 case "$app" in /*) ;; *) printf 'App path must be absolute.\n' >&2; exit 2 ;; esac
@@ -14,8 +21,22 @@ binary="$app/Contents/MacOS/bimyscribe"
 uv="$app/Contents/Resources/bin/uv"
 runtime_manifest="$app/Contents/Resources/runtime/bimyscribe-runtime.toml"
 
+# With `--signed`, the bundle is signed after this script runs, and that final
+# `codesign` re-signs Contents/MacOS/bimyscribe (it carries the bundle's
+# CodeDirectory, which references _CodeSignature/CodeResources). Any hash
+# recorded here for the main executable is therefore stale by construction, and
+# re-running finalize + codesign never converges: touching the manifest changes
+# CodeResources, which changes the executable again. Leave the field empty and
+# let codesign be the integrity evidence for signed bundles; unsigned
+# (source-only) packages keep the real hash, which is their only such evidence.
+if [ "$signed" -eq 1 ]; then
+    binary_hash=""
+else
+    binary_hash=$(shasum -a 256 "$binary" | awk '{print $1}')
+fi
+
 python3 - "$manifest" \
-    "$(shasum -a 256 "$binary" | awk '{print $1}')" \
+    "$binary_hash" \
     "$(shasum -a 256 "$uv" | awk '{print $1}')" \
     "$(shasum -a 256 "$runtime_manifest" | awk '{print $1}')" <<'PY'
 import json, os, sys, tempfile

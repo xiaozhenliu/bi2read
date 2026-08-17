@@ -1,0 +1,83 @@
+import { Theme } from "../theme.slint";
+
+// Self-drawn toggle switch. `std-widgets` `Switch`/`CheckBox` colors
+// come from `Palette`, which the app cannot recolor to the brand pink (see
+// spec.md 一.1), so settings screens use this instead.
+export component AppSwitch inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <string> label;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback toggled(bool);
+
+    accessible-role: switch;
+    accessible-enabled: root.enabled;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+    forward-focus: focus-scope;
+
+    width: 40px;
+    height: 24px;
+    border-radius: 12px;
+    background: !root.enabled ? Theme.surface-disabled
+        : root.checked ? Theme.accent : Theme.track;
+
+    thumb := Rectangle {
+        width: 20px;
+        height: 20px;
+        y: (parent.height - self.height) / 2;
+        x: root.checked ? parent.width - self.width - 2px : 2px;
+        border-radius: self.height / 2;
+        background: Theme.on-accent;
+        // The thumb carries a subtle drop shadow in both states.
+        drop-shadow-offset-y: 1px;
+        drop-shadow-blur: 2px;
+        drop-shadow-color: Theme.shadow-subtle;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            if (root.enabled) {
+                root.focus();
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+            }
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (root.enabled && (event.text == " " || event.text == Key.Return)) {
+                root.focus();
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus && root.enabled : Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 14px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+        background: transparent;
+    }
+}

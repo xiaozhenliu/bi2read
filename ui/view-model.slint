@@ -17,6 +17,10 @@ export struct JobRow {
     has-error: bool,
     error-text: string,
     status-label: string,
+    // Machine-readable JobStatus key (src/jobs.rs JobStatus::name()).
+    // Outranks `stage-name` in StageStyle when task-level status is
+    // decisive (e.g. `cancelling`).
+    status-name: string,
 }
 
 // Aggregated view for the detail panel of the selected job.
@@ -31,6 +35,15 @@ export struct JobDetailData {
     bvid: string,              // Job.bvid
     page: int,                 // Job.page (1-based)
     status-label: string,      // JobStatus::label()
+    // Machine-readable current stage key, symmetric with `JobRow.stage-name`
+    // (src/jobs.rs Stage::name()). `JobDetailData` has no way to derive this
+    // in Slint (no expression-language loop over `stages` to find the active
+    // one), so Rust fills it directly from `snap.stage.name()`.
+    stage-name: string,
+    // Machine-readable JobStatus key (src/jobs.rs JobStatus::name()), symmetric
+    // with `JobRow.status-name`. Outranks `stage-name` in StageStyle when
+    // task-level status is decisive.
+    status-name: string,
     total-progress: int,       // Job::total_progress(), 0..100
     elapsed-secs: int,         // started_at..finished_at/now, seconds
     elapsed: string,           // local display; "—" when started_at is absent

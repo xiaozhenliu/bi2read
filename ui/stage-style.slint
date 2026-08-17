@@ -1,0 +1,172 @@
+// Single source of truth for stage-semantic styling (colors + badge text).
+//
+// Consumers resolve a machine-readable `kind` from `status-name`
+// (`JobRow.status-name` / `JobDetailData.status-name`, see
+// `src/jobs.rs` `JobStatus::name()`) and `stage-name`
+// (`JobRow.stage-name` / `StageView.name`, see `src/jobs.rs` `Stage::name()`)
+// plus `has-error` / `total-progress`, then derive dot/bar/badge colors from
+// that `kind`. Badge text is looked up independently, per-stage, so stages
+// that share a color group (e.g. `screenshots` / `final_document` /
+// `cleanup`, all "polish") still get factually distinct labels instead of a
+// kind-derived one ("AI 润色中" would be wrong for `screenshots`).
+//
+// `status-name` outranks `stage-name`: `Stage` can lag behind `JobStatus`
+// (e.g. `JobStatus::Cancelling` while `stage` is still `Transcribe`), so a
+// decisive status must win before any stage-based guess is even considered.
+// Only when `status-name` is `running` / `queued` / empty / unrecognized does
+// `stage-name` get to pick the download/transcribe/polish/queued flavor.
+//
+// Priority (both `kind` and `label` honor this order):
+//   has-error > status-decisive (failed/cancelled/cancelling/completed/
+//   paused/needs_user_action/waiting_for_drive) > stage mapping
+//   (download/transcribe/polish/queued) > total-progress>=100 fallback (done)
+//
+// This table must stay byte-for-byte in sync with the corresponding status
+// table. Task status takes precedence over stage state when both are present.
+import { Theme } from "theme.slint";
+
+export global StageStyle {
+    // Resolve the color-group key. Returns one of:
+    // "queued" | "download" | "transcribe" | "polish" | "done" | "failed" | "attention"
+    public pure function kind(status-name: string, stage-name: string, has-error: bool, total-progress: int) -> string {
+        if (has-error) {
+            "failed"
+        } else if (status-name == "failed") {
+            "failed"
+        } else if (status-name == "cancelled") {
+            // Cancelled shares the queued color group (neutral).
+            "queued"
+        } else if (status-name == "cancelling") {
+            "attention"
+        } else if (status-name == "completed") {
+            "done"
+        } else if (status-name == "paused" || status-name == "needs_user_action" || status-name == "waiting_for_drive") {
+            "attention"
+        } else if (stage-name == "metadata" || stage-name == "download_audio" || stage-name == "normalize_audio") {
+            "download"
+        } else if (stage-name == "transcribe" || stage-name == "raw_document") {
+            "transcribe"
+        } else if (stage-name == "readable_document" || stage-name == "screenshots" || stage-name == "final_document" || stage-name == "cleanup") {
+            "polish"
+        } else if (total-progress >= 100 && !has-error) {
+            // Trailing fallback, checked only after status and stage both
+            // failed to classify (e.g. stale/unknown stage-name).
+            "done"
+        } else {
+            // Covers "queued", empty string, and any unrecognized
+            // status/stage combination.
+            "queued"
+        }
+    }
+
+    public pure function dot(kind: string) -> color {
+        if (kind == "download") {
+            Theme.info
+        } else if (kind == "transcribe") {
+            Theme.accent
+        } else if (kind == "polish") {
+            Theme.polish
+        } else if (kind == "done") {
+            Theme.success
+        } else if (kind == "failed") {
+            Theme.danger
+        } else if (kind == "attention") {
+            Theme.warning
+        } else {
+            Theme.text-muted
+        }
+    }
+
+    public pure function bar(kind: string) -> color {
+        // Progress bar color mirrors the status dot for the same kind.
+        dot(kind)
+    }
+
+    public pure function badge-surface(kind: string) -> color {
+        if (kind == "download") {
+            Theme.info-surface
+        } else if (kind == "transcribe") {
+            Theme.surface-selected
+        } else if (kind == "polish") {
+            Theme.polish-surface
+        } else if (kind == "done") {
+            Theme.success-surface
+        } else if (kind == "failed") {
+            Theme.danger-surface
+        } else if (kind == "attention") {
+            Theme.warning-surface
+        } else {
+            Theme.surface-disabled
+        }
+    }
+
+    public pure function badge-text-color(kind: string) -> color {
+        if (kind == "download") {
+            Theme.info-text
+        } else if (kind == "transcribe") {
+            Theme.accent-text
+        } else if (kind == "polish") {
+            Theme.polish-text
+        } else if (kind == "done") {
+            Theme.success-text
+        } else if (kind == "failed") {
+            Theme.danger-text
+        } else if (kind == "attention") {
+            Theme.warning-text
+        } else {
+            Theme.text-secondary
+        }
+    }
+
+    // Badge text. Independent of `kind` on purpose (see header comment):
+    // looked up straight from `status-name`/`stage-name` so same-kind stages
+    // can still read distinctly. Falls back to the Rust-supplied
+    // `status-label` for unrecognized status/stage combinations, and to
+    // "排队中" if that is also empty.
+    public pure function label(status-name: string, stage-name: string, has-error: bool, total-progress: int, status-label: string) -> string {
+        if (has-error) {
+            "失败"
+        } else if (status-name == "failed") {
+            "失败"
+        } else if (status-name == "cancelled") {
+            "已取消"
+        } else if (status-name == "cancelling") {
+            "取消中"
+        } else if (status-name == "completed") {
+            "已完成"
+        } else if (status-name == "paused") {
+            "已暂停"
+        } else if (status-name == "needs_user_action") {
+            "需要处理"
+        } else if (status-name == "waiting_for_drive") {
+            "等待磁盘"
+        } else if (stage-name == "metadata") {
+            "读取信息中"
+        } else if (stage-name == "download_audio") {
+            "下载中"
+        } else if (stage-name == "normalize_audio") {
+            "处理音频中"
+        } else if (stage-name == "transcribe") {
+            "转写中"
+        } else if (stage-name == "raw_document") {
+            "生成原始稿中"
+        } else if (stage-name == "readable_document") {
+            "AI 润色中"
+        } else if (stage-name == "screenshots") {
+            "截图中"
+        } else if (stage-name == "final_document") {
+            "生成文档中"
+        } else if (stage-name == "cleanup") {
+            "清理中"
+        } else if (stage-name == "queued" || stage-name == "") {
+            "排队中"
+        } else if (total-progress >= 100 && !has-error) {
+            // Trailing fallback, mirrors `kind()`'s ordering.
+            "已完成"
+        } else if (!status-label.is-empty) {
+            status-label
+        } else {
+            "排队中"
+        }
+    }
+}

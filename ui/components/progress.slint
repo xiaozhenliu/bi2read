@@ -8,6 +8,10 @@ export component ProgressBar inherits Rectangle {
     in property <int> value: 0;          // 0..100, ignored when indeterminate
     in property <bool> indeterminate: false;
     in property <color> bar-color: Theme.accent;
+    // Track (unfilled) color. Callers on a selected/highlighted surface pass
+    // `Theme.selected-track` so the empty portion of the bar stays visible
+    // against the row's tinted background instead of the default track color.
+    in property <color> track-color: Theme.track;
     in property <string> label: "进度";
 
     accessible-role: progress-indicator;
@@ -18,7 +22,7 @@ export component ProgressBar inherits Rectangle {
     accessible-read-only: true;
 
     height: 8px;
-    background: Theme.track;
+    background: root.track-color;
     border-radius: Theme.radius-sm;
     clip: true;
 

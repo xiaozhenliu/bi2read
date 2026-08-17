@@ -1,79 +1,16 @@
-import { LineEdit, ListView, ScrollView } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
-import { PrimaryButton, SecondaryButton, DangerButton } from "button.slint";
+import { StageStyle } from "../stage-style.slint";
+import { PrimaryButton, SecondaryButton, DangerOutlineButton } from "button.slint";
+import { IconButton } from "icon-button.slint";
+import { AppTextField } from "text-field.slint";
+import { StatusBadge } from "badge.slint";
 import { ProgressBar } from "progress.slint";
 import { StageView, SpeakerEntry } from "../types.slint";
 
-// Compact keyboard-accessible control used to collapse and restore the
-// right-side inspector. The glyph is intentionally paired with a full
-// accessible label so direction is never the only cue.
-component InspectorToggle inherits Rectangle {
-    in property <string> glyph;
-    in property <string> label;
-    in property <int> focus-generation: 0;
-    out property <bool> has-focus: focus-scope.has-focus;
-    callback clicked;
-
-    changed focus-generation => {
-        root.focus();
-    }
-
-    accessible-role: button;
-    accessible-label: root.label;
-    accessible-enabled: true;
-    accessible-action-default => {
-        root.focus();
-        root.clicked();
-    }
-    forward-focus: focus-scope;
-
-    width: Theme.control-height-compact;
-    height: Theme.control-height-compact;
-    border-radius: Theme.radius-md;
-    background: touch.pressed ? Theme.surface-pressed
-        : touch.has-hover ? Theme.surface-selected : transparent;
-
-    Text {
-        text: root.glyph;
-        color: Theme.text-secondary;
-        font-size: Theme.font-section;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.focus();
-            root.clicked();
-        }
-    }
-
-    focus-scope := FocusScope {
-        x: 0px;
-        width: 0px;
-        key-pressed(event) => {
-            if event.text == " " || event.text == Key.Return {
-                root.focus();
-                root.clicked();
-                return accept;
-            }
-            return reject;
-        }
-    }
-
-    if root.has-focus : Rectangle {
-        x: -2px;
-        y: -2px;
-        width: parent.width + 4px;
-        height: parent.height + 4px;
-        border-radius: Theme.radius-md + 2px;
-        border-color: Theme.focus-ring;
-        border-width: 2px;
-        background: transparent;
-    }
-}
-
+// Segmented-control tab: container is `InspectorTab`'s parent
+// `segment-track` Rectangle; each tab renders its own selected/unselected
+// look and owns tab-list keyboard semantics.
 component InspectorTab inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
@@ -103,13 +40,18 @@ component InspectorTab inherits Rectangle {
     }
     forward-focus: focus-scope;
 
-    height: Theme.control-height;
+    // Cross-axis size (height) comes from the `segment-track` container's
+    // HorizontalLayout, which stretches unsized children to its own inner
+    // height (track height 32 minus 2px padding on each side = 28).
     min-width: 92px;
     horizontal-stretch: 1;
-    border-radius: Theme.radius-md;
-    background: root.selected ? Theme.surface-selected
-        : touch.pressed ? Theme.surface-pressed
-        : touch.has-hover ? Theme.surface-hover : transparent;
+    border-radius: Theme.radius-sm;
+    background: root.selected ? Theme.surface : transparent;
+    // The selected segment carries a subtle lift (y1/blur3);
+    // unselected stays flat.
+    drop-shadow-offset-y: root.selected ? 1px : 0px;
+    drop-shadow-blur: root.selected ? 3px : 0px;
+    drop-shadow-color: root.selected ? Theme.shadow-segment : transparent;
 
     Text {
         text: root.text;
@@ -182,26 +124,19 @@ export component StageRow inherits Rectangle {
         padding-left: Theme.space-xxs;
         padding-right: Theme.space-xxs;
 
-        Rectangle {
-            width: 14px;
-            height: 14px;
+        Image {
+            width: 16px;
+            height: 16px;
             y: (parent.height - self.height) / 2;
-            border-radius: self.width / 2;
-            background: root.stage.error ? Theme.danger
+            source: root.stage.error ? @image-url("../icons/warning.svg")
+                : root.stage.done ? @image-url("../icons/check-circle.svg")
+                : root.stage.active ? @image-url("../icons/dot-circle.svg")
+                : root.stage.skipped ? @image-url("../icons/minus-circle.svg")
+                : @image-url("../icons/circle.svg");
+            colorize: root.stage.error ? Theme.danger
                 : root.stage.done ? Theme.success
                 : root.stage.active ? Theme.accent
-                : root.stage.skipped ? Theme.surface-muted : Theme.track;
-            border-color: root.stage.skipped ? Theme.border-strong : transparent;
-            border-width: root.stage.skipped ? 1px : 0px;
-
-            Text {
-                text: root.stage.done ? "✓" : (root.stage.error ? "!" : (root.stage.skipped ? "–" : ""));
-                color: root.stage.skipped ? Theme.text-muted : Theme.on-accent;
-                font-size: Theme.font-caption;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+                : root.stage.skipped ? Theme.text-disabled : Theme.text-muted;
         }
 
         Text {
@@ -233,7 +168,8 @@ export component StageRow inherits Rectangle {
                 : root.stage.done ? "已完成"
                 : root.stage.active ? (root.stage.indeterminate ? "处理中" : root.stage.progress + "%")
                 : "等待";
-            color: root.stage.error ? Theme.danger : Theme.text-muted;
+            color: root.stage.error ? Theme.danger
+                : root.stage.active ? Theme.accent-text : Theme.text-muted;
             font-size: Theme.font-caption;
             width: 64px;
             horizontal-alignment: right;
@@ -259,32 +195,37 @@ export component SpeakerRow inherits Rectangle {
     accessible-label: root.entry.raw-label
         + (root.entry.name.is-empty ? "，未设置显示名称" : "，显示为 " + root.entry.name);
 
-    height: 52px;
+    // Caption line (12px) + 4px gaps above/between/below + 32px compact
+    // input = 60px, on the 4px spacing grid.
+    height: 60px;
 
-    HorizontalLayout {
-        spacing: Theme.space-sm;
+    // "原始标签 · 出现 N 段" (spec.md 第二节第 12 条); a `segment-count` of 0
+    // means the count is unavailable rather than "zero segments", so only
+    // the raw label is shown.
+    property <string> caption-text: root.entry.segment-count > 0
+        ? root.entry.raw-label + " · 出现 " + root.entry.segment-count + " 段"
+        : root.entry.raw-label;
+
+    VerticalLayout {
         padding-left: Theme.space-xs;
         padding-right: Theme.space-xs;
-        padding-top: Theme.space-xs;
-        padding-bottom: Theme.space-xs;
+        padding-top: Theme.space-xxs;
+        padding-bottom: Theme.space-xxs;
+        spacing: Theme.space-xxs;
 
         Text {
-            text: root.entry.raw-label;
+            text: root.caption-text;
             color: root.enabled ? Theme.text-secondary : Theme.text-disabled;
             font-size: Theme.font-caption;
-            width: 88px;
             overflow: elide;
-            vertical-alignment: center;
         }
 
-        LineEdit {
+        AppTextField {
             accessible-label: root.entry.raw-label + " 的显示名称";
             enabled: root.enabled;
+            compact: true;
             text: root.entry.name;
             placeholder-text: "输入显示名称…";
-            font-size: Theme.font-body;
-            height: Theme.control-height;
-            horizontal-stretch: 1;
             edited(value) => { root.name-edited(value); }
         }
     }
@@ -335,6 +276,16 @@ export component JobDetail inherits Rectangle {
     in property <string> bvid;
     in property <int> page;
     in property <string> status-label;
+    // Machine-readable current stage key (`JobDetailData.stage-name`, sourced
+    // from `snap.stage.name()` in src/main.rs). Drives `StageStyle` lookups
+    // for the header badge/progress-bar color, symmetric with
+    // `JobRow.stage-name`.
+    in property <string> stage-name;
+    // Machine-readable JobStatus key (`JobDetailData.status-name`, sourced
+    // from `snap.status.name()` in src/main.rs). Outranks `stage-name` in
+    // `StageStyle` lookups when task-level status is decisive (e.g.
+    // `cancelling`).
+    in property <string> status-name;
     in property <int> total-progress;
     in property <string> elapsed;
     in property <string> error-text;
@@ -378,6 +329,19 @@ export component JobDetail inherits Rectangle {
     property <int> display-progress: root.fixture-completed ? 100
         : root.fixture-running ? 48
         : root.fixture-failed ? 64 : root.total-progress;
+    // Fixture stand-ins mirror the three fixture states so StageStyle.kind()
+    // resolves the same color group the corresponding real stage-name would.
+    // Fixture stand-ins mirror the three fixture states so StageStyle.kind()
+    // resolves the same color group the corresponding real stage-name would.
+    property <string> display-stage-name: root.fixture-running ? "transcribe"
+        : root.fixture-failed ? "failed"
+        : root.fixture-completed ? "completed" : root.stage-name;
+    // Fixture stand-in for status-name, mirroring display-stage-name so
+    // StageStyle.kind()/label() resolve the same status-decisive branch the
+    // corresponding real status-name would.
+    property <string> display-status-name: root.fixture-running ? "running"
+        : root.fixture-failed ? "failed"
+        : root.fixture-completed ? "completed" : root.status-name;
     property <string> display-elapsed: root.fixture-running ? "09:16"
         : root.fixture-completed ? "24:03"
         : root.fixture-failed ? "18:42"
@@ -425,17 +389,20 @@ export component JobDetail inherits Rectangle {
         { name: "cleanup", label: "清理", done: root.fixture-completed, active: false, progress: 0, indeterminate: false, error: false, skipped: false },
         { name: "completed", label: "完成", done: root.fixture-completed, active: false, progress: 0, indeterminate: false, error: false, skipped: false }
     ];
+    // segment-count values are plausible fixture stand-ins (descending, one
+    // speaker at 0 to exercise the "count unavailable" caption branch), not
+    // real transcript data.
     property <[SpeakerEntry]> fixture-speakers: [
-        { speaker-id: 0, raw-label: "Speaker 0", name: "主持人" },
-        { speaker-id: 1, raw-label: "Speaker 1", name: "嘉宾一号" },
-        { speaker-id: 2, raw-label: "Speaker 2", name: "嘉宾二号" },
-        { speaker-id: 3, raw-label: "Speaker 3", name: "研究员甲" },
-        { speaker-id: 4, raw-label: "Speaker 4", name: "研究员乙" },
-        { speaker-id: 5, raw-label: "Speaker 5", name: "产品负责人" },
-        { speaker-id: 6, raw-label: "Speaker 6", name: "工程师" },
-        { speaker-id: 7, raw-label: "Speaker 7", name: "观察员" },
-        { speaker-id: 8, raw-label: "Speaker 8", name: "现场提问者" },
-        { speaker-id: 9, raw-label: "Speaker 9", name: "记录员" }
+        { speaker-id: 0, raw-label: "Speaker 0", name: "主持人", segment-count: 142 },
+        { speaker-id: 1, raw-label: "Speaker 1", name: "嘉宾一号", segment-count: 87 },
+        { speaker-id: 2, raw-label: "Speaker 2", name: "嘉宾二号", segment-count: 56 },
+        { speaker-id: 3, raw-label: "Speaker 3", name: "研究员甲", segment-count: 41 },
+        { speaker-id: 4, raw-label: "Speaker 4", name: "研究员乙", segment-count: 33 },
+        { speaker-id: 5, raw-label: "Speaker 5", name: "产品负责人", segment-count: 27 },
+        { speaker-id: 6, raw-label: "Speaker 6", name: "工程师", segment-count: 19 },
+        { speaker-id: 7, raw-label: "Speaker 7", name: "观察员", segment-count: 14 },
+        { speaker-id: 8, raw-label: "Speaker 8", name: "现场提问者", segment-count: 8 },
+        { speaker-id: 9, raw-label: "Speaker 9", name: "记录员", segment-count: 0 }
     ];
     property <[StageView]> display-stages: root.fixture-enabled ? root.fixture-stages : root.stages;
     property <[SpeakerEntry]> display-speakers: root.fixture-enabled ? root.fixture-speakers : root.speakers;
@@ -486,9 +453,11 @@ export component JobDetail inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle {
-                    // Reserve a feedback line whenever actions exist so
-                    // success/error text never moves the stage history.
-                    height: root.display-has-actions ? 160px : 102px;
+                    // Content-driven height (running / failed / completed / queued
+                    // / no-actions must all fit without clipping); min-height only
+                    // guards the empty state (badge + title + meta + bar, no
+                    // actions, no feedback line) from collapsing.
+                    min-height: 102px;
                     background: Theme.surface;
                     vertical-stretch: 0;
 
@@ -498,6 +467,24 @@ export component JobDetail inherits Rectangle {
                         padding-top: Theme.space-md;
                         padding-bottom: Theme.space-sm;
                         spacing: Theme.space-xs;
+
+                        // Wrapped in its own row with a trailing stretch spacer
+                        // (issue 14 defect 1) so the badge's content-driven width
+                        // never gets read as this VerticalLayout's max-width: the
+                        // spacer's unbounded max-width keeps the row - and every
+                        // ancestor up to the center pane - free to grow.
+                        HorizontalLayout {
+                            StatusBadge {
+                                kind: StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress);
+                                text: StageStyle.label(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress, root.display-status);
+                                horizontal-stretch: 0;
+                                // Status text moved from the meta caption below (was a
+                                // duplicate of this badge); keep the live announcement
+                                // here so screen readers still learn about stage changes.
+                                accessible-live-region: polite;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
 
                         Text {
                             text: root.display-title;
@@ -510,40 +497,56 @@ export component JobDetail inherits Rectangle {
 
                         HorizontalLayout {
                             spacing: Theme.space-xs;
+                            // BV number and the separator dot are grouped on the
+                            // left (both horizontal-stretch: 0, sized to content);
+                            // a single spacer soaks up all the leftover width so
+                            // "耗时" lands flush right without the dot drifting
+                            // into the middle of the row (issue 14 defect 6).
                             Text {
                                 text: root.display-bvid + (root.display-page > 1 ? "-P" + root.display-page : "");
                                 color: Theme.text-secondary;
                                 font-size: Theme.font-caption;
+                                horizontal-stretch: 0;
                             }
-                            Text { text: "·"; color: Theme.text-muted; font-size: Theme.font-caption; }
-                            Text {
-                                text: root.display-status;
-                                color: root.display-completed ? Theme.success
-                                    : root.display-error-visible ? Theme.danger : Theme.text-secondary;
-                                font-size: Theme.font-caption;
-                                font-weight: 600;
-                                accessible-live-region: polite;
-                            }
+                            // No separator dot here: the status text that used
+                            // to follow it now lives in the StatusBadge above,
+                            // so a dot would dangle after the BV id with
+                            // nothing to separate it from.
+                            Rectangle { horizontal-stretch: 1; }
                             Text {
                                 text: "耗时 " + root.display-elapsed;
                                 color: Theme.text-muted;
                                 font-size: Theme.font-caption;
-                                horizontal-alignment: right;
-                                horizontal-stretch: 1;
+                                horizontal-stretch: 0;
                             }
                         }
 
-                        ProgressBar {
-                            value: root.display-progress;
-                            height: 6px;
-                            bar-color: root.display-error-visible ? Theme.danger
-                                : root.display-completed ? Theme.success : Theme.accent;
-                            label: "任务总进度";
+                        HorizontalLayout {
+                            spacing: Theme.space-xs;
+                            ProgressBar {
+                                value: root.display-progress;
+                                height: 6px;
+                                horizontal-stretch: 1;
+                                bar-color: StageStyle.bar(StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress));
+                                label: "任务总进度";
+                            }
+                            Text {
+                                text: (root.display-completed ? 100 : root.display-progress) + "%";
+                                // Follows the bar's stage kind: a pink number
+                                // next to a green "completed" bar reads as two
+                                // different states. `badge-text-color` is the
+                                // on-light-surface variant of each kind.
+                                color: StageStyle.badge-text-color(StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress));
+                                font-size: Theme.font-caption;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
                         }
 
                         if root.display-has-actions : HorizontalLayout {
                             height: Theme.control-height;
                             spacing: Theme.space-xs;
+                            alignment: end;
                             if root.display-can-retry : PrimaryButton {
                                 text: "重试";
                                 disabled: root.action-pending;
@@ -564,7 +567,7 @@ export component JobDetail inherits Rectangle {
                                 disabled: root.action-pending;
                                 clicked => { root.reveal-clicked(); }
                             }
-                            if root.display-can-cancel : DangerButton {
+                            if root.display-can-cancel : DangerOutlineButton {
                                 text: "取消任务";
                                 disabled: root.action-pending;
                                 clicked => { root.cancel-clicked(); }
@@ -599,8 +602,14 @@ export component JobDetail inherits Rectangle {
                         padding-bottom: Theme.space-lg;
                         spacing: Theme.space-ml;
 
-                        Rectangle {
-                            visible: root.display-error-visible && !root.display-error.is-empty;
+                        // `visible: false` does not release layout space in Slint
+                        // (issue 14 defect 8) — a hidden `Rectangle` still reserves
+                        // its full height plus the VerticalLayout's `spacing` on
+                        // both sides, opening a large dead gap above "阶段历史"
+                        // whenever there is no error to show. Conditional
+                        // instantiation (`if ... :`) removes the element from the
+                        // layout entirely instead of merely hiding it.
+                        if root.display-error-visible && !root.display-error.is-empty : Rectangle {
                             height: max(88px, error-message.preferred-height + 62px);
                             background: Theme.danger-surface;
                             border-radius: Theme.radius-md;
@@ -627,31 +636,48 @@ export component JobDetail inherits Rectangle {
                             }
                         }
 
-                        Rectangle {
-                            visible: root.display-warning-visible;
-                            height: max(64px, warning-message.preferred-height + 48px);
+                        // See the error card above: `if` (not `visible:`) so a
+                        // hidden warning card doesn't still reserve its height
+                        // (issue 14 defect 8).
+                        if root.display-warning-visible : Rectangle {
+                            // Content-driven height: a real HorizontalLayout (icon +
+                            // wrapping text) sizes itself instead of the previous
+                            // `max(64px, preferred-height + 48px)` hand calculation,
+                            // so multi-line warnings never clip.
                             background: Theme.warning-surface;
                             border-radius: Theme.radius-md;
                             border-color: Theme.warning-border;
                             border-width: 1px;
+                            // The visible heading was dropped from this card
+                            // (see issue 08); restore the "this is a warning"
+                            // semantic for screen readers via the a11y tree
+                            // instead, without bringing the heading back
+                            // visually (it's absent from the export image).
+                            accessible-role: text;
+                            accessible-label: "需要注意：" + root.display-warning;
 
-                            Text {
-                                text: "需要注意";
-                                color: Theme.warning-text;
-                                font-size: Theme.font-section;
-                                font-weight: 600;
-                                x: Theme.space-md;
-                                y: Theme.space-sm;
-                            }
-                            warning-message := Text {
-                                text: root.display-warning;
-                                color: Theme.text-secondary;
-                                font-size: Theme.font-body;
-                                wrap: word-wrap;
-                                x: Theme.space-md;
-                                y: 36px;
-                                width: parent.width - Theme.space-xl;
-                                height: self.preferred-height;
+                            HorizontalLayout {
+                                padding: Theme.space-sm;
+                                spacing: Theme.space-xs;
+
+                                Image {
+                                    source: @image-url("../icons/warning.svg");
+                                    colorize: Theme.warning;
+                                    width: 16px;
+                                    height: 16px;
+                                }
+                                Text {
+                                    text: root.display-warning;
+                                    color: Theme.warning-text;
+                                    font-size: Theme.font-body;
+                                    wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                    height: self.preferred-height;
+                                    // The card above already announces this text
+                                    // prefixed with the warning semantic; keep it
+                                    // out of the a11y tree so it is not read twice.
+                                    accessible-role: none;
+                                }
                             }
                         }
 
@@ -659,6 +685,7 @@ export component JobDetail inherits Rectangle {
                             spacing: Theme.space-xs;
                             HorizontalLayout {
                                 height: 22px;
+                                spacing: Theme.space-xs;
                                 Text {
                                     text: "阶段历史";
                                     color: Theme.text-primary;
@@ -670,6 +697,7 @@ export component JobDetail inherits Rectangle {
                                     color: Theme.text-muted;
                                     font-size: Theme.font-caption;
                                     horizontal-stretch: 1;
+                                    horizontal-alignment: right;
                                 }
                             }
 
@@ -703,9 +731,11 @@ export component JobDetail inherits Rectangle {
             VerticalLayout {
                 padding-top: Theme.space-xs;
                 alignment: start;
-                expand-toggle := InspectorToggle {
-                    glyph: "‹";
+                expand-toggle := IconButton {
+                    icon: @image-url("../icons/chevron-left.svg");
                     label: root.inspector-page == 0 ? "展开说话人配置" : "展开任务信息";
+                    size: Theme.control-height-compact;
+                    bordered: false;
                     focus-generation: root.inspector-toggle-focus-generation;
                     x: (parent.width - self.width) / 2;
                     clicked => {
@@ -751,9 +781,11 @@ export component JobDetail inherits Rectangle {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        collapse-toggle := InspectorToggle {
-                            glyph: "›";
+                        collapse-toggle := IconButton {
+                            icon: @image-url("../icons/chevron-right.svg");
                             label: "收起检查器";
+                            size: Theme.control-height-compact;
+                            bordered: false;
                             focus-generation: root.inspector-toggle-focus-generation;
                             clicked => {
                                 root.inspector-collapsed = true;
@@ -765,38 +797,53 @@ export component JobDetail inherits Rectangle {
 
                 Rectangle { height: 1px; background: Theme.separator; }
 
+                // Segmented tab bar. The outer bar (`Theme.surface`)
+                // just provides breathing room; `segment-track` is the actual
+                // `segment-track`-colored pill that carries the two tabs.
                 Rectangle {
-                    height: 45px;
+                    height: Theme.space-xs + Theme.space-xs + Theme.control-height;
                     background: Theme.surface;
                     accessible-role: tab-list;
                     accessible-label: "检查器页面";
 
                     HorizontalLayout {
                         padding: Theme.space-xs;
-                        spacing: Theme.space-xxs;
-                        speaker-tab := InspectorTab {
-                            text: "说话人 · " + root.display-speakers.length;
-                            selected: root.inspector-page == 0;
-                            focus-generation: root.inspector-tab-focus-generation;
-                            clicked => {
-                                root.inspector-page = 0;
-                            }
-                            navigate(delta) => {
-                                if delta > 0 {
-                                    root.inspector-page = 1;
+
+                        segment-track := Rectangle {
+                            horizontal-stretch: 1;
+                            height: Theme.control-height;
+                            border-radius: Theme.radius-md;
+                            background: Theme.segment-track;
+
+                            HorizontalLayout {
+                                padding: 2px;
+                                spacing: 2px;
+
+                                speaker-tab := InspectorTab {
+                                    text: "说话人 · " + root.display-speakers.length;
+                                    selected: root.inspector-page == 0;
+                                    focus-generation: root.inspector-tab-focus-generation;
+                                    clicked => {
+                                        root.inspector-page = 0;
+                                    }
+                                    navigate(delta) => {
+                                        if delta > 0 {
+                                            root.inspector-page = 1;
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        info-tab := InspectorTab {
-                            text: "任务信息";
-                            selected: root.inspector-page == 1;
-                            focus-generation: root.inspector-tab-focus-generation;
-                            clicked => {
-                                root.inspector-page = 1;
-                            }
-                            navigate(delta) => {
-                                if delta < 0 {
-                                    root.inspector-page = 0;
+                                info-tab := InspectorTab {
+                                    text: "任务信息";
+                                    selected: root.inspector-page == 1;
+                                    focus-generation: root.inspector-tab-focus-generation;
+                                    clicked => {
+                                        root.inspector-page = 1;
+                                    }
+                                    navigate(delta) => {
+                                        if delta < 0 {
+                                            root.inspector-page = 0;
+                                        }
+                                    }
                                 }
                             }
                         }

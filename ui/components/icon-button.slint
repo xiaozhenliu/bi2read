@@ -1,0 +1,97 @@
+import { Theme } from "../theme.slint";
+
+// Square icon-only button for settings and reorder actions. The icon is a
+// colorized SVG so it always tracks Theme text colors instead of baking in
+// a fixed icon color. `label` is required and doubles as the accessible
+// name, since these buttons show no visible text.
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <length> size: Theme.icon-button-size;
+    in property <bool> disabled: false;
+    in property <bool> bordered: true;
+    // Optional focus-recall generation counter. Callers that need to move
+    // keyboard focus back onto this button after an external state change
+    // (e.g. the inspector collapse/expand toggle, redesign-v2 issue 11)
+    // bump this from Rust; unused callers keep the default `0` and never
+    // change it, so `root.focus()` is never called out from under them.
+    in property <int> focus-generation: 0;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked;
+
+    changed focus-generation => {
+        root.focus();
+    }
+
+    accessible-role: button;
+    accessible-enabled: !root.disabled;
+    accessible-label: root.label;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.focus();
+            root.clicked();
+        }
+    }
+    forward-focus: focus-scope;
+
+    width: root.size;
+    height: root.size;
+    border-radius: Theme.radius-md;
+    background: root.disabled ? transparent
+        : touch.pressed ? Theme.surface-pressed
+        : touch.has-hover ? Theme.surface-hover : transparent;
+    border-color: root.bordered && !root.disabled ? Theme.border : transparent;
+    border-width: root.bordered && !root.disabled ? 1px : 0px;
+
+    // size * 0.44, rounded to the nearest integer then down to an even
+    // number (36px -> 16px, 28px -> 12px), computed in plain float px so it
+    // scales with whatever `size` a caller passes in. Floored at 12px so a
+    // very small `size` never computes down to 0.
+    property <float> icon-size-raw: round((root.size / 1px) * 0.44);
+    property <float> icon-size-even: icon-size-raw - mod(icon-size-raw, 2);
+
+    Image {
+        source: root.icon;
+        colorize: root.disabled ? Theme.text-disabled : Theme.text-secondary;
+        width: max(12px, root.icon-size-even * 1px);
+        height: self.width;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => {
+            if (!root.disabled) {
+                root.focus();
+                root.clicked();
+            }
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == " " || event.text == Key.Return)) {
+                root.focus();
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus && !root.disabled : Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: Theme.radius-md + 2px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+        background: transparent;
+    }
+}

@@ -1,8 +1,9 @@
-import { LineEdit } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
-import { PrimaryButton, SecondaryButton } from "button.slint";
+import { PrimaryButton } from "button.slint";
+import { AppTextField } from "text-field.slint";
+import { IconButton } from "icon-button.slint";
 
-// Top bar: URL input + add button.
+// Top bar: brand mark + URL input + add button + settings.
 export component AddBar inherits Rectangle {
     in property <string> url;
     in property <string> hint;
@@ -17,8 +18,41 @@ export component AddBar inherits Rectangle {
 
     // Keep the normal toolbar compact. Reserve one helper line only when the
     // controller supplies a local validation/enqueue error.
+    // Arithmetic (spec.md 第二节第 9 条 / issue 07): padding-top 12 + content
+    // 36 + padding-bottom 12 = 60 with no feedback; 12 + 36 + spacing 4 +
+    // feedback-line 16 + padding-bottom 4 = 72 <= 78 with feedback. `height`
+    // stays a fixed 60/78 rather than the natural sum, matching the values
+    // this component already shipped before the brand-header rework.
     height: root.display-feedback.is-empty ? 60px : 78px;
     background: Theme.surface;
+
+    // The narrowest supported window is
+    // `Theme.window-min-width` (920px). At that width the toolbar's content
+    // area (920 - 2*16px padding = 888px) already fits brand + input + button
+    // + settings icon with the app name shown: logo 28 + gap 8 + name
+    // (~90px worst case for 13px/600 "BiMyScribe") + gap 12 + input (min
+    // 280) + gap 12 + button (~90px worst case for the "正在添加…" busy
+    // label) + gap 12 + icon 36 = ~568px, ~320px under 888 — no hiding is
+    // actually required at the documented minimum. 760px keeps a ~160px
+    // buffer over that computed floor (font-metric slack) while staying
+    // ~160px below the real 920px minimum, so in the shipped app the name is
+    // always visible; it only disappears if something drives the window
+    // narrower than the documented minimum.
+    //
+    // `show-app-name` is set from a `changed width` handler instead of a
+    // plain `property <bool> show-app-name: root.width >= 760px;` binding:
+    // the declarative form makes `root`'s own layoutinfo (derived bottom-up
+    // from the conditional `Text` below) and `root.width` (read here) part
+    // of the same binding-expression graph — the Slint compiler flags that
+    // as a deprecated/panic-risk binding loop even though the value is
+    // stable at runtime (the toolbar's actual width comes top-down from
+    // `app.slint`'s layout, not from this component's content). Assigning
+    // imperatively in a change handler keeps the same responsive behavior
+    // without adding `show-app-name` to that static binding graph.
+    property <bool> show-app-name: true;
+    changed width => {
+        root.show-app-name = root.width >= 760px;
+    }
 
     VerticalLayout {
         padding-left: Theme.space-md;
@@ -28,16 +62,47 @@ export component AddBar inherits Rectangle {
         spacing: Theme.space-xxs;
 
         HorizontalLayout {
-            height: Theme.control-height;
+            height: Theme.control-height-lg;
             spacing: Theme.space-sm;
             alignment: stretch;
 
-            LineEdit {
+            HorizontalLayout {
+                height: 28px;
+                spacing: Theme.space-xs;
+                horizontal-stretch: 0;
+
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.accent;
+
+                    Image {
+                        source: @image-url("../icons/logo.svg");
+                        colorize: Theme.on-accent;
+                        width: 16px;
+                        height: 16px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+
+                if root.show-app-name : Text {
+                    text: "BiMyScribe";
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+            }
+
+            AppTextField {
                 accessible-label: "B 站链接或 BV 号";
                 placeholder-text: "粘贴 B 站链接或 BV 号…";
                 text: root.url;
                 font-size: Theme.font-body;
-                height: Theme.control-height;
+                leading-icon: @image-url("../icons/link.svg");
                 min-width: 280px;
                 horizontal-stretch: 1;
                 edited(value) => { root.url-edited(value); }
@@ -50,12 +115,15 @@ export component AddBar inherits Rectangle {
 
             PrimaryButton {
                 text: root.busy ? "正在添加…" : "添加任务";
+                height: Theme.control-height-lg;
                 disabled: root.url.is-empty || root.busy;
                 clicked => { root.add-clicked(); }
             }
 
-            SecondaryButton {
-                text: "设置";
+            IconButton {
+                icon: @image-url("../icons/gear.svg");
+                label: "设置";
+                size: Theme.icon-button-size;
                 clicked => { root.settings-clicked(); }
             }
         }

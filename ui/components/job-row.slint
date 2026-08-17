@@ -1,13 +1,24 @@
 import { Theme } from "../theme.slint";
+import { StageStyle } from "../stage-style.slint";
 import { ProgressBar } from "progress.slint";
 
 // One row in the task queue list.
+//
+// The root element is a transparent spacer sized `task-row-height +
+// task-row-gap` so the virtualized ListView (which has no `spacing`, see
+// The virtualized ListView can still produce card-style gaps: the visible
+// `card` rectangle is pinned to the top of root and the row's own bottom
+// `task-row-gap` px are left empty below it. Click hotspot, hover, the focus
+// ring and the selected indicator all live inside `card`, so none of them
+// bleed into that trailing gap.
 export component JobRowView inherits Rectangle {
     in property <string> title;
     in property <string> bvid;
     in property <int> page;
+    in property <string> stage-name;
     in property <string> stage-label;
     in property <string> status-label;
+    in property <string> status-name;
     in property <int> stage-progress;     // 0..100 for current stage
     in property <int> total-progress;    // 0..100 across whole job
     in property <bool> indeterminate;
@@ -16,6 +27,16 @@ export component JobRowView inherits Rectangle {
     in property <string> elapsed;        // preformatted "MM:SS"
     property <string> display-elapsed: root.elapsed.is-empty || root.elapsed == "00:00"
         ? "—" : root.elapsed;
+    // Single source of truth for stage-semantic colors (dot / bar / meta
+    // text). Resolved once so every visual below reads the same kind.
+    property <string> kind: StageStyle.kind(root.status-name, root.stage-name, root.has-error, root.total-progress);
+    // Meta-info line color: failed rows read `danger`, completed rows
+    // read `success`, everything else stays `text-secondary`.
+    // Driven by `kind`, not by `has-error`: a job whose stage is `failed`
+    // without an error string must still read as failed here, so the meta
+    // line can never disagree with the dot and the bar.
+    property <color> meta-color: root.kind == "failed" ? Theme.danger
+        : (root.kind == "done" ? Theme.success : Theme.text-secondary);
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked();
     callback navigate(int);
@@ -41,104 +62,113 @@ export component JobRowView inherits Rectangle {
     }
     forward-focus: focus-scope;
 
-    height: Theme.task-row-height;
-    border-radius: Theme.radius-md;
-    background: root.selected ? Theme.surface-selected
-             : touch.pressed ? Theme.surface-pressed
-             : touch.has-hover ? Theme.surface-hover : Theme.surface;
-    border-color: root.has-focus ? Theme.focus-ring
-                 : (root.has-error ? Theme.danger : transparent);
-    border-width: root.has-focus ? 2px : (root.has-error ? 1px : 0px);
+    height: Theme.task-row-height + Theme.task-row-gap;
+    background: transparent;
 
-    if root.selected : Rectangle {
+    card := Rectangle {
         x: 0px;
-        y: Theme.space-xs;
-        width: 3px;
-        height: parent.height - Theme.space-md;
-        border-radius: 2px;
-        background: Theme.accent;
-    }
+        y: 0px;
+        width: parent.width;
+        height: Theme.task-row-height;
+        border-radius: Theme.radius-md;
+        background: root.selected ? Theme.surface-selected
+                 : touch.pressed ? Theme.surface-pressed
+                 : touch.has-hover ? Theme.surface-hover : Theme.surface;
+        border-color: root.has-focus ? Theme.focus-ring
+                     : (root.has-error ? Theme.danger : transparent);
+        border-width: root.has-focus ? 2px : (root.has-error ? 1px : 0px);
 
-    HorizontalLayout {
-        spacing: Theme.space-sm;
-        padding-left: Theme.space-sm;
-        padding-right: Theme.space-sm;
-        padding-top: Theme.space-xs;
-        padding-bottom: Theme.space-xs;
-
-        // Status pip
-        Rectangle {
-            width: 8px;
-            height: 8px;
-            y: (parent.height - self.height) / 2;
-            border-radius: self.width / 2;
-            background: root.has-error ? Theme.danger
-                        : root.indeterminate ? Theme.warning
-                        : (root.total-progress >= 100 ? Theme.success : Theme.accent);
+        if root.selected : Rectangle {
+            x: 0px;
+            y: Theme.space-sm;
+            width: 3px;
+            height: parent.height - 2 * Theme.space-sm;
+            border-radius: 1.5px;
+            background: Theme.accent;
         }
 
-        VerticalLayout {
-            spacing: 4px;
-            HorizontalLayout {
-                spacing: Theme.space-xs;
-                Text {
-                    text: root.title;
-                    color: Theme.text-primary;
-                    font-size: Theme.font-body;
-                    font-weight: 600;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
-                Text {
-                    text: root.display-elapsed;
-                    color: Theme.text-muted;
-                    font-size: Theme.font-caption;
-                }
+        HorizontalLayout {
+            spacing: Theme.space-sm;
+            padding-left: Theme.space-sm;
+            padding-right: Theme.space-sm;
+            padding-top: Theme.space-xs;
+            padding-bottom: Theme.space-xs;
+
+            // Status pip
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.width / 2;
+                background: StageStyle.dot(root.kind);
             }
-            HorizontalLayout {
-                spacing: Theme.space-xs;
-                Text {
-                    text: root.bvid + (root.page > 1 ? "-P" + root.page : "");
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-caption;
+
+            VerticalLayout {
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    Text {
+                        text: root.title;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-body;
+                        font-weight: 600;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.display-elapsed;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-caption;
+                    }
                 }
-                Text {
-                    text: "·";
-                    color: Theme.text-muted;
-                    font-size: Theme.font-caption;
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    Text {
+                        text: root.bvid + (root.page > 1 ? "-P" + root.page : "");
+                        color: root.meta-color;
+                        font-size: Theme.font-caption;
+                    }
+                    Text {
+                        text: "·";
+                        color: root.meta-color;
+                        font-size: Theme.font-caption;
+                    }
+                    // A trailing "✓" / percentage `Text` used to sit here,
+                    // duplicating what this stage-label text already says
+                    // (e.g. "已完成 · 100%" followed by a lone "✓"). It ate
+                    // width from this elide-able text and caused the
+                    // percentage itself to get truncated first (issue 14
+                    // defect 5); the stage label + success/danger color
+                    // already carries the same information, so the
+                    // duplicate is removed rather than re-balanced.
+                    Text {
+                        text: root.stage-label
+                            + (root.has-error ? ""
+                                : (root.indeterminate ? " · 处理中" : " · " + root.stage-progress + "%"));
+                        color: root.meta-color;
+                        font-size: Theme.font-caption;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
                 }
-                Text {
-                    text: root.stage-label
-                        + (root.has-error ? ""
-                            : (root.indeterminate ? " · 处理中" : " · " + root.stage-progress + "%"));
-                    color: root.has-error ? Theme.danger : Theme.text-secondary;
-                    font-size: Theme.font-caption;
-                    horizontal-stretch: 1;
-                    overflow: elide;
+                ProgressBar {
+                    // The bar and trailing number share one whole-job meaning.
+                    value: root.total-progress;
+                    indeterminate: root.indeterminate;
+                    height: 4px;
+                    label: "任务总进度";
+                    bar-color: StageStyle.bar(root.kind);
+                    track-color: root.selected ? Theme.selected-track : Theme.track;
                 }
-                Text {
-                    text: root.total-progress >= 100 && !root.has-error
-                          ? "✓"
-                          : (root.indeterminate ? "…" : root.total-progress + "%");
-                    color: root.has-error ? Theme.danger : Theme.text-secondary;
-                    font-size: Theme.font-caption;
-                }
-            }
-            ProgressBar {
-                // The bar and trailing number share one whole-job meaning.
-                value: root.total-progress;
-                indeterminate: root.indeterminate;
-                height: 4px;
-                label: "任务总进度";
             }
         }
-    }
 
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.focus();
-            root.clicked();
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.focus();
+                root.clicked();
+            }
         }
     }
 

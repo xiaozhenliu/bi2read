@@ -1,0 +1,101 @@
+import { Theme } from "../theme.slint";
+import { StageStyle } from "../stage-style.slint";
+
+// Stage-semantic status pill: a colored dot + label. `kind` must be one of
+// the color groups resolved by `StageStyle.kind` ("queued" / "download" /
+// "transcribe" / "polish" / "done" / "failed" / "attention"); colors are
+// looked up from `StageStyle` so callers never hardcode a status color.
+export component StatusBadge inherits Rectangle {
+    in property <string> kind;
+    in property <string> text;
+    // Unrecognized stage-names fall back to the Rust-supplied `status-label`
+    // (see stage-style.slint), whose length is not controlled here. Cap the
+    // pill's *preferred* width so a long fallback label elides instead of
+    // growing unboundedly, via the `min-width`/`preferred-width` clamp below.
+    //
+    // Deliberately NOT bound to the built-in `max-width` geometry property:
+    // Slint's layout solver folds a child's `max-width` into the max-width
+    // of every ancestor layout up the chain until something overrides it
+    // explicitly. `StatusBadge` sits as a direct child of a `VerticalLayout`
+    // in the detail header (job-detail.slint), so `max-width: 160px` here
+    // used to cap that entire VerticalLayout — and everything above it up to
+    // the center pane — at 160px, crushing the three-column layout (see
+    // issue 14 defect 1). Callers that need the remaining row width absorbed
+    // must add a trailing `Rectangle { horizontal-stretch: 1; }` sibling
+    // instead of relying on this component to cap its container.
+    in property <length> content-max-width: 160px;
+
+    height: Theme.pill-height;
+    border-radius: Theme.pill-radius;
+    background: StageStyle.badge-surface(root.kind);
+    horizontal-stretch: 0;
+    // No layout wraps this pill, so size to content explicitly: 10px padding
+    // on each side + 6px dot + 6px gap + the label's natural width, clamped
+    // to `content-max-width`.
+    min-width: min(32px + badge-label.preferred-width, root.content-max-width);
+    preferred-width: self.min-width;
+
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+
+        Rectangle {
+            width: 6px;
+            height: 6px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            background: StageStyle.dot(root.kind);
+        }
+
+        badge-label := Text {
+            text: root.text;
+            color: StageStyle.badge-text-color(root.kind);
+            font-size: Theme.font-caption;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+// Queue count pill: same pill metrics as StatusBadge but with a fixed
+// accent palette and no dot, used to replace the plain-text "N 项" count.
+export component CountPill inherits Rectangle {
+    in property <string> text;
+    // Normally a short number, but capped defensively for the same reason
+    // as StatusBadge (see its `content-max-width` comment) — and, for the
+    // same reason, not bound to the built-in `max-width` geometry property.
+    in property <length> content-max-width: 160px;
+
+    height: Theme.pill-height;
+    border-radius: Theme.pill-radius;
+    background: Theme.surface-selected;
+    horizontal-stretch: 0;
+    min-width: min(20px + count-label.preferred-width, root.content-max-width);
+    preferred-width: self.min-width;
+
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        count-label := Text {
+            text: root.text;
+            color: Theme.accent-text;
+            font-size: Theme.font-caption;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}

@@ -19,5 +19,12 @@
 # ZCode session/plan artifacts
 .zcode/
 
+# Local agent scratch caches (memory notes, UI screenshots). Design deliverables
+# Design documents and local issue records stay tracked in their designated directories.
+.workbuddy/
+
+# Local UI verification captures produced during visual QA.
+/screenshots/
+
 # Temporary artifact files (atomic-write leftovers)
 *.tmp

@@ -1,6 +1,7 @@
 // The library crate (`src/lib.rs`) owns all modules + the Slint-generated App.
 use bimyscribe::*;
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -120,7 +121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || release.private_revision.len() != 40
             || release.runtime_revision.len() != 40
             || release.runtime_tag.is_empty()
-            || release.binary_sha256 != sha256(&std::env::current_exe()?)?
+            // An empty `binary_sha256` marks a signed bundle: the final
+            // `codesign` re-signs this executable after the manifest is
+            // written, so no hash recorded at package time can match at
+            // runtime. Integrity of a signed bundle is established by
+            // `codesign --verify --deep --strict` instead. Unsigned
+            // (source-only) packages keep the hash and are still checked.
+            || (!release.binary_sha256.is_empty()
+                && release.binary_sha256 != sha256(&std::env::current_exe()?)?)
             || release.uv_sha256 != sha256(&uv)?
             || release.runtime_manifest_sha256
                 != sha256(&runtime.join(bimyscribe::funasr::RUNTIME_MANIFEST))?
@@ -1262,30 +1270,40 @@ impl Controller {
         self.stages_model.set_vec(stage_views);
 
         // Speakers: from the job's speaker_map if known, else default 3 slots.
-        let spk: Vec<SpeakerEntry> = {
-            let ids: Vec<u32> = {
-                let raw: Option<Vec<funasr::Utterance>> = job
-                    .work_dir
-                    .as_ref()
-                    .and_then(|d| pipeline::load_utterances(&d.join("transcript.raw.json")).ok());
-                match raw {
-                    Some(utts) => {
-                        let mut v: Vec<u32> = utts.iter().map(|u| u.speaker_id).collect();
-                        v.sort();
-                        v.dedup();
-                        v
-                    }
-                    None => (0..3).collect(),
+        // Segment counts (spec.md 第二节第 12 条) come from the same raw
+        // transcript: each utterance's `speaker_id` is tallied so the
+        // inspector can show "出现 N 段". When no raw transcript exists yet
+        // (job hasn't reached transcription, or the file is missing/
+        // unparseable) there is no per-speaker utterance data to count, so
+        // every speaker gets `segment_count: 0` — the UI treats 0 as "count
+        // unavailable" and hides the "出现 N 段" suffix rather than lying
+        // about zero segments.
+        let raw: Option<Vec<funasr::Utterance>> = job
+            .work_dir
+            .as_ref()
+            .and_then(|d| pipeline::load_utterances(&d.join("transcript.raw.json")).ok());
+        let (ids, segment_counts): (Vec<u32>, HashMap<u32, i32>) = match &raw {
+            Some(utts) => {
+                let mut v: Vec<u32> = utts.iter().map(|u| u.speaker_id).collect();
+                v.sort();
+                v.dedup();
+                let mut counts: HashMap<u32, i32> = HashMap::new();
+                for u in utts {
+                    *counts.entry(u.speaker_id).or_insert(0) += 1;
                 }
-            };
-            ids.iter()
-                .map(|i| SpeakerEntry {
-                    speaker_id: *i as i32,
-                    raw_label: format!("Speaker {}", i).into(),
-                    name: job.speaker_map.get(i).cloned().unwrap_or_default().into(),
-                })
-                .collect()
+                (v, counts)
+            }
+            None => ((0..3).collect(), HashMap::new()),
         };
+        let spk: Vec<SpeakerEntry> = ids
+            .iter()
+            .map(|i| SpeakerEntry {
+                speaker_id: *i as i32,
+                raw_label: format!("Speaker {}", i).into(),
+                name: job.speaker_map.get(i).cloned().unwrap_or_default().into(),
+                segment_count: *segment_counts.get(i).unwrap_or(&0),
+            })
+            .collect();
         self.speakers_model.set_vec(spk);
 
         let caps = &snap.capabilities;
@@ -1296,6 +1314,8 @@ impl Controller {
             bvid: snap.bvid.clone().into(),
             page: snap.page as i32,
             status_label: snap.status.label().into(),
+            stage_name: snap.stage.name().into(),
+            status_name: snap.status.name().into(),
             total_progress: snap.total_progress as i32,
             elapsed_secs: elapsed_secs as i32,
             elapsed: elapsed_label.into(),
@@ -1362,6 +1382,7 @@ fn job_to_row(job: &Job, selected: bool) -> JobRow {
         has_error: job.error.is_some(),
         error_text: job.error.clone().unwrap_or_default().into(),
         status_label: job.status.label().into(),
+        status_name: job.status.name().into(),
     }
 }
 
@@ -1372,6 +1393,8 @@ fn empty_detail() -> JobDetailData {
         bvid: "".into(),
         page: 1,
         status_label: "".into(),
+        stage_name: "".into(),
+        status_name: "".into(),
         total_progress: 0,
         elapsed_secs: 0,
         elapsed: "—".into(),

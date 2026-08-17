@@ -7,6 +7,12 @@ export component BaseButton inherits Rectangle {
     in property <color> text-color: Theme.on-accent;
     in property <bool> outlined: false;
     in property <bool> disabled: false;
+    // Outline color used when `outlined` is true. Defaults reproduce the
+    // Secondary button's border/border-strong hover pair; DangerOutlineButton
+    // overrides both to `danger` so it keeps a single outline color across
+    // hover states instead of the neutral secondary progression.
+    in property <color> outline-color: Theme.border;
+    in property <color> outline-color-hover: Theme.border-strong;
     out property <bool> pressed: !root.disabled && touch.pressed;
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked;
@@ -35,9 +41,19 @@ export component BaseButton inherits Rectangle {
              : touch.pressed ? Theme.accent-pressed
              : touch.has-hover ? Theme.accent-hover
              : root.base-color;
-    border-color: root.disabled ? Theme.border-strong
-                 : root.outlined ? Theme.border-strong : transparent;
-    border-width: root.disabled ? 1px : (outlined ? 1px : 0px);
+    // Primary and Danger solid buttons have no border in any state,
+    // including disabled. Outlined variants (Secondary/DangerOutline) always
+    // keep a 1px outline, including when disabled — a disabled Secondary
+    // button with no border loses its clickable shape and reads as plain
+    // gray text. Default/hover use `outline-color`/`outline-color-hover`;
+    // disabled falls back to the neutral `Theme.border` regardless of which
+    // outline color the variant configured (danger-red on a disabled button
+    // would misleadingly imply the danger action is still available).
+    border-color: root.outlined
+                    ? (root.disabled ? Theme.border
+                        : touch.has-hover ? root.outline-color-hover : root.outline-color)
+                 : transparent;
+    border-width: root.outlined ? 1px : 0px;
 
     touch := TouchArea {
         enabled: !root.disabled;
@@ -77,10 +93,16 @@ export component BaseButton inherits Rectangle {
 
     button-label := Text {
         text: root.text;
-        color: root.disabled ? Theme.text-disabled
+        // Disabled buttons pair `Theme.text-disabled` with
+        // `Theme.surface-disabled`, but that combination is only 1.65:1 —
+        // effectively unreadable (issue 14 defect 4). `Theme.text-muted`
+        // restores 4.22:1: still visibly weaker than enabled text (as a
+        // disabled control should read), but legible. Recorded as a
+        // deliberate deviation from the design spec, not a token bug.
+        color: root.disabled ? Theme.text-muted
              : root.text-color;
         font-size: Theme.font-body;
-        font-weight: 500;
+        font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
         horizontal-stretch: 1;
@@ -94,6 +116,17 @@ export component SecondaryButton inherits BaseButton {
     outlined: true;
     text-color: Theme.text-primary;
 }
+// Solid red variant. Reserved for future destructive-confirmation prompts;
+// "cancel task" uses DangerOutlineButton below to avoid excessive emphasis.
 export component DangerButton inherits BaseButton {
     base-color: Theme.danger;
+}
+// `surface` background + 1px `danger` outline + `danger` text.
+// Used for "cancel task" so the destructive action doesn't compete visually
+// with the solid-red DangerButton reserved for future confirmation prompts.
+export component DangerOutlineButton inherits BaseButton {
+    outlined: true;
+    text-color: Theme.danger;
+    outline-color: Theme.danger;
+    outline-color-hover: Theme.danger;
 }

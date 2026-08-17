@@ -84,7 +84,7 @@ fi
 
 codesign "${sign_args[@]}" "$app/Contents/Resources/bin/uv"
 codesign "${sign_args[@]}" "$app/Contents/MacOS/bimyscribe"
-"$repo_root/scripts/finalize-release-manifest.sh" "$app"
+"$repo_root/scripts/finalize-release-manifest.sh" --signed "$app"
 codesign "${sign_args[@]}" \
     --entitlements "$repo_root/packaging/macos/entitlements.plist" \
     "$app"

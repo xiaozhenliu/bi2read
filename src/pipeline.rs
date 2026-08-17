@@ -1039,8 +1039,10 @@ mod tests {
         let legacy = root.join("550e8400-e29b-41d4-a716-446655440000");
         let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1test".into(), 1);
         job.work_dir = Some(legacy.clone());
-        let mut cfg = crate::config::Config::default();
-        cfg.working_dir = root.join("new-location");
+        let cfg = crate::config::Config {
+            working_dir: root.join("new-location"),
+            ..Default::default()
+        };
 
         assert_eq!(ensure_work_dir(&mut job, &cfg).unwrap(), legacy);
         assert!(legacy.join("logs").is_dir());

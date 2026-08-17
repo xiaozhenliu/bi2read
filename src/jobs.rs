@@ -119,6 +119,24 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
+    /// Machine-readable status key, symmetric with `Stage::name()`. Consumed
+    /// by the Slint UI (`StageStyle.kind()` / `label()`) so task-level status
+    /// can outrank the stage key when the two disagree (e.g. `Cancelling`
+    /// while `stage` is still `Transcribe`); task status therefore takes precedence.
+    pub fn name(&self) -> &'static str {
+        match self {
+            JobStatus::Queued => "queued",
+            JobStatus::Running => "running",
+            JobStatus::Paused => "paused",
+            JobStatus::NeedsUserAction => "needs_user_action",
+            JobStatus::WaitingForDrive => "waiting_for_drive",
+            JobStatus::Failed => "failed",
+            JobStatus::Cancelling => "cancelling",
+            JobStatus::Cancelled => "cancelled",
+            JobStatus::Completed => "completed",
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             JobStatus::Queued => "排队中",
@@ -894,6 +912,35 @@ mod tests {
         for s in pipeline_stages() {
             assert_eq!(Stage::from_name(s.name()), Some(s));
         }
+    }
+
+    #[test]
+    fn job_status_name_is_snake_case_machine_key() {
+        // `JobStatus::name()` feeds the Slint status-key priority chain
+        // (issue 13); every variant must have a distinct snake_case key so
+        // the UI never falls back to matching Chinese `label()` strings.
+        let all = [
+            JobStatus::Queued,
+            JobStatus::Running,
+            JobStatus::Paused,
+            JobStatus::NeedsUserAction,
+            JobStatus::WaitingForDrive,
+            JobStatus::Failed,
+            JobStatus::Cancelling,
+            JobStatus::Cancelled,
+            JobStatus::Completed,
+        ];
+        let names: Vec<&str> = all.iter().map(|s| s.name()).collect();
+        for n in &names {
+            assert!(
+                n.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "not snake_case: {n}"
+            );
+        }
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate JobStatus name key");
     }
 
     #[test]

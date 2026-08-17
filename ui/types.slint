@@ -16,4 +16,9 @@ export struct SpeakerEntry {
     speaker-id: int,
     raw-label: string,
     name: string,
+    // Number of transcript segments (utterances) attributed to this speaker,
+    // sourced from `transcript.raw.json` in `src/main.rs::set_detail_for`.
+    // 0 means the count is unavailable (e.g. no raw transcript yet), not
+    // "zero segments observed" — call sites must hide the count at 0.
+    segment-count: int,
 }

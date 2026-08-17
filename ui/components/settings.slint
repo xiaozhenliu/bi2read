@@ -1,6 +1,8 @@
-import { LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { SecondaryButton, PrimaryButton } from "button.slint";
+import { AppSwitch } from "switch.slint";
+import { AppTextField } from "text-field.slint";
 import { SettingsView } from "../view-model.slint";
 
 export component LabeledEdit inherits VerticalLayout {
@@ -17,12 +19,11 @@ export component LabeledEdit inherits VerticalLayout {
         height: 16px;
         vertical-alignment: center;
     }
-    LineEdit {
+    AppTextField {
         accessible-label: root.label;
         enabled: root.enabled;
         text: root.value;
         font-size: Theme.font-body;
-        height: Theme.control-height;
         min-width: 0px;
         horizontal-stretch: 1;
         edited(v) => { root.edited(v); }
@@ -47,11 +48,10 @@ export component PathEdit inherits VerticalLayout {
     }
     HorizontalLayout {
         spacing: Theme.space-xs;
-        LineEdit {
+        AppTextField {
             accessible-label: root.label;
             text: root.value;
             font-size: Theme.font-body;
-            height: Theme.control-height;
             min-width: 0px;
             horizontal-stretch: 1;
             edited(v) => { root.edited(v); }
@@ -90,7 +90,11 @@ component SettingsNavItem inherits Rectangle {
 
     height: 36px;
     border-radius: Theme.radius-md;
-    background: root.selected ? Theme.surface-selected
+    // The selected item is a white card (not the pink
+    // surface-selected tint used for list/row selection elsewhere) with a
+    // 3px accent indicator, so it reads as "current page" rather than
+    // "selected row".
+    background: root.selected ? Theme.surface
         : touch.pressed ? Theme.surface-pressed
         : touch.has-hover ? Theme.surface-hover : transparent;
 
@@ -185,6 +189,48 @@ component NoticeCard inherits Rectangle {
     }
 }
 
+// A settings row that pairs a title + description on the left with an
+// AppSwitch on the right. The switch is wrapped in
+// its own single-child VerticalLayout with `alignment: center` so its fixed
+// 24px height is centered against the (taller) label column instead of
+// defaulting to the layout's top edge.
+component SwitchRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+
+    spacing: Theme.space-sm;
+
+    VerticalLayout {
+        spacing: Theme.space-xxs;
+        horizontal-stretch: 1;
+        Text {
+            text: root.title;
+            color: root.enabled ? Theme.text-primary : Theme.text-disabled;
+            font-size: Theme.font-body;
+            font-weight: 600;
+        }
+        Text {
+            text: root.description;
+            color: Theme.text-muted;
+            font-size: Theme.font-caption;
+            wrap: word-wrap;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 0;
+        AppSwitch {
+            checked: root.checked;
+            enabled: root.enabled;
+            label: root.title;
+            toggled(v) => { root.toggled(v); }
+        }
+    }
+}
+
 // Preferences are split into compact categories so the default window no
 // longer depends on a long form scroll. Clicking the backdrop never discards
 // the draft; Cancel and Save are the only exit actions.
@@ -196,7 +242,15 @@ export component SettingsModal inherits Rectangle {
     in property <string> error-field: "";
     in property <string> error-message: "";
     property <SettingsView> draft: root.settings;
+    // dirty 基线：不是 `root.settings`，而是弹窗打开并完成规范化之后的初始草稿
+    // 快照（见 `normalize-draft()` 与 `changed shown`）。原因见 spec.md 第二节
+    // 第 10 条：`changed shown` 会强制改写 default-screenshots / 规范化
+    // llm-api-format / default-retention，若直接比较 draft != settings 会在
+    // 打开瞬间就把这些规范化动作误报成"用户编辑"。
+    property <SettingsView> baseline: root.draft;
     property <int> selected-page: 0; // general, transcribe, AI
+    property <string> page-title: root.selected-page == 0 ? "常规"
+        : root.selected-page == 1 ? "转写" : "AI 润色";
     property <[string]> retention-options: ["推荐", "保留全部", "仅保留文档"];
     property <[string]> api-format-options: ["Anthropic 兼容", "OpenAI 兼容"];
     property <bool> remote-warning:
@@ -211,6 +265,22 @@ export component SettingsModal inherits Rectangle {
         && root.draft.llm-base-url != "http://[::1]:11434/v1/"
         && root.draft.llm-base-url != "http://[::1]:11434"
         && root.draft.llm-base-url != "http://127.0.0.1:11434";
+    // Only fields the user can edit and that get submitted on Save are
+    // compared. `runtime-bundled` / `funasr-status` / `llm-remote-warn` are
+    // derived/read-only (spec.md 第二节第 10 条) and deliberately excluded —
+    // a background refresh of those must never flip this flag.
+    property <bool> dirty:
+        root.draft.working-dir != root.baseline.working-dir
+        || root.draft.output-dir != root.baseline.output-dir
+        || root.draft.runtime-project != root.baseline.runtime-project
+        || root.draft.runtime-data-dir != root.baseline.runtime-data-dir
+        || root.draft.llm-enabled != root.baseline.llm-enabled
+        || root.draft.llm-connection-name != root.baseline.llm-connection-name
+        || root.draft.llm-model != root.baseline.llm-model
+        || root.draft.llm-base-url != root.baseline.llm-base-url
+        || root.draft.llm-api-format != root.baseline.llm-api-format
+        || root.draft.default-retention != root.baseline.default-retention
+        || root.draft.default-screenshots != root.baseline.default-screenshots;
     callback save(SettingsView);
     callback install-runtime(SettingsView);
     callback cancel();
@@ -219,20 +289,99 @@ export component SettingsModal inherits Rectangle {
 
     visible: root.shown;
 
+    // Applies the same normalization `changed shown` has always applied
+    // before persisting anything: screenshots stay off (feature not
+    // shipped), and unknown/legacy enum values from an old persisted config
+    // fall back to a known default instead of leaving the draft in a state
+    // that doesn't match any combo-box option. Mutates `draft`.
+    function normalize-draft() {
+        root.draft.default-screenshots = false;
+        if root.draft.llm-api-format != "anthropic_messages"
+                && root.draft.llm-api-format != "openai_chat_completions" {
+            root.draft.llm-api-format = "openai_chat_completions";
+        }
+        if root.draft.default-retention != "推荐"
+                && root.draft.default-retention != "保留全部"
+                && root.draft.default-retention != "仅保留文档" {
+            root.draft.default-retention = "推荐";
+        }
+    }
+
+    // `baseline`'s semantics: the normalized form of whatever is *currently
+    // persisted* in `root.settings` — independent of the user's in-progress
+    // `draft`. Rebuilds `baseline` from `root.settings` (not from `draft`)
+    // applying the exact same three normalization rules as
+    // `normalize-draft()` (deliberately not reused — that function writes
+    // `draft`, this one writes `baseline`; sharing one function across both
+    // targets would require an out-param Slint doesn't have).
+    function rebuild-baseline() {
+        root.baseline = root.settings;
+        root.baseline.default-screenshots = false;
+        if root.baseline.llm-api-format != "anthropic_messages"
+                && root.baseline.llm-api-format != "openai_chat_completions" {
+            root.baseline.llm-api-format = "openai_chat_completions";
+        }
+        if root.baseline.default-retention != "推荐"
+                && root.baseline.default-retention != "保留全部"
+                && root.baseline.default-retention != "仅保留文档" {
+            root.baseline.default-retention = "推荐";
+        }
+    }
+
     changed shown => {
         if root.shown {
             root.draft = root.settings;
             root.selected-page = 0;
-            root.draft.default-screenshots = false;
-            if root.draft.llm-api-format != "anthropic_messages"
-                    && root.draft.llm-api-format != "openai_chat_completions" {
-                root.draft.llm-api-format = "openai_chat_completions";
-            }
-            if root.draft.default-retention != "推荐"
-                    && root.draft.default-retention != "保留全部"
-                    && root.draft.default-retention != "仅保留文档" {
-                root.draft.default-retention = "推荐";
-            }
+            root.normalize-draft();
+            // Equivalent to `baseline = draft` right after a fresh
+            // normalized copy, but expressed via the same
+            // settings-is-the-source-of-truth path `changed settings` uses,
+            // so there is exactly one definition of "what baseline means".
+            root.rebuild-baseline();
+        }
+    }
+
+    // Background refresh of `root.settings` while the modal stays open.
+    // Two distinct triggers land here and need different handling:
+    //
+    // 1. A pure background refresh unrelated to this draft (rare) — the user
+    //    has not diverged from `baseline` (`!dirty`). Treat it like a fresh
+    //    open: rebuild both `draft` and `baseline` so new read-only fields
+    //    (funasr-status, ...) show up without spuriously flipping `dirty`.
+    //
+    // 2. "安装或重新验证 Runtime" (`src/main.rs:731-750` `install_runtime`):
+    //    it calls `candidate.save()` and persists the *entire* draft — not
+    //    just the runtime fields — to config *before* the install even
+    //    starts, then `sync_settings` pushes that persisted state into
+    //    `root.settings` once the background install finishes. At that
+    //    point `root.settings` already equals what the user had in `draft`
+    //    when they clicked the button (plus normalization), even though
+    //    `dirty` may still read true (comparing against the *old*
+    //    `baseline`). If we only patched the three derived fields here and
+    //    left `baseline` untouched, the "有未保存更改" pill would keep
+    //    lying — the edits are already on disk, Cancel can no longer undo
+    //    them, but the UI would still claim there's something to save.
+    //    Rebuilding `baseline = normalize(settings)` in *both* branches
+    //    fixes this: once `settings` catches up to what was persisted,
+    //    `baseline` catches up too, and `dirty` correctly drops to false.
+    //    A concurrent, unrelated background push (if it ever exists) that
+    //    does NOT match the user's further edits would still show dirty,
+    //    because `draft` (patched only on the three derived fields) would
+    //    keep differing from the now-refreshed `baseline` on whatever the
+    //    user is mid-editing.
+    changed settings => {
+        if !root.shown {
+            return;
+        }
+        if root.dirty {
+            root.draft.runtime-bundled = root.settings.runtime-bundled;
+            root.draft.funasr-status = root.settings.funasr-status;
+            root.draft.llm-remote-warn = root.settings.llm-remote-warn;
+            root.rebuild-baseline();
+        } else {
+            root.draft = root.settings;
+            root.normalize-draft();
+            root.rebuild-baseline();
         }
     }
 
@@ -249,14 +398,24 @@ export component SettingsModal inherits Rectangle {
         }
 
         modal-surface := Rectangle {
+            // Target 720x520; the min()/max() clamp keeps the modal from
+            // being clipped by the window edge down to the 920x600 minimum
+            // window size. At the 600px-tall floor this evaluates to
+            // min(520, max(500, 568)) = 520, leaving a 40px margin above and
+            // below — acceptable per issue 09.
             width: min(720px, max(680px, parent.width - Theme.space-xl));
-            height: min(560px, max(500px, parent.height - Theme.space-xl));
+            height: min(520px, max(500px, parent.height - Theme.space-xl));
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: Theme.surface;
             border-radius: Theme.radius-lg;
-            border-color: Theme.border-strong;
-            border-width: 1px;
+            // The design calls for y16/blur48/-8 spread. Slint has no shadow spread
+            // (spec.md 第一节结论 8); blur-only approximates it. No hard
+            // border — the shadow alone carries the elevation, matching the
+            // export image (no crisp edge visible around the sheet).
+            drop-shadow-offset-y: 16px;
+            drop-shadow-blur: 48px;
+            drop-shadow-color: Theme.shadow-modal;
             clip: true;
 
             // Prevent clicks in unused surface space from reaching backdrop.
@@ -266,351 +425,426 @@ export component SettingsModal inherits Rectangle {
                 clicked => { }
             }
 
-            VerticalLayout {
+            HorizontalLayout {
                 spacing: 0px;
 
                 Rectangle {
-                    height: 52px;
-                    background: Theme.surface;
-                    HorizontalLayout {
-                        padding-left: Theme.space-ml;
-                        padding-right: Theme.space-ml;
-                        spacing: Theme.space-xs;
-                        Text {
-                            text: "设置";
-                            color: Theme.text-primary;
-                            font-size: Theme.font-title;
-                            font-weight: 700;
-                            vertical-alignment: center;
+                    width: 180px;
+                    horizontal-stretch: 0;
+                    background: Theme.surface-muted;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            height: 56px;
+                            Text {
+                                text: "设置";
+                                x: Theme.space-md;
+                                width: parent.width - Theme.space-lg;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-title;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
                         }
-                        Text {
-                            text: "草稿仅在保存后生效";
-                            color: Theme.text-muted;
-                            font-size: Theme.font-caption;
-                            vertical-alignment: center;
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            accessible-role: tab-list;
+                            accessible-label: "设置分类";
+
+                            VerticalLayout {
+                                padding: Theme.space-sm;
+                                spacing: Theme.space-xxs;
+                                alignment: start;
+                                SettingsNavItem {
+                                    text: "常规";
+                                    selected: root.selected-page == 0;
+                                    clicked => { root.selected-page = 0; }
+                                    navigate(delta) => {
+                                        if delta > 0 { root.selected-page = 1; }
+                                    }
+                                }
+                                SettingsNavItem {
+                                    text: "转写";
+                                    selected: root.selected-page == 1;
+                                    clicked => { root.selected-page = 1; }
+                                    navigate(delta) => {
+                                        if delta < 0 { root.selected-page = 0; }
+                                        if delta > 0 { root.selected-page = 2; }
+                                    }
+                                }
+                                SettingsNavItem {
+                                    text: "AI 润色";
+                                    selected: root.selected-page == 2;
+                                    clicked => { root.selected-page = 2; }
+                                    navigate(delta) => {
+                                        if delta < 0 { root.selected-page = 1; }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                Rectangle { height: 1px; background: Theme.separator; }
+                Rectangle {
+                    width: 1px;
+                    horizontal-stretch: 0;
+                    background: Theme.separator;
+                }
 
-                HorizontalLayout {
+                VerticalLayout {
+                    horizontal-stretch: 1;
                     spacing: 0px;
-                    vertical-stretch: 1;
 
                     Rectangle {
-                        width: 164px;
-                        horizontal-stretch: 0;
-                        background: Theme.sidebar-background;
-                        accessible-role: tab-list;
-                        accessible-label: "设置分类";
+                        height: 56px;
+                        background: Theme.surface;
+                        HorizontalLayout {
+                            padding-left: Theme.space-lg;
+                            padding-right: Theme.space-lg;
+                            spacing: Theme.space-xs;
+                            Text {
+                                text: root.page-title;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-title;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            if root.dirty : Rectangle {
+                                height: Theme.pill-height;
+                                border-radius: Theme.pill-radius;
+                                background: Theme.warning-surface;
+                                horizontal-stretch: 0;
+                                min-width: 20px + dirty-label.preferred-width;
+                                preferred-width: self.min-width;
+                                accessible-role: AccessibleRole.text;
+                                accessible-label: "有未保存更改";
 
-                        VerticalLayout {
-                            padding: Theme.space-sm;
-                            spacing: Theme.space-xxs;
-                            alignment: start;
-                            SettingsNavItem {
-                                text: "常规";
-                                selected: root.selected-page == 0;
-                                clicked => { root.selected-page = 0; }
-                                navigate(delta) => {
-                                    if delta > 0 { root.selected-page = 1; }
-                                }
-                            }
-                            SettingsNavItem {
-                                text: "转写";
-                                selected: root.selected-page == 1;
-                                clicked => { root.selected-page = 1; }
-                                navigate(delta) => {
-                                    if delta < 0 { root.selected-page = 0; }
-                                    if delta > 0 { root.selected-page = 2; }
-                                }
-                            }
-                            SettingsNavItem {
-                                text: "AI 润色";
-                                selected: root.selected-page == 2;
-                                clicked => { root.selected-page = 2; }
-                                navigate(delta) => {
-                                    if delta < 0 { root.selected-page = 1; }
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    dirty-label := Text {
+                                        text: "有未保存更改";
+                                        color: Theme.warning-text;
+                                        font-size: Theme.font-caption;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    Rectangle {
-                        width: 1px;
-                        horizontal-stretch: 0;
-                        background: Theme.separator;
-                    }
+                    Rectangle { height: 1px; background: Theme.separator; }
 
                     if root.selected-page == 0 : Rectangle {
-                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
                         accessible-role: tab-panel;
                         accessible-label: "常规设置";
 
-                        VerticalLayout {
-                            padding: Theme.space-ml;
-                            spacing: Theme.space-sm;
-                            alignment: start;
-                            Text {
-                                text: "常规";
-                                color: Theme.text-primary;
-                                font-size: Theme.font-section;
-                                font-weight: 600;
-                            }
-                            Text {
-                                text: "管理任务文件的位置与默认保留策略。";
-                                color: Theme.text-muted;
-                                font-size: Theme.font-caption;
-                            }
-                            PathEdit {
-                                label: "工作目录";
-                                value: root.draft.working-dir;
-                                edited(v) => { root.draft.working-dir = v; }
-                                choose => {
-                                    let path = root.choose-directory("working");
-                                    if (!path.is-empty) { root.draft.working-dir = path; }
-                                }
-                                reset => { root.draft.working-dir = root.default-directory("working"); }
-                            }
-                            if root.error-field == "working" : Text {
-                                text: root.error-message;
-                                color: Theme.danger-text;
-                                font-size: Theme.font-caption;
-                            }
-                            PathEdit {
-                                label: "Markdown 输出目录";
-                                value: root.draft.output-dir;
-                                edited(v) => { root.draft.output-dir = v; }
-                                choose => {
-                                    let path = root.choose-directory("output");
-                                    if (!path.is-empty) { root.draft.output-dir = path; }
-                                }
-                                reset => { root.draft.output-dir = root.default-directory("output"); }
-                            }
-                            if root.error-field == "output" : Text {
-                                text: root.error-message;
-                                color: Theme.danger-text;
-                                font-size: Theme.font-caption;
-                            }
-                            VerticalLayout {
-                                spacing: Theme.space-xxs;
-                                Text {
-                                    text: "默认保留策略";
-                                    color: Theme.text-secondary;
-                                    font-size: Theme.font-caption;
-                                    height: 16px;
-                                }
-                                ComboBox {
-                                    accessible-label: "默认保留策略";
-                                    model: root.retention-options;
-                                    current-index: root.draft.default-retention == "保留全部" ? 1
-                                        : (root.draft.default-retention == "仅保留文档" ? 2 : 0);
-                                    height: Theme.control-height;
-                                    selected(value) => { root.draft.default-retention = value; }
-                                }
-                            }
-                            CheckBox {
-                                text: "默认开启截图（当前版本暂不可用）";
-                                checked: false;
-                                enabled: false;
-                            }
-                        }
-                    }
+                        // ScrollView overflow backstop (issue 09 审查返工
+                        // 2026-08-16): the panel's sole vertical scroll
+                        // container, `as-needed` only, see the comment on
+                        // the AI 润色 page below for the full rationale.
+                        ScrollView {
+                            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            viewport-height: general-content.preferred-height;
 
-                    if root.selected-page == 1 : Rectangle {
-                        horizontal-stretch: 1;
-                        accessible-role: tab-panel;
-                        accessible-label: "转写设置";
-
-                        VerticalLayout {
-                            padding: Theme.space-ml;
-                            spacing: Theme.space-sm;
-                            alignment: start;
-                            Text {
-                                text: "转写";
-                                color: Theme.text-primary;
-                                font-size: Theme.font-section;
-                                font-weight: 600;
-                            }
-                            Text {
-                                text: "配置本地转写运行环境。";
-                                color: Theme.text-muted;
-                                font-size: Theme.font-caption;
-                            }
-                            if root.draft.runtime-bundled : VerticalLayout {
-                                spacing: 4px;
+                            general-content := VerticalLayout {
+                                width: parent.width;
+                                padding: Theme.space-lg;
+                                spacing: Theme.space-md;
+                                alignment: start;
                                 Text {
-                                    text: "转写引擎";
-                                    color: Theme.text-primary;
-                                    font-size: Theme.font-caption;
-                                    font-weight: 600;
-                                }
-                                Text {
-                                    text: "内置 FunASR Runtime v1";
+                                    text: "管理任务文件的位置与默认保留策略。";
                                     color: Theme.text-muted;
-                                    font-size: Theme.font-body;
+                                    font-size: Theme.font-caption;
                                 }
-                            }
-                            if !root.draft.runtime-bundled : PathEdit {
-                                    label: "FunASR Runtime 项目目录";
-                                    value: root.draft.runtime-project;
-                                    can-reset: false;
-                                    edited(v) => { root.draft.runtime-project = v; }
+                                PathEdit {
+                                    label: "工作目录";
+                                    value: root.draft.working-dir;
+                                    edited(v) => { root.draft.working-dir = v; }
                                     choose => {
-                                        let path = root.choose-directory("funasr");
-                                        if (!path.is-empty) { root.draft.runtime-project = path; }
+                                        let path = root.choose-directory("working");
+                                        if (!path.is-empty) { root.draft.working-dir = path; }
                                     }
+                                    reset => { root.draft.working-dir = root.default-directory("working"); }
                                 }
-                            Text {
-                                text: root.error-field == "funasr"
-                                    ? root.error-message
-                                    : "状态：" + root.draft.funasr-status;
-                                color: root.error-field == "funasr"
-                                    ? Theme.danger-text : Theme.text-muted;
-                                font-size: Theme.font-caption;
-                            }
-                            PathEdit {
-                                label: "Runtime 数据目录（环境、模型与缓存）";
-                                value: root.draft.runtime-data-dir;
-                                edited(v) => { root.draft.runtime-data-dir = v; }
-                                choose => {
-                                    let path = root.choose-directory("runtime-data");
-                                    if (!path.is-empty) { root.draft.runtime-data-dir = path; }
+                                if root.error-field == "working" : Text {
+                                    text: root.error-message;
+                                    color: Theme.danger-text;
+                                    font-size: Theme.font-caption;
                                 }
-                                reset => {
-                                    root.draft.runtime-data-dir = root.default-directory("runtime-data");
+                                PathEdit {
+                                    label: "Markdown 输出目录";
+                                    value: root.draft.output-dir;
+                                    edited(v) => { root.draft.output-dir = v; }
+                                    choose => {
+                                        let path = root.choose-directory("output");
+                                        if (!path.is-empty) { root.draft.output-dir = path; }
+                                    }
+                                    reset => { root.draft.output-dir = root.default-directory("output"); }
                                 }
-                            }
-                            if root.error-field == "runtime-data" : Text {
-                                text: root.error-message;
-                                color: Theme.danger-text;
-                                font-size: Theme.font-caption;
-                            }
-                            SecondaryButton {
-                                text: root.saving ? "正在处理…" : "安装或重新验证 Runtime";
-                                disabled: root.saving || (!root.draft.runtime-bundled && root.draft.runtime-project.is-empty);
-                                clicked => { root.install-runtime(root.draft); }
-                            }
-                            NoticeCard {
-                                title: "运行要求";
-                                message: "原生 Runtime 的环境、模型与缓存写入上方数据目录；Docker Runtime 需要 Docker Desktop。安装可能下载较大依赖，请优先选择空间充足的磁盘。";
-                            }
-                        }
-                    }
-
-                    if root.selected-page == 2 : Rectangle {
-                        horizontal-stretch: 1;
-                        accessible-role: tab-panel;
-                        accessible-label: "AI 润色设置";
-
-                        VerticalLayout {
-                            padding: Theme.space-ml;
-                            spacing: Theme.space-xs;
-                            alignment: start;
-                            Text {
-                                text: "AI 润色";
-                                color: Theme.text-primary;
-                                font-size: Theme.font-section;
-                                font-weight: 600;
-                            }
-                            Text {
-                                text: "使用兼容端点把原始转写整理为更易阅读的文档。";
-                                color: Theme.text-muted;
-                                font-size: Theme.font-caption;
-                            }
-                            CheckBox {
-                                text: "启用 AI 润色";
-                                checked: root.draft.llm-enabled;
-                                toggled => { root.draft.llm-enabled = self.checked; }
-                            }
-
-                            if !root.draft.llm-enabled : NoticeCard {
-                                title: "保持原始转写";
-                                message: "启用后才会显示连接、模型和 API 格式。关闭状态不会发送任何文本到 LLM 端点。";
-                            }
-
-                            if root.draft.llm-enabled : VerticalLayout {
-                                spacing: Theme.space-xs;
-                                LabeledEdit {
-                                    label: "连接名称";
-                                    value: root.draft.llm-connection-name;
-                                    edited(v) => { root.draft.llm-connection-name = v; }
-                                }
-                                LabeledEdit {
-                                    label: "模型";
-                                    value: root.draft.llm-model;
-                                    edited(v) => { root.draft.llm-model = v; }
-                                }
-                                LabeledEdit {
-                                    label: "Base URL";
-                                    value: root.draft.llm-base-url;
-                                    edited(v) => { root.draft.llm-base-url = v; }
+                                if root.error-field == "output" : Text {
+                                    text: root.error-message;
+                                    color: Theme.danger-text;
+                                    font-size: Theme.font-caption;
                                 }
                                 VerticalLayout {
                                     spacing: Theme.space-xxs;
                                     Text {
-                                        text: "API 格式";
+                                        text: "默认保留策略";
                                         color: Theme.text-secondary;
                                         font-size: Theme.font-caption;
                                         height: 16px;
                                     }
                                     ComboBox {
-                                        accessible-label: "API 格式";
-                                        model: root.api-format-options;
-                                        current-index: root.draft.llm-api-format == "anthropic_messages" ? 0 : 1;
+                                        accessible-label: "默认保留策略";
+                                        model: root.retention-options;
+                                        current-index: root.draft.default-retention == "保留全部" ? 1
+                                            : (root.draft.default-retention == "仅保留文档" ? 2 : 0);
                                         height: Theme.control-height;
-                                        selected(value) => {
-                                            root.draft.llm-api-format = value == "Anthropic 兼容"
-                                                ? "anthropic_messages"
-                                                : "openai_chat_completions";
-                                        }
+                                        selected(value) => { root.draft.default-retention = value; }
                                     }
                                 }
-                                if root.remote-warning : Text {
-                                    text: "远程端点需要鉴权，当前版本仅支持本地无鉴权端点（如 Ollama）。";
-                                    color: Theme.warning-text;
-                                    font-size: Theme.font-caption;
-                                    wrap: word-wrap;
-                                    height: self.preferred-height;
+                                SwitchRow {
+                                    title: "默认开启截图";
+                                    description: "当前版本暂不可用";
+                                    checked: false;
+                                    enabled: false;
                                 }
                             }
                         }
                     }
-                }
 
-                Rectangle { height: 1px; background: Theme.separator; }
+                    if root.selected-page == 1 : Rectangle {
+                        vertical-stretch: 1;
+                        accessible-role: tab-panel;
+                        accessible-label: "转写设置";
 
-                Rectangle {
-                    height: 58px;
-                    background: Theme.surface-footer;
-                    HorizontalLayout {
-                        padding-left: Theme.space-ml;
-                        padding-right: Theme.space-ml;
-                        spacing: Theme.space-xs;
-                        Text {
-                            text: root.save-feedback.is-empty ? " " : root.save-feedback;
-                            color: root.save-feedback == "已保存" ? Theme.success : Theme.danger-text;
-                            font-size: Theme.font-caption;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            overflow: elide;
-                            accessible-live-region: polite;
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        SecondaryButton {
-                            text: "取消";
-                            disabled: root.saving;
-                            clicked => {
-                                root.shown = false;
-                                root.cancel();
+                        // ScrollView overflow backstop (issue 09 审查返工
+                        // 2026-08-16): see the AI 润色 page below for the
+                        // full rationale. Gap restored to Theme.space-md(16)
+                        // now that overflow is handled by scroll
+                        // instead of by shrinking spacing.
+                        ScrollView {
+                            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            viewport-height: transcribe-content.preferred-height;
+
+                            transcribe-content := VerticalLayout {
+                                width: parent.width;
+                                padding: Theme.space-lg;
+                                spacing: Theme.space-md;
+                                alignment: start;
+                                Text {
+                                    text: "配置本地转写运行环境。";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-caption;
+                                }
+                                if root.draft.runtime-bundled : VerticalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "转写引擎";
+                                        color: Theme.text-primary;
+                                        font-size: Theme.font-caption;
+                                        font-weight: 600;
+                                    }
+                                    Text {
+                                        text: "内置 FunASR Runtime v1";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-body;
+                                    }
+                                }
+                                if !root.draft.runtime-bundled : PathEdit {
+                                        label: "FunASR Runtime 项目目录";
+                                        value: root.draft.runtime-project;
+                                        can-reset: false;
+                                        edited(v) => { root.draft.runtime-project = v; }
+                                        choose => {
+                                            let path = root.choose-directory("funasr");
+                                            if (!path.is-empty) { root.draft.runtime-project = path; }
+                                        }
+                                    }
+                                Text {
+                                    text: root.error-field == "funasr"
+                                        ? root.error-message
+                                        : "状态：" + root.draft.funasr-status;
+                                    color: root.error-field == "funasr"
+                                        ? Theme.danger-text : Theme.text-muted;
+                                    font-size: Theme.font-caption;
+                                }
+                                PathEdit {
+                                    label: "Runtime 数据目录（环境、模型与缓存）";
+                                    value: root.draft.runtime-data-dir;
+                                    edited(v) => { root.draft.runtime-data-dir = v; }
+                                    choose => {
+                                        let path = root.choose-directory("runtime-data");
+                                        if (!path.is-empty) { root.draft.runtime-data-dir = path; }
+                                    }
+                                    reset => {
+                                        root.draft.runtime-data-dir = root.default-directory("runtime-data");
+                                    }
+                                }
+                                if root.error-field == "runtime-data" : Text {
+                                    text: root.error-message;
+                                    color: Theme.danger-text;
+                                    font-size: Theme.font-caption;
+                                }
+                                SecondaryButton {
+                                    text: root.saving ? "正在处理…" : "安装或重新验证 Runtime";
+                                    disabled: root.saving || (!root.draft.runtime-bundled && root.draft.runtime-project.is-empty);
+                                    clicked => { root.install-runtime(root.draft); }
+                                }
+                                NoticeCard {
+                                    title: "运行要求";
+                                    message: "原生 Runtime 的环境、模型与缓存写入上方数据目录；Docker Runtime 需要 Docker Desktop。安装可能下载较大依赖，请优先选择空间充足的磁盘。";
+                                }
                             }
                         }
-                        PrimaryButton {
-                            text: root.saving ? "正在保存…" : "保存";
-                            disabled: root.saving;
-                            clicked => {
-                                root.save(root.draft);
+                    }
+
+                    if root.selected-page == 2 : Rectangle {
+                        vertical-stretch: 1;
+                        accessible-role: tab-panel;
+                        accessible-label: "AI 润色设置";
+
+                        // ScrollView overflow backstop (issue 09 审查返工
+                        // 2026-08-16). This is *not* the normal state: at
+                        // 720x520 all three pages fit without scrolling per
+                        // the hand-computed budget in the issue Comments.
+                        // But the AI 润色 page (llm-enabled + the
+                        // remote-endpoint warning line, i.e. the state the
+                        // export screenshot shows) came out to a ~0px
+                        // margin in the worst-case text-wrap estimate, and
+                        // this environment cannot render the app to verify
+                        // that estimate. Shrinking `spacing` further to buy
+                        // a few more px would only relocate the risk from
+                        // "scrollbar appears" to "silent clipping" if the
+                        // estimate is still off — clipping is strictly
+                        // worse than a scrollbar, so `as-needed` scroll is
+                        // the correct backstop, per the coordinator's
+                        // relaxation of the original "no scroll container"
+                        // constraint: the layout must not
+                        // *depend on* long-form scroll", not "must not
+                        // contain a scroll container" — a backstop that
+                        // stays invisible in the common case complies).
+                        // Gap restored to Theme.space-md(16) now
+                        // that the backstop exists.
+                        ScrollView {
+                            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            viewport-height: polish-content.preferred-height;
+
+                            polish-content := VerticalLayout {
+                                width: parent.width;
+                                padding: Theme.space-lg;
+                                spacing: Theme.space-md;
+                                alignment: start;
+                                Text {
+                                    text: "使用兼容端点把原始转写整理为更易阅读的文档。";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-caption;
+                                }
+                                SwitchRow {
+                                    title: "启用 AI 润色";
+                                    description: "转写完成后使用大模型润色文稿，提升可读性";
+                                    checked: root.draft.llm-enabled;
+                                    toggled(v) => { root.draft.llm-enabled = v; }
+                                }
+
+                                if !root.draft.llm-enabled : NoticeCard {
+                                    title: "保持原始转写";
+                                    message: "启用后才会显示连接、模型和 API 格式。关闭状态不会发送任何文本到 LLM 端点。";
+                                }
+
+                                if root.draft.llm-enabled : VerticalLayout {
+                                    spacing: Theme.space-xs;
+                                    LabeledEdit {
+                                        label: "连接名称";
+                                        value: root.draft.llm-connection-name;
+                                        edited(v) => { root.draft.llm-connection-name = v; }
+                                    }
+                                    LabeledEdit {
+                                        label: "模型";
+                                        value: root.draft.llm-model;
+                                        edited(v) => { root.draft.llm-model = v; }
+                                    }
+                                    LabeledEdit {
+                                        label: "Base URL";
+                                        value: root.draft.llm-base-url;
+                                        edited(v) => { root.draft.llm-base-url = v; }
+                                    }
+                                    VerticalLayout {
+                                        spacing: Theme.space-xxs;
+                                        Text {
+                                            text: "API 格式";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.font-caption;
+                                            height: 16px;
+                                        }
+                                        ComboBox {
+                                            accessible-label: "API 格式";
+                                            model: root.api-format-options;
+                                            current-index: root.draft.llm-api-format == "anthropic_messages" ? 0 : 1;
+                                            height: Theme.control-height;
+                                            selected(value) => {
+                                                root.draft.llm-api-format = value == "Anthropic 兼容"
+                                                    ? "anthropic_messages"
+                                                    : "openai_chat_completions";
+                                            }
+                                        }
+                                    }
+                                    if root.remote-warning : Text {
+                                        text: "远程端点需要鉴权，当前版本仅支持本地无鉴权端点（如 Ollama）。";
+                                        color: Theme.warning-text;
+                                        font-size: Theme.font-caption;
+                                        wrap: word-wrap;
+                                        height: self.preferred-height;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.separator; }
+
+                    Rectangle {
+                        height: 60px;
+                        background: Theme.surface-footer;
+                        HorizontalLayout {
+                            padding-left: Theme.space-lg;
+                            padding-right: Theme.space-lg;
+                            spacing: Theme.space-xs;
+                            Text {
+                                text: root.save-feedback.is-empty ? " " : root.save-feedback;
+                                color: root.save-feedback == "已保存" ? Theme.success : Theme.danger-text;
+                                font-size: Theme.font-caption;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                accessible-live-region: polite;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            SecondaryButton {
+                                text: "取消";
+                                disabled: root.saving;
+                                clicked => {
+                                    root.shown = false;
+                                    root.cancel();
+                                }
+                            }
+                            PrimaryButton {
+                                text: root.saving ? "正在保存…" : "保存更改";
+                                disabled: root.saving;
+                                clicked => {
+                                    root.save(root.draft);
+                                }
                             }
                         }
                     }
