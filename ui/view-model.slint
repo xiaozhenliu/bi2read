@@ -54,6 +54,7 @@ export struct JobDetailData {
     can-retry: bool,           // JobCapabilities::can_retry
     can-open: bool,             // JobCapabilities::can_open_document
     can-reveal: bool,           // JobCapabilities::can_reveal
+    can-delete: bool,           // JobCapabilities::can_delete (terminal jobs only)
     can-edit-speakers: bool,    // transcript.raw.json exists
     screenshots-enabled: bool, // current screenshot capability (false until backend exists)
     retention-label: string,   // Job.retention.label()

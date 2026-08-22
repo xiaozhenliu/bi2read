@@ -297,6 +297,7 @@ export component JobDetail inherits Rectangle {
     in property <bool> can-retry;
     in property <bool> can-open;
     in property <bool> can-reveal;
+    in property <bool> can-delete;
     in property <bool> can-edit-speakers;
     in property <bool> screenshots-enabled;
     in property <string> retention-label;
@@ -365,6 +366,10 @@ export component JobDetail inherits Rectangle {
     property <bool> display-can-retry: root.fixture-failed || (!root.fixture-enabled && root.can-retry);
     property <bool> display-can-open: root.fixture-completed || (!root.fixture-enabled && root.can-open);
     property <bool> display-can-reveal: root.fixture-completed || (!root.fixture-enabled && root.can-reveal);
+    // Terminal fixtures (completed/failed) expose the delete affordance so
+    // screenshots cover it; a running task must go through cancel first.
+    property <bool> display-can-delete: (root.fixture-completed || root.fixture-failed)
+        || (!root.fixture-enabled && root.can-delete);
     property <bool> display-can-edit-speakers: root.fixture-completed
         || (!root.fixture-enabled && root.can-edit-speakers);
     property <string> display-retention: root.fixture-enabled ? "推荐" : root.retention-label;
@@ -396,7 +401,7 @@ export component JobDetail inherits Rectangle {
     property <string> display-reported-model: root.fixture-enabled
         ? "未报告" : root.reported-model;
     property <bool> display-has-actions: root.display-can-cancel || root.display-can-retry
-        || root.display-can-open || root.display-can-reveal;
+        || root.display-can-open || root.display-can-reveal || root.display-can-delete;
     property <bool> display-completed: root.display-status == "已完成";
 
     changed verification-inspector-page => {
@@ -446,6 +451,7 @@ export component JobDetail inherits Rectangle {
     callback retry-clicked();
     callback open-md-clicked();
     callback reveal-clicked();
+    callback delete-clicked();
     callback toggle-screenshots(bool);
     callback speaker-name-edited(int, string);
     callback inspector-focus-requested(bool);
@@ -599,6 +605,11 @@ export component JobDetail inherits Rectangle {
                                 text: "取消任务";
                                 disabled: root.action-pending;
                                 clicked => { root.cancel-clicked(); }
+                            }
+                            if root.display-can-delete : DangerOutlineButton {
+                                text: "删除任务";
+                                disabled: root.action-pending;
+                                clicked => { root.delete-clicked(); }
                             }
                         }
 

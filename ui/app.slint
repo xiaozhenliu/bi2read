@@ -8,6 +8,7 @@ import { JobRowView } from "components/job-row.slint";
 import { JobDetail } from "components/job-detail.slint";
 import { SettingsModal } from "components/settings.slint";
 import { TranscriptionConfirmModal } from "components/transcription-confirm.slint";
+import { ConfirmModal } from "components/confirm-modal.slint";
 import { PrimaryButton, DangerOutlineButton } from "components/button.slint";
 // Not yet wired into any screen (integration is a later issue); imported so
 // these new components are type-checked by `cargo check` / clippy, which
@@ -62,6 +63,7 @@ export component App inherits Window {
         total-progress: 0, elapsed-secs: 0, error-text: "", has-error: false,
         warning-text: "",
         can-cancel: false, can-retry: false, can-open: false, can-reveal: false,
+        can-delete: false,
         can-edit-speakers: false,
         screenshots-enabled: false, retention-label: "推荐",
         transcription-runtime: "未记录",
@@ -105,6 +107,16 @@ export component App inherits Window {
     in property <string> transcription-confirm-language: "zh";
     in property <bool> transcription-confirm-can-create: false;
 
+    // Destructive history-management confirmation (delete one terminal job /
+    // clear all terminal history, JOB-09).
+    in-out property <bool> delete-confirm-visible: false;
+    in property <string> delete-confirm-title: "";
+    in property <string> delete-confirm-message: "";
+    in property <string> delete-confirm-confirm-label: "";
+    // True when at least one terminal job exists (enables the queue-header
+    // clear-history button).
+    in property <bool> can-clear-history: false;
+
     // UI-only long-detail verification state. Empty means normal startup;
     // visual QA may select running/failed/completed without persistent data.
     in property <string> ui-verification-fixture: "";
@@ -126,6 +138,10 @@ export component App inherits Window {
     callback retry-job;
     callback open-md;
     callback reveal-in-finder;
+    callback delete-job;
+    callback clear-history;
+    callback delete-confirmed;
+    callback delete-cancelled;
     callback toggle-screenshots(bool);
     callback speaker-name-edited(int, string);
     callback save-settings(SettingsView);
@@ -216,6 +232,13 @@ export component App inherits Window {
                             disabled: root.display-jobs.length == 0 || !root.can-move-down;
                             clicked => { root.move-down(); }
                         }
+                        IconButton {
+                            size: Theme.control-height-compact;
+                            icon: @image-url("icons/trash.svg");
+                            label: "清空历史";
+                            disabled: !root.can-clear-history;
+                            clicked => { root.clear-history(); }
+                        }
                     }
 
                     if root.display-jobs.length == 0 : Rectangle {
@@ -290,6 +313,7 @@ export component App inherits Window {
                     can-retry: root.detail.can-retry;
                     can-open: root.detail.can-open;
                     can-reveal: root.detail.can-reveal;
+                    can-delete: root.detail.can-delete;
                     can-edit-speakers: root.detail.can-edit-speakers;
                     screenshots-enabled: root.detail.screenshots-enabled;
                     retention-label: root.detail.retention-label;
@@ -320,6 +344,7 @@ export component App inherits Window {
                     retry-clicked => { root.retry-job(); }
                     open-md-clicked => { root.open-md(); }
                     reveal-clicked => { root.reveal-in-finder(); }
+                    delete-clicked => { root.delete-job(); }
                     toggle-screenshots(v) => { root.toggle-screenshots(v); }
                     speaker-name-edited(id, name) => { root.speaker-name-edited(id, name); }
                     inspector-focus-requested(collapsed) => {
@@ -364,5 +389,14 @@ export component App inherits Window {
         confirm => { root.transcription-confirmed(); }
         cancel => { root.transcription-cancelled(); }
         open-settings => { root.transcription-open-settings(); }
+    }
+
+    ConfirmModal {
+        shown <=> root.delete-confirm-visible;
+        title: root.delete-confirm-title;
+        message: root.delete-confirm-message;
+        confirm-label: root.delete-confirm-confirm-label;
+        confirm => { root.delete-confirmed(); }
+        cancel => { root.delete-cancelled(); }
     }
 }

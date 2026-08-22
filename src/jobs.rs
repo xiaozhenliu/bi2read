@@ -445,6 +445,16 @@ impl JobStatus {
             JobStatus::Completed => "已完成",
         }
     }
+
+    /// Whether the job reached a state that history management may delete.
+    /// Non-terminal jobs (queued, running, cancelling, waiting) can still
+    /// make progress and must be cancelled before deletion.
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+        )
+    }
 }
 
 /// Per-stage completion state, persisted in `state.json`.
@@ -543,14 +553,12 @@ pub struct JobCapabilities {
     pub can_open_document: bool,
     pub can_reveal: bool,
     pub can_edit_speakers: bool,
+    pub can_delete: bool,
 }
 
 impl JobCapabilities {
     pub fn from_job(job: &Job) -> Self {
-        let is_terminal = matches!(
-            job.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
-        );
+        let is_terminal = job.status.is_terminal();
         let is_done = job.status == JobStatus::Completed;
         let has_transcript = job
             .work_dir
@@ -565,6 +573,7 @@ impl JobCapabilities {
             can_open_document: is_done,
             can_reveal: job.work_dir.is_some(),
             can_edit_speakers: has_transcript,
+            can_delete: is_terminal,
         }
     }
 }
@@ -964,6 +973,38 @@ pub fn load_job_state(work_dir: &Path) -> Option<Job> {
     let path = work_dir.join("state.json");
     let data = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&data).ok()
+}
+
+/// Remove a terminal job's on-disk artifacts: the job's work directory
+/// (including `state.json`) and its per-job output directory.
+///
+/// A directory that does not exist counts as success — the external drive may
+/// be unplugged, or retention may already have removed the path. Callers must
+/// still remove the job from `queue.json` (the resurrection path) only after
+/// this succeeds, so a failed artifact deletion keeps a visible record the
+/// user can retry from.
+pub fn delete_job_artifacts(job: &Job) -> Result<(), String> {
+    let mut removed: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = &job.work_dir {
+        remove_job_dir(dir)?;
+        removed.push(dir.clone());
+    }
+    if let Some(dir) = &job.final_output_dir {
+        // Guard against a future or legacy layout that points at a shared
+        // output root: only job-owned directories contain the final document.
+        if !removed.contains(dir) && dir.join("full.md").exists() {
+            remove_job_dir(dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_job_dir(dir: &Path) -> Result<(), String> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}：{error}", dir.display())),
+    }
 }
 
 /// Queue file in the platform application-state directory.
@@ -2033,6 +2074,130 @@ mod tests {
         let caps = JobCapabilities::from_job(&job);
         assert!(!caps.can_cancel);
         assert!(!caps.can_retry);
+        assert!(caps.can_delete);
+    }
+
+    #[test]
+    fn delete_capability_matches_terminal_statuses_only() {
+        let mut job = Job::new(Uuid::new_v4(), "BV1test".into(), 1);
+        for status in [
+            JobStatus::Queued,
+            JobStatus::Running,
+            JobStatus::Cancelling,
+            JobStatus::NeedsUserAction,
+            JobStatus::WaitingForDrive,
+        ] {
+            job.status = status;
+            assert!(
+                !JobCapabilities::from_job(&job).can_delete,
+                "{status:?} must not be deletable"
+            );
+        }
+        for status in [
+            JobStatus::Completed,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+        ] {
+            job.status = status;
+            assert!(
+                JobCapabilities::from_job(&job).can_delete,
+                "{status:?} must be deletable"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_job_artifacts_removes_work_and_output_dirs_across_retentions() {
+        for retention in [
+            RetentionPolicy::KeepAll,
+            RetentionPolicy::Recommended,
+            RetentionPolicy::DocumentsOnly,
+        ] {
+            let (mut job, work_dir) = completed_job_with_retained_artifacts(retention);
+            // Give the job a separate per-job output directory, as the pipeline
+            // does when `output_dir` is configured.
+            let out_dir = std::env::temp_dir().join(format!(
+                "bimyscribe-delete-out-{}-{}",
+                job.id,
+                retention.label()
+            ));
+            std::fs::remove_dir_all(&out_dir).ok();
+            std::fs::create_dir_all(&out_dir).unwrap();
+            std::fs::write(out_dir.join("full.md"), "final document").unwrap();
+            job.final_output_dir = Some(out_dir.clone());
+
+            delete_job_artifacts(&job).unwrap();
+
+            assert!(
+                !work_dir.exists(),
+                "work dir must be removed ({retention:?})"
+            );
+            assert!(
+                !out_dir.exists(),
+                "output dir must be removed ({retention:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_job_artifacts_treats_missing_dirs_as_success() {
+        let id = Uuid::new_v4();
+        let mut job = Job::new(id, "BV1test".into(), 1);
+        job.status = JobStatus::Cancelled;
+        job.work_dir = Some(std::env::temp_dir().join(format!("bimyscribe-absent-{id}")));
+        job.final_output_dir =
+            Some(std::env::temp_dir().join(format!("bimyscribe-absent-out-{id}")));
+        // External drive unplugged: neither directory exists.
+        delete_job_artifacts(&job).unwrap();
+    }
+
+    #[test]
+    fn delete_job_artifacts_never_removes_shared_output_root() {
+        let (job, work_dir) = completed_job_with_retained_artifacts(RetentionPolicy::KeepAll);
+        // A final_output_dir without full.md is not recognizable as a
+        // job-owned directory (e.g. a legacy shared root) and must survive.
+        let shared_root = std::env::temp_dir().join(format!("bimyscribe-shared-{}", job.id));
+        std::fs::remove_dir_all(&shared_root).ok();
+        std::fs::create_dir_all(&shared_root).unwrap();
+        std::fs::write(shared_root.join("other.txt"), "keep me").unwrap();
+        let mut job = job;
+        job.final_output_dir = Some(shared_root.clone());
+
+        delete_job_artifacts(&job).unwrap();
+
+        assert!(!work_dir.exists());
+        assert!(shared_root.join("other.txt").exists());
+        std::fs::remove_dir_all(shared_root).ok();
+    }
+
+    #[test]
+    fn deleted_job_does_not_resurrect_after_reload() {
+        let (mut terminal, work_dir) =
+            completed_job_with_retained_artifacts(RetentionPolicy::Recommended);
+        terminal.status = JobStatus::Cancelled;
+        let live = {
+            let mut job = Job::new(Uuid::new_v4(), "BV1live".into(), 1);
+            job.status = JobStatus::Running;
+            job
+        };
+        let queue_path =
+            std::env::temp_dir().join(format!("bimyscribe-delete-{}.json", Uuid::new_v4()));
+        {
+            let mut queue = Queue {
+                jobs: vec![terminal.clone(), live.clone()],
+            };
+            // Deletion flow: artifacts first, then drop the record and persist.
+            delete_job_artifacts(&terminal).unwrap();
+            queue.jobs.retain(|job| job.id != terminal.id);
+            std::fs::write(&queue_path, serde_json::to_vec_pretty(&queue).unwrap()).unwrap();
+        }
+
+        // Startup reload (what `Queue::load` does) must not bring the job back.
+        let reloaded = Queue::load_from(&queue_path).unwrap();
+        assert_eq!(reloaded.jobs.len(), 1);
+        assert_eq!(reloaded.jobs[0].id, live.id);
+        assert!(!work_dir.exists());
+        std::fs::remove_file(queue_path).ok();
     }
 
     #[test]

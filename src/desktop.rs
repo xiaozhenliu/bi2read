@@ -32,6 +32,10 @@ enum WorkMsg {
     Cancel(Uuid),
     /// Retry a failed job from its failed stage.
     Retry(Uuid),
+    /// Delete one terminal job: its artifacts first, then its queue record.
+    DeleteJob(Uuid),
+    /// Delete every terminal job (history clear). Live jobs are untouched.
+    ClearHistory,
     /// A speaker name was edited; regenerate the markdown documents only.
     SpeakerChanged(Uuid),
     Shutdown,
@@ -47,6 +51,8 @@ fn parse_ui_fixture(value: &str) -> Option<&'static str> {
         "failed" => Some("failed"),
         "" | "1" | "true" | "completed" => Some("completed"),
         "confirmation" => Some("confirmation"),
+        "delete-confirm" => Some("delete-confirm"),
+        "clear-confirm" => Some("clear-confirm"),
         _ => None,
     }
 }
@@ -91,7 +97,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Some(state) => Some(state),
             None => {
                 log::warn!(
-                    "ignoring unknown BIMYSCRIBE_UI_FIXTURE={value:?}; expected empty, running, failed, completed, or settings"
+                    "ignoring unknown BIMYSCRIBE_UI_FIXTURE={value:?}; expected empty, running, failed, completed, settings, confirmation, delete-confirm, or clear-confirm"
                 );
                 None
             }
@@ -146,6 +152,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.set_transcription_confirm_language("zh".into());
             app.set_transcription_confirm_can_create(true);
             app.set_transcription_confirm_visible(true);
+        } else if state == "delete-confirm" || state == "clear-confirm" {
+            // History-management confirm fixtures: completed detail behind the
+            // dialog so screenshots show the delete affordance and the modal.
+            app.set_ui_verification_fixture("completed".into());
+            if state == "delete-confirm" {
+                app.set_delete_confirm_title("删除任务".into());
+                app.set_delete_confirm_message(
+                    "将删除“这是一个用于验证详情滚动的超长视频标题：包含多个说话人、错误信息和任务阶段”的任务记录与全部产物文件（含输出目录中的 full.md）。此操作不可撤销。".into(),
+                );
+                app.set_delete_confirm_confirm_label("删除".into());
+            } else {
+                app.set_delete_confirm_title("清空任务历史".into());
+                app.set_delete_confirm_message(
+                    "将删除 3 个已结束任务的记录与产物文件；排队与运行中的任务不受影响。此操作不可撤销。".into(),
+                );
+                app.set_delete_confirm_confirm_label("清空历史".into());
+            }
+            app.set_delete_confirm_visible(true);
         } else {
             app.set_ui_verification_fixture(state.into());
         }
@@ -201,13 +225,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         for job in &q.jobs {
             jobs_model.push(job_to_row(job, false));
         }
+        app.set_can_clear_history(q.jobs.iter().any(|job| job.status.is_terminal()));
     }
 
     let shared_config = Arc::new(Mutex::new(cfg.clone()));
     let controller = Rc::new(Controller {
         app: weak.clone(),
         jobs_model: jobs_model.clone(),
-        stages_model: stages_model.clone(),
         speakers_model: speakers_model.clone(),
         config: shared_config.clone(),
         queue: queue.clone(),
@@ -215,6 +239,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         tx: tx.clone(),
         speaker_timer: Mutex::new(None),
         pending_transcription: RefCell::new(None),
+        history_confirmation: RefCell::new(None),
     });
 
     // ---- Spawn the single worker thread; only one job runs at a time. ----
@@ -355,6 +380,30 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     {
+        let c = controller.clone();
+        app.on_delete_job(move || {
+            c.request_delete_selected();
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_clear_history(move || {
+            c.request_clear_history();
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_delete_confirmed(move || {
+            c.confirm_history_action();
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_delete_cancelled(move || {
+            c.cancel_history_action();
+        });
+    }
+    {
         app.on_toggle_screenshots(move |_v| {
             // Screenshots are deferred this round; no-op.
         });
@@ -464,134 +513,304 @@ fn worker_loop(
     app: Weak<App>,
 ) {
     while let Ok(msg) = rx.recv() {
-        match msg {
-            WorkMsg::Run => {
-                // Drain the queue until idle or waiting. Each call runs one
-                // job to completion.
-                loop {
-                    let cfg_snap = config.lock().unwrap().clone();
-                    match scheduler.drain_next(&cfg_snap, &app) {
-                        DrainOutcome::Idle | DrainOutcome::Waiting => break,
-                        DrainOutcome::Ran { job_id, .. } => {
-                            refresh_selected_detail(&app, &scheduler.queue, job_id);
-                            // Continue to the next job.
-                        }
+        if !handle_work_message(msg, &scheduler, &config, &app) {
+            break;
+        }
+        // Every handled message may have moved a job into (or out of) a
+        // terminal state; keep the queue-header clear-history button truthful.
+        sync_history_capabilities(&app, &scheduler.queue);
+    }
+}
+
+/// Handle one work message. Returns false when the worker must shut down.
+fn handle_work_message(
+    msg: WorkMsg,
+    scheduler: &Arc<Scheduler>,
+    config: &Arc<Mutex<Config>>,
+    app: &Weak<App>,
+) -> bool {
+    match msg {
+        WorkMsg::Run => {
+            // Drain the queue until idle or waiting. Each call runs one
+            // job to completion.
+            loop {
+                let cfg_snap = config.lock().unwrap().clone();
+                match scheduler.drain_next(&cfg_snap, app) {
+                    DrainOutcome::Idle | DrainOutcome::Waiting => break,
+                    DrainOutcome::Ran { job_id, .. } => {
+                        refresh_selected_detail(app, &scheduler.queue, job_id);
+                        // Continue to the next job.
                     }
                 }
             }
-            WorkMsg::Cancel(job_id) => {
-                // The token was already set by the Controller (UI thread,
-                // immediate). Here we persist the Cancelling state and let
-                // the drain loop handle the aftermath.
-                let mut cancelled = false;
-                let mut persistence_error = None;
-                let mut q = scheduler.queue.lock().unwrap();
-                if let Some(job) = q.get_mut(job_id) {
-                    if job.status == JobStatus::Running {
-                        job.status = JobStatus::Cancelling;
-                        cancelled = true;
-                        if let Err(error) = jobs::save_job_state(job) {
-                            log::warn!("failed to persist cancelling state: {error}");
-                            persistence_error = Some(error.to_string());
-                        }
-                    }
-                }
-                if let Err(error) = q.save() {
-                    log::warn!("failed to persist cancellation: {error}");
-                    persistence_error = Some(error.to_string());
-                }
-                let feedback_error = persistence_error.is_some();
-                let message = if let Some(error) = persistence_error {
-                    format!("取消请求已发出，但状态保存失败：{error}")
-                } else if cancelled {
-                    "已发出取消请求".to_string()
-                } else {
-                    "取消请求已确认".to_string()
-                };
-                let app = app.clone();
-                let _ = app.upgrade_in_event_loop(move |app| {
-                    app.set_action_pending(false);
-                    app.set_action_feedback(message.into());
-                    app.set_action_feedback_error(feedback_error);
-                });
-            }
-            WorkMsg::Retry(job_id) => {
-                let mut requeued = false;
-                let mut persistence_error = None;
-                {
-                    let mut q = scheduler.queue.lock().unwrap();
-                    if let Some(job) = q.get_mut(job_id) {
-                        // Reset the failed stage to Pending and re-queue.
-                        job.status = JobStatus::Queued;
-                        job.error = None;
-                        if let Some(failed) = failed_stage(job) {
-                            job.set_stage_state(failed, StageState::Pending);
-                            job.stage = failed;
-                        }
-                        requeued = true;
-                        if let Err(error) = jobs::save_job_state(job) {
-                            log::warn!("failed to persist retry state: {error}");
-                            persistence_error = Some(error.to_string());
-                        }
-                    }
-                    if let Err(error) = q.save() {
-                        log::warn!("failed to persist retry queue: {error}");
+        }
+        WorkMsg::Cancel(job_id) => {
+            // The token was already set by the Controller (UI thread,
+            // immediate). Here we persist the Cancelling state and let
+            // the drain loop handle the aftermath.
+            let mut cancelled = false;
+            let mut persistence_error = None;
+            let mut q = scheduler.queue.lock().unwrap();
+            if let Some(job) = q.get_mut(job_id) {
+                if job.status == JobStatus::Running {
+                    job.status = JobStatus::Cancelling;
+                    cancelled = true;
+                    if let Err(error) = jobs::save_job_state(job) {
+                        log::warn!("failed to persist cancelling state: {error}");
                         persistence_error = Some(error.to_string());
                     }
                 }
-                if !requeued {
-                    let app = app.clone();
-                    let _ = app.upgrade_in_event_loop(move |app| {
-                        app.set_action_pending(false);
-                        app.set_action_feedback("重试失败：任务不存在".into());
-                        app.set_action_feedback_error(true);
-                    });
-                    continue;
+            }
+            if let Err(error) = q.save() {
+                log::warn!("failed to persist cancellation: {error}");
+                persistence_error = Some(error.to_string());
+            }
+            let feedback_error = persistence_error.is_some();
+            let message = if let Some(error) = persistence_error {
+                format!("取消请求已发出，但状态保存失败：{error}")
+            } else if cancelled {
+                "已发出取消请求".to_string()
+            } else {
+                "取消请求已确认".to_string()
+            };
+            let app = app.clone();
+            let _ = app.upgrade_in_event_loop(move |app| {
+                app.set_action_pending(false);
+                app.set_action_feedback(message.into());
+                app.set_action_feedback_error(feedback_error);
+            });
+        }
+        WorkMsg::Retry(job_id) => {
+            let mut requeued = false;
+            let mut persistence_error = None;
+            {
+                let mut q = scheduler.queue.lock().unwrap();
+                if let Some(job) = q.get_mut(job_id) {
+                    // Reset the failed stage to Pending and re-queue.
+                    job.status = JobStatus::Queued;
+                    job.error = None;
+                    if let Some(failed) = failed_stage(job) {
+                        job.set_stage_state(failed, StageState::Pending);
+                        job.stage = failed;
+                    }
+                    requeued = true;
+                    if let Err(error) = jobs::save_job_state(job) {
+                        log::warn!("failed to persist retry state: {error}");
+                        persistence_error = Some(error.to_string());
+                    }
                 }
-                if let Some(error) = persistence_error {
-                    let app = app.clone();
-                    let _ = app.upgrade_in_event_loop(move |app| {
-                        app.set_action_pending(false);
-                        app.set_action_feedback(
-                            format!("重试状态保存失败，请重试：{error}").into(),
-                        );
-                        app.set_action_feedback_error(true);
-                    });
-                    continue;
+                if let Err(error) = q.save() {
+                    log::warn!("failed to persist retry queue: {error}");
+                    persistence_error = Some(error.to_string());
                 }
-                // Drain the next runnable job.
-                let cfg_snap = config.lock().unwrap().clone();
-                let outcome = scheduler.drain_next(&cfg_snap, &app);
-                if let DrainOutcome::Ran { job_id, .. } = &outcome {
-                    refresh_selected_detail(&app, &scheduler.queue, *job_id);
-                }
+            }
+            if !requeued {
                 let app = app.clone();
                 let _ = app.upgrade_in_event_loop(move |app| {
                     app.set_action_pending(false);
-                    app.set_action_feedback(
-                        match outcome {
-                            DrainOutcome::Ran { .. } => "重试已完成",
-                            DrainOutcome::Waiting => "已重新排队，等待运行条件",
-                            DrainOutcome::Idle => "已重新排队",
-                        }
-                        .into(),
-                    );
-                    app.set_action_feedback_error(false);
+                    app.set_action_feedback("重试失败：任务不存在".into());
+                    app.set_action_feedback_error(true);
                 });
+                return true;
             }
-            WorkMsg::SpeakerChanged(job_id) => {
-                // Changing speaker names regenerates documents without
-                // transcribing the audio again.
+            if let Some(error) = persistence_error {
+                let app = app.clone();
+                let _ = app.upgrade_in_event_loop(move |app| {
+                    app.set_action_pending(false);
+                    app.set_action_feedback(format!("重试状态保存失败，请重试：{error}").into());
+                    app.set_action_feedback_error(true);
+                });
+                return true;
+            }
+            // Drain the next runnable job.
+            let cfg_snap = config.lock().unwrap().clone();
+            let outcome = scheduler.drain_next(&cfg_snap, app);
+            if let DrainOutcome::Ran { job_id, .. } = &outcome {
+                refresh_selected_detail(app, &scheduler.queue, *job_id);
+            }
+            let app = app.clone();
+            let _ = app.upgrade_in_event_loop(move |app| {
+                app.set_action_pending(false);
+                app.set_action_feedback(
+                    match outcome {
+                        DrainOutcome::Ran { .. } => "重试已完成",
+                        DrainOutcome::Waiting => "已重新排队，等待运行条件",
+                        DrainOutcome::Idle => "已重新排队",
+                    }
+                    .into(),
+                );
+                app.set_action_feedback_error(false);
+            });
+        }
+        WorkMsg::DeleteJob(job_id) => {
+            let (feedback, feedback_error) = {
                 let mut q = scheduler.queue.lock().unwrap();
-                if let Some(job) = q.get_mut(job_id) {
-                    rebuild_speaker_documents(job);
-                    let _ = jobs::save_job_state(job);
+                match q.get(job_id).cloned() {
+                    None => ("删除失败：任务不存在".to_string(), true),
+                    Some(job) if !job.status.is_terminal() => {
+                        ("删除失败：任务尚未结束，请先取消再删除".to_string(), true)
+                    }
+                    Some(job) => match jobs::delete_job_artifacts(&job) {
+                        Ok(()) => {
+                            // Artifacts are gone; only now may the queue record
+                            // disappear, otherwise recovery would resurrect a
+                            // job whose files no longer exist.
+                            q.jobs.retain(|job| job.id != job_id);
+                            match q.save() {
+                                Ok(()) => ("已删除任务及其产物".to_string(), false),
+                                Err(error) => {
+                                    (format!("任务产物已删除，但队列保存失败：{error}"), true)
+                                }
+                            }
+                        }
+                        Err(error) => (format!("删除失败：{error}"), true),
+                    },
                 }
-                let _ = q.save();
+            };
+            let jobs_snapshot = scheduler.queue.lock().unwrap().jobs.clone();
+            let app = app.clone();
+            let _ = app.upgrade_in_event_loop(move |app| {
+                let (selected, index) = current_selection(&app);
+                apply_queue_rows(&app, &jobs_snapshot, selected, index);
+                app.set_action_pending(false);
+                app.set_action_feedback(feedback.into());
+                app.set_action_feedback_error(feedback_error);
+            });
+        }
+        WorkMsg::ClearHistory => {
+            let (feedback, feedback_error) = {
+                let mut q = scheduler.queue.lock().unwrap();
+                let terminal: Vec<Job> = q
+                    .jobs
+                    .iter()
+                    .filter(|job| job.status.is_terminal())
+                    .cloned()
+                    .collect();
+                let mut deleted = 0usize;
+                let mut failed_ids: Vec<Uuid> = Vec::new();
+                let mut failed_errors: Vec<String> = Vec::new();
+                for job in &terminal {
+                    match jobs::delete_job_artifacts(job) {
+                        Ok(()) => deleted += 1,
+                        Err(error) => {
+                            failed_ids.push(job.id);
+                            failed_errors.push(error);
+                        }
+                    }
+                }
+                if deleted > 0 {
+                    // Keep any job whose artifacts could not be removed so the
+                    // user can retry; its record still points at real files.
+                    q.jobs
+                        .retain(|job| !job.status.is_terminal() || failed_ids.contains(&job.id));
+                }
+                let (mut feedback, mut feedback_error) = if deleted > 0 && failed_ids.is_empty() {
+                    (format!("已清空 {deleted} 个已结束任务"), false)
+                } else if deleted > 0 {
+                    (
+                        format!(
+                            "已清空 {deleted} 个已结束任务；{} 个删除失败：{}",
+                            failed_ids.len(),
+                            failed_errors.join("；")
+                        ),
+                        true,
+                    )
+                } else if !failed_ids.is_empty() {
+                    (format!("清空失败：{}", failed_errors.join("；")), true)
+                } else {
+                    ("没有可清空的历史任务".to_string(), false)
+                };
+                if let Err(error) = q.save() {
+                    feedback = format!("已删除任务，但队列保存失败：{error}");
+                    feedback_error = true;
+                }
+                (feedback, feedback_error)
+            };
+            let jobs_snapshot = scheduler.queue.lock().unwrap().jobs.clone();
+            let app = app.clone();
+            let _ = app.upgrade_in_event_loop(move |app| {
+                let (selected, index) = current_selection(&app);
+                apply_queue_rows(&app, &jobs_snapshot, selected, index);
+                app.set_action_pending(false);
+                app.set_action_feedback(feedback.into());
+                app.set_action_feedback_error(feedback_error);
+            });
+        }
+        WorkMsg::SpeakerChanged(job_id) => {
+            // Changing speaker names regenerates documents without
+            // transcribing the audio again.
+            let mut q = scheduler.queue.lock().unwrap();
+            if let Some(job) = q.get_mut(job_id) {
+                rebuild_speaker_documents(job);
+                let _ = jobs::save_job_state(job);
             }
-            WorkMsg::Shutdown => break,
+            let _ = q.save();
+        }
+        WorkMsg::Shutdown => return false,
+    }
+    true
+}
+
+/// Keep the queue-header clear-history availability in sync with the queue.
+fn sync_history_capabilities(app: &Weak<App>, queue: &Arc<Mutex<Queue>>) {
+    let has_terminal = queue
+        .lock()
+        .map(|q| q.jobs.iter().any(|job| job.status.is_terminal()))
+        .unwrap_or(false);
+    let _ = app.upgrade_in_event_loop(move |app| {
+        app.set_can_clear_history(has_terminal);
+    });
+}
+
+/// The (selected job id, row index) currently shown in the queue list.
+fn current_selection(app: &App) -> (Option<Uuid>, usize) {
+    let model = app.get_jobs();
+    for index in 0..model.row_count() {
+        if let Some(row) = model.row_data(index) {
+            if row.selected {
+                return (Uuid::parse_str(row.id.as_ref()).ok(), index);
+            }
         }
     }
+    (None, 0)
+}
+
+/// Rebuild the queue rows from a queue snapshot after jobs were removed.
+///
+/// Selection repair: keep the previously selected job when it still exists;
+/// otherwise select the row after the deleted one, falling back to the
+/// previous row; with an empty queue the detail pane returns to its empty
+/// state.
+fn apply_queue_rows(
+    app: &App,
+    jobs: &[Job],
+    previous_selected: Option<Uuid>,
+    fallback_index: usize,
+) {
+    let jobs_rc = app.get_jobs();
+    let Some(model) = jobs_rc.as_any().downcast_ref::<slint::VecModel<JobRow>>() else {
+        return;
+    };
+    let mut selected_index =
+        previous_selected.and_then(|id| jobs.iter().position(|job| job.id == id));
+    if selected_index.is_none() && !jobs.is_empty() {
+        selected_index = Some(fallback_index.min(jobs.len() - 1));
+    }
+    let rows: Vec<JobRow> = jobs
+        .iter()
+        .enumerate()
+        .map(|(index, job)| job_to_row(job, selected_index == Some(index)))
+        .collect();
+    model.set_vec(rows);
+    match selected_index {
+        Some(index) => show_job_detail(app, &jobs[index]),
+        None => clear_job_detail(app),
+    }
+    let len = model.row_count();
+    let selected = selected_index;
+    let (can_move_up, can_move_down) = reorder_capabilities(selected, len);
+    app.set_can_move_up(can_move_up);
+    app.set_can_move_down(can_move_down);
 }
 
 /// Rebuild all markdown documents after a speaker name change.
@@ -645,6 +864,142 @@ fn failed_stage(job: &Job) -> Option<Stage> {
     jobs::pipeline_stages()
         .into_iter()
         .find(|s| job.stage_state(*s) == StageState::Failed)
+}
+
+/// Show the full detail pane (stages, speakers, task info) for one job.
+///
+/// Extracted from the Controller so worker-side queue rebuilds after deletion
+/// can refresh the detail pane without going through UI-thread-only state.
+fn show_job_detail(app: &App, job: &Job) {
+    let stages_rc = app.get_stages();
+    let speakers_rc = app.get_speakers();
+
+    // Build the snapshot from the job (reads StageState directly).
+    let now = chrono::Utc::now();
+    let snap = jobs::JobViewSnapshot::from_job(job, now);
+    let (elapsed_secs, elapsed_label) = fmt_job_elapsed(job, now);
+
+    // Stages view: from the snapshot's StageSnapshot list (reads persisted
+    // StageState rather than inferring it from sequence position.
+    let stage_views = crate::ui_bridge::stage_views_from_snapshot(&snap);
+    if let Some(model) = stages_rc
+        .as_any()
+        .downcast_ref::<slint::VecModel<StageView>>()
+    {
+        model.set_vec(stage_views);
+    }
+
+    // Speakers: from the job's speaker_map if known, else default 3 slots.
+    // Segment counts (spec.md 第二节第 12 条) come from the same raw
+    // transcript: each utterance's `speaker_id` is tallied so the inspector
+    // can show "出现 N 段". When no raw transcript exists yet (job hasn't
+    // reached transcription, or the file is missing/unparseable) there is no
+    // per-speaker utterance data to count, so every speaker gets
+    // `segment_count: 0` — the UI treats 0 as "count unavailable" and hides
+    // the "出现 N 段" suffix rather than lying about zero segments.
+    let raw: Option<Vec<funasr::Utterance>> = job
+        .work_dir
+        .as_ref()
+        .and_then(|d| pipeline::load_utterances(&d.join("transcript.raw.json")).ok());
+    let (ids, segment_counts): (Vec<u32>, HashMap<u32, i32>) = match &raw {
+        Some(utts) => {
+            let mut v: Vec<u32> = utts.iter().map(|u| u.speaker_id).collect();
+            v.sort();
+            v.dedup();
+            let mut counts: HashMap<u32, i32> = HashMap::new();
+            for u in utts {
+                *counts.entry(u.speaker_id).or_insert(0) += 1;
+            }
+            (v, counts)
+        }
+        None => ((0..3).collect(), HashMap::new()),
+    };
+    let spk: Vec<SpeakerEntry> = ids
+        .iter()
+        .map(|i| SpeakerEntry {
+            speaker_id: *i as i32,
+            raw_label: format!("Speaker {}", i).into(),
+            name: job.speaker_map.get(i).cloned().unwrap_or_default().into(),
+            segment_count: *segment_counts.get(i).unwrap_or(&0),
+        })
+        .collect();
+    if let Some(model) = speakers_rc
+        .as_any()
+        .downcast_ref::<slint::VecModel<SpeakerEntry>>()
+    {
+        model.set_vec(spk);
+    }
+
+    let caps = &snap.capabilities;
+    let document_words = document_words_placeholder(job);
+    app.set_detail(JobDetailData {
+        has_job: true,
+        title: snap.title.clone().into(),
+        bvid: snap.bvid.clone().into(),
+        page: snap.page as i32,
+        status_label: snap.status.label().into(),
+        stage_name: snap.stage.name().into(),
+        status_name: snap.status.name().into(),
+        total_progress: snap.total_progress as i32,
+        elapsed_secs: elapsed_secs as i32,
+        elapsed: elapsed_label.into(),
+        error_text: snap.error.clone().unwrap_or_default().into(),
+        has_error: snap.error.is_some(),
+        warning_text: snap
+            .warning
+            .as_ref()
+            .map(|w| w.label())
+            .unwrap_or_default()
+            .into(),
+        can_cancel: caps.can_cancel,
+        can_retry: caps.can_retry,
+        can_open: caps.can_open_document,
+        can_reveal: caps.can_reveal,
+        can_delete: caps.can_delete,
+        can_edit_speakers: caps.can_edit_speakers,
+        screenshots_enabled: false,
+        retention_label: snap.retention_label.clone().into(),
+        created_at: fmt_timestamp(job.created_at.as_ref()).into(),
+        started_at: fmt_timestamp(job.started_at.as_ref()).into(),
+        finished_at: fmt_timestamp(job.finished_at.as_ref()).into(),
+        video_duration: job
+            .duration_ms
+            .filter(|milliseconds| *milliseconds > 0)
+            .map(|milliseconds| fmt_elapsed(milliseconds / 1000))
+            .unwrap_or_else(|| "—".to_string())
+            .into(),
+        media_size: fmt_media_size(job).into(),
+        document_words: document_words.into(),
+        transcription_runtime: snap.transcription_runtime.clone().into(),
+        transcription_source: snap.transcription_source.clone().into(),
+        transcription_backend: snap.transcription_backend.clone().into(),
+        transcription_model: snap.transcription_model.clone().into(),
+        requested_language: snap.requested_language.clone().into(),
+        reported_language: snap.reported_language.clone().into(),
+        reported_model: snap.reported_model.clone().into(),
+    });
+    if document_words == "统计中…" {
+        refresh_document_words_async(app.as_weak(), job.clone());
+    }
+}
+
+/// Clear the detail pane back to its empty state ("选择左侧任务…").
+fn clear_job_detail(app: &App) {
+    let stages_rc = app.get_stages();
+    if let Some(model) = stages_rc
+        .as_any()
+        .downcast_ref::<slint::VecModel<StageView>>()
+    {
+        model.set_vec(Vec::new());
+    }
+    let speakers_rc = app.get_speakers();
+    if let Some(model) = speakers_rc
+        .as_any()
+        .downcast_ref::<slint::VecModel<SpeakerEntry>>()
+    {
+        model.set_vec(Vec::new());
+    }
+    app.set_detail(empty_detail());
 }
 
 /// Refresh file-backed task-information metrics after a worker run completes.
@@ -705,13 +1060,13 @@ fn refresh_selected_detail(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: U
 struct Controller {
     app: Weak<App>,
     jobs_model: Rc<VecModel<JobRow>>,
-    stages_model: Rc<VecModel<StageView>>,
     speakers_model: Rc<VecModel<SpeakerEntry>>,
     config: Arc<Mutex<Config>>,
     queue: Arc<Mutex<Queue>>,
     scheduler: Arc<Scheduler>,
     tx: Sender<WorkMsg>,
     pending_transcription: RefCell<Option<PendingTranscription>>,
+    history_confirmation: RefCell<Option<HistoryConfirmation>>,
     /// Debounce timer for speaker name edits.
     speaker_timer: Mutex<Option<slint::Timer>>,
 }
@@ -723,6 +1078,13 @@ struct PendingTranscription {
     page: u32,
     runtime: crate::funasr::RuntimeDescription,
     requested_language: SourceLanguage,
+}
+
+/// Which destructive history action the confirm dialog is asking about.
+#[derive(Debug, Clone)]
+enum HistoryConfirmation {
+    DeleteJob(Uuid),
+    ClearHistory,
 }
 
 impl Controller {
@@ -1180,6 +1542,108 @@ impl Controller {
         }
     }
 
+    /// Open the destructive-action confirmation for deleting the selected job.
+    fn request_delete_selected(&self) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if app.get_action_pending() {
+            return;
+        }
+        let Some(id) = self.selected_job_id() else {
+            return;
+        };
+        let job = self.queue.lock().unwrap().get(id).cloned();
+        let Some(job) = job else { return };
+        if !job.status.is_terminal() {
+            app.set_action_feedback("删除失败：任务尚未结束，请先取消再删除".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        *self.history_confirmation.borrow_mut() = Some(HistoryConfirmation::DeleteJob(id));
+        app.set_delete_confirm_title("删除任务".into());
+        app.set_delete_confirm_message(
+            format!(
+                "将删除“{}”的任务记录与全部产物文件（含输出目录中的 full.md）。此操作不可撤销。",
+                job.title
+            )
+            .into(),
+        );
+        app.set_delete_confirm_confirm_label("删除".into());
+        app.set_delete_confirm_visible(true);
+    }
+
+    /// Open the destructive-action confirmation for clearing terminal history.
+    fn request_clear_history(&self) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if app.get_action_pending() {
+            return;
+        }
+        let terminal_count = {
+            let q = self.queue.lock().unwrap();
+            q.jobs.iter().filter(|job| job.status.is_terminal()).count()
+        };
+        if terminal_count == 0 {
+            app.set_action_feedback("没有可清空的历史任务".into());
+            app.set_action_feedback_error(false);
+            return;
+        }
+        *self.history_confirmation.borrow_mut() = Some(HistoryConfirmation::ClearHistory);
+        app.set_delete_confirm_title("清空任务历史".into());
+        app.set_delete_confirm_message(
+            format!(
+                "将删除 {terminal_count} 个已结束任务的记录与产物文件；排队与运行中的任务不受影响。此操作不可撤销。"
+            )
+            .into(),
+        );
+        app.set_delete_confirm_confirm_label("清空历史".into());
+        app.set_delete_confirm_visible(true);
+    }
+
+    /// The user confirmed the pending destructive action; dispatch it to the
+    /// worker so artifact deletion never blocks the UI thread.
+    fn confirm_history_action(&self) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let confirmation = self.history_confirmation.borrow_mut().take();
+        app.set_delete_confirm_visible(false);
+        let Some(confirmation) = confirmation else {
+            return;
+        };
+        if app.get_action_pending() {
+            return;
+        }
+        let send_result = match confirmation {
+            HistoryConfirmation::DeleteJob(id) => {
+                app.set_action_pending(true);
+                app.set_action_feedback("正在删除任务…".into());
+                app.set_action_feedback_error(false);
+                self.tx.send(WorkMsg::DeleteJob(id))
+            }
+            HistoryConfirmation::ClearHistory => {
+                app.set_action_pending(true);
+                app.set_action_feedback("正在清空历史…".into());
+                app.set_action_feedback_error(false);
+                self.tx.send(WorkMsg::ClearHistory)
+            }
+        };
+        if send_result.is_err() {
+            app.set_action_pending(false);
+            app.set_action_feedback("操作失败：后台任务已退出".into());
+            app.set_action_feedback_error(true);
+        }
+    }
+
+    fn cancel_history_action(&self) {
+        self.history_confirmation.borrow_mut().take();
+        if let Some(app) = self.app.upgrade() {
+            app.set_delete_confirm_visible(false);
+        }
+    }
+
     fn open_selected_md(&self) {
         let Some(app) = self.app.upgrade() else {
             return;
@@ -1407,110 +1871,9 @@ impl Controller {
                 .cloned()
         };
 
-        let Some(job) = job_opt else {
-            self.stages_model.set_vec(Vec::new());
-            self.speakers_model.set_vec(Vec::new());
-            app.set_detail(empty_detail());
-            self.update_reorder_capabilities();
-            return;
-        };
-
-        // Build the snapshot from the job (reads StageState directly).
-        let now = chrono::Utc::now();
-        let snap = jobs::JobViewSnapshot::from_job(&job, now);
-        let (elapsed_secs, elapsed_label) = fmt_job_elapsed(&job, now);
-
-        // Stages view: from the snapshot's StageSnapshot list (reads persisted
-        // StageState rather than inferring it from sequence position.
-        let stage_views = crate::ui_bridge::stage_views_from_snapshot(&snap);
-        self.stages_model.set_vec(stage_views);
-
-        // Speakers: from the job's speaker_map if known, else default 3 slots.
-        // Segment counts (spec.md 第二节第 12 条) come from the same raw
-        // transcript: each utterance's `speaker_id` is tallied so the
-        // inspector can show "出现 N 段". When no raw transcript exists yet
-        // (job hasn't reached transcription, or the file is missing/
-        // unparseable) there is no per-speaker utterance data to count, so
-        // every speaker gets `segment_count: 0` — the UI treats 0 as "count
-        // unavailable" and hides the "出现 N 段" suffix rather than lying
-        // about zero segments.
-        let raw: Option<Vec<funasr::Utterance>> = job
-            .work_dir
-            .as_ref()
-            .and_then(|d| pipeline::load_utterances(&d.join("transcript.raw.json")).ok());
-        let (ids, segment_counts): (Vec<u32>, HashMap<u32, i32>) = match &raw {
-            Some(utts) => {
-                let mut v: Vec<u32> = utts.iter().map(|u| u.speaker_id).collect();
-                v.sort();
-                v.dedup();
-                let mut counts: HashMap<u32, i32> = HashMap::new();
-                for u in utts {
-                    *counts.entry(u.speaker_id).or_insert(0) += 1;
-                }
-                (v, counts)
-            }
-            None => ((0..3).collect(), HashMap::new()),
-        };
-        let spk: Vec<SpeakerEntry> = ids
-            .iter()
-            .map(|i| SpeakerEntry {
-                speaker_id: *i as i32,
-                raw_label: format!("Speaker {}", i).into(),
-                name: job.speaker_map.get(i).cloned().unwrap_or_default().into(),
-                segment_count: *segment_counts.get(i).unwrap_or(&0),
-            })
-            .collect();
-        self.speakers_model.set_vec(spk);
-
-        let caps = &snap.capabilities;
-        let document_words = document_words_placeholder(&job);
-        app.set_detail(JobDetailData {
-            has_job: true,
-            title: snap.title.clone().into(),
-            bvid: snap.bvid.clone().into(),
-            page: snap.page as i32,
-            status_label: snap.status.label().into(),
-            stage_name: snap.stage.name().into(),
-            status_name: snap.status.name().into(),
-            total_progress: snap.total_progress as i32,
-            elapsed_secs: elapsed_secs as i32,
-            elapsed: elapsed_label.into(),
-            error_text: snap.error.clone().unwrap_or_default().into(),
-            has_error: snap.error.is_some(),
-            warning_text: snap
-                .warning
-                .as_ref()
-                .map(|w| w.label())
-                .unwrap_or_default()
-                .into(),
-            can_cancel: caps.can_cancel,
-            can_retry: caps.can_retry,
-            can_open: caps.can_open_document,
-            can_reveal: caps.can_reveal,
-            can_edit_speakers: caps.can_edit_speakers,
-            screenshots_enabled: false,
-            retention_label: snap.retention_label.clone().into(),
-            created_at: fmt_timestamp(job.created_at.as_ref()).into(),
-            started_at: fmt_timestamp(job.started_at.as_ref()).into(),
-            finished_at: fmt_timestamp(job.finished_at.as_ref()).into(),
-            video_duration: job
-                .duration_ms
-                .filter(|milliseconds| *milliseconds > 0)
-                .map(|milliseconds| fmt_elapsed(milliseconds / 1000))
-                .unwrap_or_else(|| "—".to_string())
-                .into(),
-            media_size: fmt_media_size(&job).into(),
-            document_words: document_words.into(),
-            transcription_runtime: snap.transcription_runtime.clone().into(),
-            transcription_source: snap.transcription_source.clone().into(),
-            transcription_backend: snap.transcription_backend.clone().into(),
-            transcription_model: snap.transcription_model.clone().into(),
-            requested_language: snap.requested_language.clone().into(),
-            reported_language: snap.reported_language.clone().into(),
-            reported_model: snap.reported_model.clone().into(),
-        });
-        if document_words == "统计中…" {
-            refresh_document_words_async(self.app.clone(), job);
+        match &job_opt {
+            Some(job) => show_job_detail(&app, job),
+            None => clear_job_detail(&app),
         }
         self.update_reorder_capabilities();
     }
@@ -1568,6 +1931,7 @@ fn empty_detail() -> JobDetailData {
         can_retry: false,
         can_open: false,
         can_reveal: false,
+        can_delete: false,
         can_edit_speakers: false,
         screenshots_enabled: false,
         retention_label: jobs::RetentionPolicy::default().label().into(),
@@ -1765,6 +2129,8 @@ mod tests {
         assert_eq!(parse_ui_fixture("settings"), Some("settings"));
         assert_eq!(parse_ui_fixture("running"), Some("running"));
         assert_eq!(parse_ui_fixture("confirmation"), Some("confirmation"));
+        assert_eq!(parse_ui_fixture("delete-confirm"), Some("delete-confirm"));
+        assert_eq!(parse_ui_fixture("clear-confirm"), Some("clear-confirm"));
         assert_eq!(parse_ui_fixture("FAILED"), Some("failed"));
         assert_eq!(parse_ui_fixture(" completed "), Some("completed"));
         assert_eq!(parse_ui_fixture("1"), Some("completed"));

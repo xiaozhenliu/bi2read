@@ -1,0 +1,112 @@
+import { Theme } from "../theme.slint";
+import { SecondaryButton, DangerButton } from "button.slint";
+
+// Small destructive-action confirmation dialog shared by the delete-job and
+// clear-history flows. The structure mirrors TranscriptionConfirmModal /
+// SettingsModal: overlay backdrop consumes clicks without closing, Escape
+// cancels, Return confirms, and the confirm button is the solid-red
+// DangerButton reserved for exactly this kind of destructive prompt.
+export component ConfirmModal inherits Rectangle {
+    in-out property <bool> shown: false;
+    in property <string> title: "";
+    in property <string> message: "";
+    in property <string> confirm-label: "";
+    in property <string> cancel-label: "取消";
+    callback confirm();
+    callback cancel();
+
+    visible: root.shown;
+
+    if root.shown : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.overlay;
+
+        // Consume backdrop clicks without closing; deletion requires an
+        // explicit button decision.
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { }
+        }
+
+        modal_focus := FocusScope {
+            x: 0px;
+            y: 0px;
+            width: 0px;
+            height: 0px;
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.cancel();
+                    return accept;
+                }
+                if event.text == Key.Return {
+                    root.confirm();
+                    return accept;
+                }
+                return reject;
+            }
+        }
+
+        Rectangle {
+            width: min(420px, max(360px, parent.width - Theme.space-xl));
+            height: card-content.preferred-height + Theme.space-lg + Theme.space-lg;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.surface;
+            border-radius: Theme.radius-lg;
+            drop-shadow-offset-y: 16px;
+            drop-shadow-blur: 48px;
+            drop-shadow-color: Theme.shadow-modal;
+            clip: true;
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => { }
+            }
+
+            // Slint has no `dialog` role; modals here use `groupbox` with the
+            // title as the accessible name (matches TranscriptionConfirmModal).
+            accessible-role: groupbox;
+            accessible-label: root.title;
+
+            card-content := VerticalLayout {
+                padding-left: Theme.space-lg;
+                padding-right: Theme.space-lg;
+                padding-top: Theme.space-lg;
+                padding-bottom: Theme.space-lg;
+                spacing: Theme.space-md;
+
+                Text {
+                    text: root.title;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-section;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.message;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    alignment: end;
+                    SecondaryButton {
+                        text: root.cancel-label;
+                        clicked => { root.cancel(); }
+                    }
+                    DangerButton {
+                        text: root.confirm-label;
+                        clicked => { root.confirm(); }
+                    }
+                }
+            }
+        }
+    }
+}

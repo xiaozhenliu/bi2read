@@ -3,6 +3,29 @@
 本文件保存每个版本的简要摘要；完整说明见 `docs/releases/`。
 This file keeps short per-version summaries; see `docs/releases/` for details.
 
+## 0.4.1 - 2026-08-22
+
+### 中文
+
+- 新增转写历史管理：已完成、失败、已取消的任务可从详情页删除，任务队列提供
+  “清空历史”一键删除全部已结束任务；排队与运行中的任务不受影响。
+- 删除与清空均经过确认弹窗，移除任务记录的同时删除任务工作目录与专属输出
+  目录；外置盘未连接视为产物已不存在，删除后重启不会复活任务。
+- 删除选中任务后自动选中相邻任务，队列清空后回到空状态。
+
+### English
+
+- Transcription history management: completed, failed and cancelled jobs can be
+  deleted from the task detail, and the queue header gains a "clear history"
+  action that removes every finished job at once; queued and running jobs are
+  untouched.
+- Deletion and clearing require a confirmation dialog and remove the queue
+  record together with the job's working directory and its own output
+  directory; an unplugged external drive counts as already gone, and deleted
+  jobs never reappear after a restart.
+- Deleting the selected task selects the neighbouring task automatically, and
+  clearing the last task returns the queue to its empty state.
+
 ## 0.4.0 - 2026-08-22
 
 ### 中文
