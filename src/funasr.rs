@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const RUNTIME_MANIFEST: &str = "bimyscribe-runtime.toml";
-pub const SUPPORTED_CONTRACT_VERSION: u32 = 1;
+pub const LEGACY_CONTRACT_VERSION: u32 = 1;
+pub const SUPPORTED_CONTRACT_VERSION: u32 = 2;
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 const BUNDLED_RUNTIME_DIR: &str = "runtime";
@@ -82,6 +83,16 @@ pub struct RuntimeManifest {
     pub probe_service: Option<String>,
     pub output_schema_version: u32,
     pub output_schema_file: PathBuf,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub model_description: Option<String>,
+    #[serde(default)]
+    pub recommended_languages: Vec<crate::jobs::SourceLanguage>,
+    #[serde(default)]
+    pub auto_detection: Option<bool>,
+    #[serde(default)]
+    pub known_limitations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -92,6 +103,13 @@ pub enum RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeUv => "native-uv",
+            Self::DockerCompose => "docker-compose",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::NativeUv => "原生 uv",
@@ -107,6 +125,26 @@ pub struct RuntimeReady {
     project_dir: String,
     fingerprint: u64,
     pub device: String,
+}
+
+/// Read-only Runtime information used by Job creation and later CLI/UI
+/// presentation. Description fields are informational; `ready` is the only
+/// execution gate and no language compatibility is inferred here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeDescription {
+    pub identity: String,
+    pub source: crate::jobs::RuntimeSource,
+    pub backend: crate::jobs::RuntimeBackend,
+    pub contract_version: u32,
+    pub project: PathBuf,
+    pub data_dir: PathBuf,
+    pub display_name: Option<String>,
+    #[serde(rename = "model")]
+    pub model_description: Option<String>,
+    pub recommended_languages: Vec<crate::jobs::SourceLanguage>,
+    pub auto_detection: Option<bool>,
+    pub known_limitations: Vec<String>,
+    pub ready: bool,
 }
 
 pub fn runtime_status(project_dir: &Path, runtime_data: &Path) -> String {
@@ -127,6 +165,83 @@ pub fn runtime_is_ready(project_dir: &Path, runtime_data: &Path) -> bool {
         .ok()
         .and_then(|manifest| matching_ready_record(project_dir, runtime_data, &manifest))
         .is_some()
+}
+
+/// Describe one Runtime from a single normalized project/data pair.
+///
+/// Manifest parsing, content fingerprinting and ready-record matching live in
+/// this seam so callers do not independently derive an execution identity.
+/// Missing optional manifest descriptions remain missing; this function never
+/// turns a recommendation into a compatibility claim.
+pub fn describe_runtime(
+    project_dir: &Path,
+    runtime_data: &Path,
+    source: crate::jobs::RuntimeSource,
+) -> Result<RuntimeDescription, FunasrError> {
+    if !project_dir.is_absolute() {
+        return Err(FunasrError::Validation(format!(
+            "Runtime 目录必须是绝对路径：{}",
+            project_dir.display()
+        )));
+    }
+    let project = project_dir.canonicalize().map_err(FunasrError::Read)?;
+    if !runtime_data.is_absolute() {
+        return Err(FunasrError::Validation(format!(
+            "Runtime 数据目录必须是绝对路径：{}",
+            runtime_data.display()
+        )));
+    }
+    let data_dir = runtime_data
+        .canonicalize()
+        .unwrap_or_else(|_| runtime_data.to_path_buf());
+    let manifest = load_runtime(&project)?;
+    let fingerprint = runtime_fingerprint(&project, &manifest)?;
+    let identity = format!(
+        "contract-v{}:{}:{:016x}",
+        manifest.contract_version,
+        manifest.backend.as_str(),
+        fingerprint
+    );
+    let ready = matching_ready_record(&project, &data_dir, &manifest).is_some();
+    Ok(RuntimeDescription {
+        identity,
+        source,
+        backend: match manifest.backend {
+            RuntimeBackend::NativeUv => crate::jobs::RuntimeBackend::NativeUv,
+            RuntimeBackend::DockerCompose => crate::jobs::RuntimeBackend::DockerCompose,
+        },
+        contract_version: manifest.contract_version,
+        project,
+        data_dir,
+        display_name: manifest.display_name,
+        model_description: manifest.model_description,
+        recommended_languages: manifest.recommended_languages,
+        auto_detection: manifest.auto_detection,
+        known_limitations: manifest.known_limitations,
+        ready,
+    })
+}
+
+/// Return the stable identity captured by the Runtime readiness record.
+///
+/// The project path is persisted separately in `TranscriptionSelection`; this
+/// identity is deliberately derived from the manifest contract/backend and
+/// its content fingerprint rather than from a mutable Config path. A caller
+/// must resolve this at Job creation time, after readiness has been checked.
+pub fn runtime_identity(project_dir: &Path, runtime_data: &Path) -> Result<String, FunasrError> {
+    let manifest = load_runtime(project_dir)?;
+    if matching_ready_record(project_dir, runtime_data, &manifest).is_none() {
+        return Err(FunasrError::Validation(
+            "Runtime 尚未安装或就绪记录已失效".into(),
+        ));
+    }
+    let fingerprint = runtime_fingerprint(project_dir, &manifest)?;
+    Ok(format!(
+        "contract-v{}:{}:{:016x}",
+        manifest.contract_version,
+        manifest.backend.as_str(),
+        fingerprint
+    ))
 }
 
 fn matching_ready_record(
@@ -341,6 +456,12 @@ fn native_uv_environment(
 struct NormalizedTranscript {
     schema_version: u32,
     segments: Vec<NormalizedSegment>,
+    #[serde(default)]
+    reported_language: Option<crate::jobs::SourceLanguage>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    runtime_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,7 +483,10 @@ pub fn load_runtime(project_dir: &Path) -> Result<RuntimeManifest, FunasrError> 
         std::fs::read_to_string(project_dir.join(RUNTIME_MANIFEST)).map_err(FunasrError::Read)?;
     let manifest: RuntimeManifest =
         toml::from_str(&data).map_err(|error| FunasrError::Manifest(error.to_string()))?;
-    if manifest.contract_version != SUPPORTED_CONTRACT_VERSION {
+    if !matches!(
+        manifest.contract_version,
+        LEGACY_CONTRACT_VERSION | SUPPORTED_CONTRACT_VERSION
+    ) {
         return Err(FunasrError::Validation(format!(
             "不支持 Runtime contract_version {}",
             manifest.contract_version
@@ -537,12 +661,44 @@ fn compose_spec(
         .env("BIMYSCRIBE_FUNASR_CACHE_DIR", runtime_cache.as_os_str())
 }
 
+fn docker_transcribe_tail(
+    manifest: &RuntimeManifest,
+    container: &str,
+    job_id: &uuid::Uuid,
+    instance_nonce: &str,
+    language: crate::jobs::SourceLanguage,
+) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--rm".into(),
+        "--name".into(),
+        container.into(),
+        "--label".into(),
+        "com.bimyscribe.app=true".into(),
+        "--label".into(),
+        format!("com.bimyscribe.job={job_id}"),
+        "--label".into(),
+        format!("com.bimyscribe.instance={instance_nonce}"),
+        manifest
+            .transcribe_service
+            .clone()
+            .expect("validated transcribe service"),
+        "/workspace/input/normalized.wav".into(),
+        "--out".into(),
+        "/workspace/output".into(),
+        "--language".into(),
+        language.as_str().into(),
+    ]
+}
+
 fn native_uv_spec(
     project_dir: &Path,
     manifest: &RuntimeManifest,
     input: &Path,
     output: &Path,
     runtime_data: &Path,
+    language: crate::jobs::SourceLanguage,
+    runtime_identity: &str,
 ) -> crate::process::SubprocessSpec {
     let entrypoint = manifest
         .entrypoint
@@ -565,9 +721,12 @@ fn native_uv_spec(
             output.to_string_lossy().into_owned(),
             "--device".into(),
             "auto".into(),
+            "--language".into(),
+            language.as_str().into(),
         ]),
         runtime_data,
     )
+    .env("BIMYSCRIBE_RUNTIME_IDENTITY", runtime_identity)
     .cwd(project_dir)
 }
 
@@ -579,28 +738,51 @@ pub fn container_name(job_id: &uuid::Uuid, instance_nonce: &str) -> String {
 pub struct TranscribeRequest<'a> {
     pub job_dir: &'a Path,
     pub normalized_wav: &'a Path,
-    pub project_dir: &'a Path,
-    pub runtime_data_dir: &'a Path,
+    pub selection: &'a crate::jobs::TranscriptionSelection,
+    pub duration_ms: Option<u64>,
     pub log_path: &'a Path,
     pub job_id: &'a uuid::Uuid,
     pub instance_nonce: &'a str,
     pub cancel_token: &'a crate::cancel::CancellationToken,
 }
 
-pub fn run(request: TranscribeRequest<'_>) -> Result<Vec<Utterance>, FunasrError> {
-    let manifest = load_runtime(request.project_dir)?;
-    if matching_ready_record(request.project_dir, request.runtime_data_dir, &manifest).is_none() {
-        return Err(FunasrError::Validation(
-            "Runtime 尚未安装、验证记录已失效或项目内容已改变".into(),
+#[derive(Debug, Clone)]
+pub struct TranscribeOutcome {
+    pub utterances: Vec<Utterance>,
+    pub result: crate::jobs::TranscriptionResult,
+}
+
+pub fn run(request: TranscribeRequest<'_>) -> Result<TranscribeOutcome, FunasrError> {
+    request
+        .selection
+        .validate()
+        .map_err(FunasrError::Validation)?;
+    let project_dir = request.selection.runtime_project.as_path();
+    let runtime_data_dir = request.selection.runtime_data_dir.as_path();
+    let description = describe_runtime(
+        project_dir,
+        runtime_data_dir,
+        request.selection.runtime_source,
+    )?;
+    if description.contract_version != SUPPORTED_CONTRACT_VERSION {
+        return Err(FunasrError::ContractUpgradeRequired(
+            description.contract_version,
         ));
     }
+    if description.identity != request.selection.runtime_identity {
+        return Err(FunasrError::IdentityChanged);
+    }
+    if !description.ready {
+        return Err(FunasrError::NotReady);
+    }
+    let manifest = load_runtime(project_dir)?;
     let funasr_dir = request.job_dir.join("funasr");
     let input_dir = funasr_dir.join("input");
     let output_dir = funasr_dir.join("output");
     std::fs::create_dir_all(&input_dir).map_err(FunasrError::Read)?;
     std::fs::create_dir_all(&output_dir).map_err(FunasrError::Read)?;
-    let model_cache = request.runtime_data_dir.join("models");
-    let runtime_cache = request.runtime_data_dir.join("cache");
+    let model_cache = runtime_data_dir.join("models");
+    let runtime_cache = runtime_data_dir.join("cache");
     std::fs::create_dir_all(&model_cache).map_err(FunasrError::Read)?;
     std::fs::create_dir_all(&runtime_cache).map_err(FunasrError::Read)?;
     let input_copy = input_dir.join("normalized.wav");
@@ -614,11 +796,13 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<Vec<Utterance>, FunasrError
     let (spec, owned_container) = match manifest.backend {
         RuntimeBackend::NativeUv => (
             native_uv_spec(
-                request.project_dir,
+                project_dir,
                 &manifest,
                 &input_copy,
                 &output_dir,
-                request.runtime_data_dir,
+                runtime_data_dir,
+                request.selection.requested_language,
+                &request.selection.runtime_identity,
             )
             .log(request.log_path),
             None,
@@ -628,34 +812,26 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<Vec<Utterance>, FunasrError
                 return Err(FunasrError::DockerUnavailable);
             }
             let cname = container_name(request.job_id, request.instance_nonce);
-            let tail = vec![
-                "run".into(),
-                "--rm".into(),
-                "--name".into(),
-                cname.clone(),
-                "--label".into(),
-                "com.bimyscribe.app=true".into(),
-                "--label".into(),
-                format!("com.bimyscribe.job={}", request.job_id),
-                "--label".into(),
-                format!("com.bimyscribe.instance={}", request.instance_nonce),
-                manifest
-                    .transcribe_service
-                    .clone()
-                    .expect("validated transcribe service"),
-                "/workspace/input/normalized.wav".into(),
-                "--out".into(),
-                "/workspace/output".into(),
-            ];
+            let tail = docker_transcribe_tail(
+                &manifest,
+                &cname,
+                request.job_id,
+                request.instance_nonce,
+                request.selection.requested_language,
+            );
             (
                 compose_spec(
-                    request.project_dir,
+                    project_dir,
                     &manifest,
                     &input_dir,
                     &output_dir,
                     &model_cache,
                     &runtime_cache,
                     tail,
+                )
+                .env(
+                    "BIMYSCRIBE_RUNTIME_IDENTITY",
+                    request.selection.runtime_identity.as_str(),
                 )
                 .log(request.log_path),
                 Some(cname),
@@ -685,12 +861,20 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<Vec<Utterance>, FunasrError
     }
 
     let normalized_json = output_dir.join("normalized.json");
-    let utterances = parse_transcript(&normalized_json)?;
+    let outcome = parse_transcript_outcome(&normalized_json, request.duration_ms)?;
+    if outcome
+        .result
+        .reported_runtime_identity
+        .as_deref()
+        .is_some_and(|reported| reported != request.selection.runtime_identity)
+    {
+        return Err(FunasrError::IdentityChanged);
+    }
     let dest = request.job_dir.join("transcript.raw.json");
-    let data = serde_json::to_vec_pretty(&utterances).map_err(FunasrError::Parse)?;
+    let data = serde_json::to_vec_pretty(&outcome.utterances).map_err(FunasrError::Parse)?;
     crate::jobs::atomic_write(&dest, &data).map_err(|error| FunasrError::Io(error.to_string()))?;
     let _ = std::fs::remove_file(input_copy);
-    Ok(utterances)
+    Ok(outcome)
 }
 
 fn remove_owned_container(container: &str, job_id: &uuid::Uuid, instance_nonce: &str) -> bool {
@@ -759,6 +943,13 @@ pub fn cleanup_residual_containers<'a>(
 }
 
 pub fn parse_transcript(path: &Path) -> Result<Vec<Utterance>, FunasrError> {
+    Ok(parse_transcript_outcome(path, None)?.utterances)
+}
+
+pub fn parse_transcript_outcome(
+    path: &Path,
+    duration_ms: Option<u64>,
+) -> Result<TranscribeOutcome, FunasrError> {
     let data = std::fs::read(path).map_err(FunasrError::Read)?;
     let transcript: NormalizedTranscript =
         serde_json::from_slice(&data).map_err(FunasrError::Parse)?;
@@ -774,6 +965,18 @@ pub fn parse_transcript(path: &Path) -> Result<Vec<Utterance>, FunasrError> {
         if segment.end_ms < segment.start_ms {
             return Err(FunasrError::Validation(format!(
                 "segment {} 的结束时间早于开始时间",
+                index + 1
+            )));
+        }
+        if duration_ms.is_some_and(|duration| segment.end_ms > duration) {
+            return Err(FunasrError::Validation(format!(
+                "segment {} 的时间超出媒体时长",
+                index + 1
+            )));
+        }
+        if segment.text.trim().is_empty() {
+            return Err(FunasrError::Validation(format!(
+                "segment {} 的文本为空",
                 index + 1
             )));
         }
@@ -802,10 +1005,25 @@ pub fn parse_transcript(path: &Path) -> Result<Vec<Utterance>, FunasrError> {
         });
     }
     validate(&out)?;
-    Ok(out)
+    let result = crate::jobs::TranscriptionResult::new(
+        transcript.reported_language,
+        transcript.model.filter(|model| !model.trim().is_empty()),
+        transcript
+            .runtime_identity
+            .filter(|identity| !identity.trim().is_empty()),
+    );
+    Ok(TranscribeOutcome {
+        utterances: out,
+        result,
+    })
 }
 
 fn validate(utterances: &[Utterance]) -> Result<(), FunasrError> {
+    if utterances.is_empty() {
+        return Err(FunasrError::Validation(
+            "normalized output 不包含任何 segments".into(),
+        ));
+    }
     let mut ids = HashSet::new();
     for utterance in utterances {
         if !ids.insert(&utterance.id) {
@@ -841,6 +1059,12 @@ pub enum FunasrError {
     Manifest(String),
     #[error("验证失败：{0}")]
     Validation(String),
+    #[error("runtime-contract-upgrade-required: Runtime contract v{0} 需要升级到 v{SUPPORTED_CONTRACT_VERSION}")]
+    ContractUpgradeRequired(u32),
+    #[error("runtime-not-ready: Runtime 尚未就绪或 ready record 已失效")]
+    NotReady,
+    #[error("runtime-identity-changed: Job 冻结的 Runtime identity 已改变")]
+    IdentityChanged,
     #[error("I/O：{0}")]
     Io(String),
     #[error("Docker：{0}")]
@@ -872,6 +1096,28 @@ mod tests {
             std::fs::write(path, "fixture").unwrap();
         }
         root
+    }
+
+    fn smoke_selection(
+        project_dir: &Path,
+        runtime_data: &Path,
+        language: crate::jobs::SourceLanguage,
+    ) -> crate::jobs::TranscriptionSelection {
+        let manifest = load_runtime(project_dir).unwrap();
+        let backend = match manifest.backend {
+            RuntimeBackend::NativeUv => crate::jobs::RuntimeBackend::NativeUv,
+            RuntimeBackend::DockerCompose => crate::jobs::RuntimeBackend::DockerCompose,
+        };
+        crate::jobs::TranscriptionSelection::new(
+            crate::jobs::RuntimeSource::External,
+            project_dir.canonicalize().unwrap(),
+            runtime_data.to_path_buf(),
+            runtime_identity(project_dir, runtime_data).unwrap(),
+            backend,
+            None,
+            language,
+            crate::jobs::CreatedFrom::Cli,
+        )
     }
 
     #[test]
@@ -915,6 +1161,165 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     }
 
     #[test]
+    fn describes_v2_optional_fields_without_claiming_compatibility() {
+        let root = runtime_fixture(
+            r#"contract_version = 2
+backend = "docker-compose"
+compose_file = "docker-compose.yml"
+transcribe_service = "transcribe"
+probe_service = "probe"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+display_name = "测试 Docker Runtime"
+model_description = "English and Chinese fixture models"
+recommended_languages = ["zh", "en"]
+auto_detection = true
+known_limitations = ["仅用于契约测试"]
+"#,
+            &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
+        );
+        let data_dir =
+            std::env::temp_dir().join(format!("bimyscribe-runtime-data-{}", uuid::Uuid::new_v4()));
+        let description =
+            describe_runtime(&root, &data_dir, crate::jobs::RuntimeSource::External).unwrap();
+        assert_eq!(description.contract_version, 2);
+        assert_eq!(description.source, crate::jobs::RuntimeSource::External);
+        assert_eq!(
+            description.backend,
+            crate::jobs::RuntimeBackend::DockerCompose
+        );
+        assert_eq!(
+            description.display_name.as_deref(),
+            Some("测试 Docker Runtime")
+        );
+        assert_eq!(
+            description.model_description.as_deref(),
+            Some("English and Chinese fixture models")
+        );
+        assert_eq!(
+            description.recommended_languages,
+            vec![
+                crate::jobs::SourceLanguage::Zh,
+                crate::jobs::SourceLanguage::En
+            ]
+        );
+        assert_eq!(description.auto_detection, Some(true));
+        assert_eq!(description.known_limitations, vec!["仅用于契约测试"]);
+        assert!(!description.ready);
+        assert!(!description.identity.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn v1_is_readable_but_run_requires_contract_upgrade() {
+        let root = runtime_fixture(
+            r#"contract_version = 1
+backend = "docker-compose"
+compose_file = "docker-compose.yml"
+transcribe_service = "transcribe"
+probe_service = "probe"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+"#,
+            &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
+        );
+        let runtime_data =
+            std::env::temp_dir().join(format!("bimyscribe-v1-data-{}", uuid::Uuid::new_v4()));
+        let selection = crate::jobs::TranscriptionSelection::new(
+            crate::jobs::RuntimeSource::External,
+            root.canonicalize().unwrap(),
+            runtime_data,
+            "contract-v1:docker-compose:legacy".into(),
+            crate::jobs::RuntimeBackend::DockerCompose,
+            None,
+            crate::jobs::SourceLanguage::En,
+            crate::jobs::CreatedFrom::Cli,
+        );
+        let job_dir =
+            std::env::temp_dir().join(format!("bimyscribe-v1-job-{}", uuid::Uuid::new_v4()));
+        let result = run(TranscribeRequest {
+            job_dir: &job_dir,
+            normalized_wav: &job_dir.join("normalized.wav"),
+            selection: &selection,
+            duration_ms: None,
+            log_path: &job_dir.join("runtime.log"),
+            job_id: &uuid::Uuid::new_v4(),
+            instance_nonce: "v1-test",
+            cancel_token: &crate::cancel::CancellationToken::new(),
+        });
+        assert!(matches!(
+            result,
+            Err(FunasrError::ContractUpgradeRequired(
+                LEGACY_CONTRACT_VERSION
+            ))
+        ));
+        assert!(!job_dir.join("transcript.raw.json").exists());
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(job_dir).ok();
+    }
+
+    #[test]
+    fn both_adapters_forward_the_same_language_value() {
+        let root = runtime_fixture(
+            r#"contract_version = 2
+backend = "native-uv"
+entrypoint = "transcribe.py"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+"#,
+            &[
+                "transcribe.py",
+                "pyproject.toml",
+                ".python-version",
+                "uv.lock",
+                "schemas/normalized-v1.schema.json",
+            ],
+        );
+        let manifest = load_runtime(&root).unwrap();
+        let native = native_uv_spec(
+            &root,
+            &manifest,
+            Path::new("/tmp/input.wav"),
+            Path::new("/tmp/output"),
+            Path::new("/tmp/runtime-data"),
+            crate::jobs::SourceLanguage::En,
+            "contract-v2:native-uv:test",
+        );
+        assert!(native
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--language", "en"]));
+
+        let docker_root = runtime_fixture(
+            r#"contract_version = 2
+backend = "docker-compose"
+compose_file = "docker-compose.yml"
+transcribe_service = "transcribe"
+probe_service = "probe"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+"#,
+            &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
+        );
+        let docker_manifest = load_runtime(&docker_root).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let tail = docker_transcribe_tail(
+            &docker_manifest,
+            "bimyscribe-test-container",
+            &id,
+            "instance",
+            crate::jobs::SourceLanguage::En,
+        );
+        assert!(tail.windows(2).any(|pair| pair == ["--language", "en"]));
+        assert_eq!(
+            native.argv.windows(2).find(|pair| pair[0] == "--language"),
+            tail.windows(2).find(|pair| pair[0] == "--language")
+        );
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(docker_root).ok();
+    }
+
+    #[test]
     fn parses_normalized_schema_v1() {
         let path =
             std::env::temp_dir().join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
@@ -928,6 +1333,94 @@ output_schema_file = "schemas/normalized-v1.schema.json"
         assert_eq!(utterances[0].speaker_id, 1);
         assert_eq!(utterances[1].speaker_id, 0);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn parses_optional_runtime_result_fields() {
+        let path =
+            std::env::temp_dir().join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"reported_language":"en","model":"model-en","runtime_identity":"runtime-en","segments":[{"text":"hello","start_ms":0,"end_ms":500,"speaker":"speaker-1"}]}"#,
+        )
+        .unwrap();
+        let outcome = parse_transcript_outcome(&path, Some(1_000)).unwrap();
+        assert_eq!(outcome.utterances.len(), 1);
+        assert_eq!(
+            outcome.result.reported_language,
+            Some(crate::jobs::SourceLanguage::En)
+        );
+        assert_eq!(outcome.result.reported_model.as_deref(), Some("model-en"));
+        assert_eq!(
+            outcome.result.reported_runtime_identity.as_deref(),
+            Some("runtime-en")
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_empty_segments_empty_text_and_out_of_bounds_time() {
+        let documents = [
+            r#"{"schema_version":1,"segments":[]}"#,
+            r#"{"schema_version":1,"segments":[{"text":"  ","start_ms":0,"end_ms":1,"speaker":null}]}"#,
+            r#"{"schema_version":1,"segments":[{"text":"too late","start_ms":0,"end_ms":1001,"speaker":null}]}"#,
+        ];
+        for document in documents {
+            let path = std::env::temp_dir()
+                .join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+            std::fs::write(&path, document).unwrap();
+            let duration = document.contains("too late").then_some(1_000);
+            assert!(matches!(
+                parse_transcript_outcome(&path, duration),
+                Err(FunasrError::Validation(_))
+            ));
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_rejects_changed_runtime_identity_before_launching_adapter() {
+        let root = runtime_fixture(
+            r#"contract_version = 2
+backend = "docker-compose"
+compose_file = "docker-compose.yml"
+transcribe_service = "transcribe"
+probe_service = "probe"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+"#,
+            &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
+        );
+        let runtime_data =
+            std::env::temp_dir().join(format!("bimyscribe-identity-data-{}", uuid::Uuid::new_v4()));
+        let before =
+            describe_runtime(&root, &runtime_data, crate::jobs::RuntimeSource::External).unwrap();
+        std::fs::write(root.join("schemas/normalized-v1.schema.json"), "changed").unwrap();
+        let selection = crate::jobs::TranscriptionSelection::new(
+            crate::jobs::RuntimeSource::External,
+            before.project,
+            before.data_dir,
+            before.identity,
+            crate::jobs::RuntimeBackend::DockerCompose,
+            None,
+            crate::jobs::SourceLanguage::Auto,
+            crate::jobs::CreatedFrom::Cli,
+        );
+        let job_dir =
+            std::env::temp_dir().join(format!("bimyscribe-identity-job-{}", uuid::Uuid::new_v4()));
+        let result = run(TranscribeRequest {
+            job_dir: &job_dir,
+            normalized_wav: &job_dir.join("normalized.wav"),
+            selection: &selection,
+            duration_ms: None,
+            log_path: &job_dir.join("runtime.log"),
+            job_id: &uuid::Uuid::new_v4(),
+            instance_nonce: "identity-test",
+            cancel_token: &crate::cancel::CancellationToken::new(),
+        });
+        assert!(matches!(result, Err(FunasrError::IdentityChanged)));
+        assert!(!job_dir.exists());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1053,11 +1546,13 @@ output_schema_file = "schemas/normalized-v1.schema.json"
 
         let ready = install_runtime(&project_dir, &runtime_data).unwrap();
         assert_eq!(ready.device, "Docker CPU");
-        let utterances = run(TranscribeRequest {
+        let selection =
+            smoke_selection(&project_dir, &runtime_data, crate::jobs::SourceLanguage::En);
+        let outcome = run(TranscribeRequest {
             job_dir: &job_dir,
             normalized_wav: &normalized_wav,
-            project_dir: &project_dir,
-            runtime_data_dir: &runtime_data,
+            selection: &selection,
+            duration_ms: None,
             log_path: &job_dir.join("runtime.log"),
             job_id: &uuid::Uuid::new_v4(),
             instance_nonce: "runtime-smoke-instance",
@@ -1065,7 +1560,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
         })
         .unwrap();
 
-        assert!(!utterances.is_empty());
+        assert!(!outcome.utterances.is_empty());
         assert!(job_dir.join("transcript.raw.json").is_file());
     }
 
@@ -1086,11 +1581,13 @@ output_schema_file = "schemas/normalized-v1.schema.json"
 
         let ready = install_runtime(&project_dir, &runtime_data).unwrap();
         assert!(matches!(ready.device.as_str(), "mps" | "cpu"));
-        let utterances = run(TranscribeRequest {
+        let selection =
+            smoke_selection(&project_dir, &runtime_data, crate::jobs::SourceLanguage::En);
+        let outcome = run(TranscribeRequest {
             job_dir: &job_dir,
             normalized_wav: &normalized_wav,
-            project_dir: &project_dir,
-            runtime_data_dir: &runtime_data,
+            selection: &selection,
+            duration_ms: None,
             log_path: &job_dir.join("runtime.log"),
             job_id: &uuid::Uuid::new_v4(),
             instance_nonce: "native-runtime-smoke-instance",
@@ -1098,8 +1595,11 @@ output_schema_file = "schemas/normalized-v1.schema.json"
         })
         .unwrap();
 
-        assert!(!utterances.is_empty());
+        assert!(!outcome.utterances.is_empty());
         assert!(job_dir.join("transcript.raw.json").is_file());
-        assert!(utterances.iter().any(|utterance| utterance.speaker_id > 1));
+        assert!(outcome
+            .utterances
+            .iter()
+            .any(|utterance| utterance.speaker_id > 1));
     }
 }

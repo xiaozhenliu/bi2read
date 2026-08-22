@@ -5,8 +5,8 @@ import { Theme } from "../theme.slint";
 // (~/.cargo/registry/.../i-slint-compiler-1.17.1/widgets/common/lineedit-base.slint):
 // TextInput + placeholder Text + ContextMenuArea (cut/copy/paste/select-all).
 // It exists because `Palette` in the builtin styles is read-only outside
-// `color-scheme` (redesign-v2 spec.md 第一节结论 1-2), so the builtin
-// `LineEdit`'s focus ring and radius cannot be recolored to the brand accent.
+// `color-scheme`, so the builtin `LineEdit`'s focus ring and radius cannot be
+// recolored to the brand accent required by the current UI design spec.
 //
 // Public surface mirrors `LineEditInterface`
 // (widgets/interfaces/lineedit.slint:4-30): properties `text`,

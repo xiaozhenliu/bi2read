@@ -3,6 +3,35 @@
 本文件保存每个版本的简要摘要；完整说明见 `docs/releases/`。
 This file keeps short per-version summaries; see `docs/releases/` for details.
 
+## 0.4.0 - 2026-08-22
+
+### 中文
+
+- Runtime 契约升级到 v2：中文路由 paraformer-zh，英文路由 paraformer-en，auto 先用
+  SenseVoiceSmall 检测再路由，检测失败不回退。
+- 提交任务前新增转写确认流程，语言选择由用户显式做出并随任务冻结；重试、恢复与
+  重跑不被当前设置改变，Runtime 身份变化在启动前明确失败。
+- 转写结果回报实际使用的语言、模型与 Runtime 身份；v1 Runtime 创建新任务时返回
+  稳定的“需要升级”错误。
+- CLI 新增稳定 JSON 契约：统一信封、稳定错误码与退出码，适合 Agent 安全调用。
+- 新增 fixture 驱动的全流水线自动化集成测试（成功路径、失败重试、断点恢复、语言
+  冻结与保留策略）。
+
+### English
+
+- Runtime contract upgraded to v2: Chinese routes to paraformer-zh, English to
+  paraformer-en, and auto detects with SenseVoiceSmall before routing without
+  silent fallback.
+- A transcription confirmation step freezes the explicit language choice with
+  the job; retry, recovery and reruns are never overridden by current settings,
+  and changed runtime identities fail loudly before launch.
+- Transcription results report the language, model and runtime identity actually
+  used; v1 runtimes return a stable upgrade-required error for new jobs.
+- The CLI gained a stable JSON contract with one envelope, stable error codes
+  and exit codes, safe for agent callers.
+- Added fixture-driven full-pipeline integration tests covering happy paths,
+  failure retry, crash recovery, language freeze and retention policies.
+
 ## 0.3.0 - 2026-08-16
 
 ### 中文

@@ -6,7 +6,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::jobs::RetentionPolicy;
+use crate::jobs::{
+    CreatedFrom, JobCreationDefaults, RetentionPolicy, RuntimeSource, SourceLanguage,
+    TranscriptionSelection,
+};
 use crate::paths::AppPaths;
 
 #[derive(Debug, Clone, Serialize)]
@@ -21,6 +24,9 @@ pub struct Config {
     pub llm_connection: Option<crate::llm::LlmConnection>,
     pub default_screenshots: bool,
     pub default_retention: RetentionPolicy,
+    /// Last successfully created App selection; used only as the next App
+    /// confirmation default. Existing Jobs remain authoritative.
+    pub last_transcription_selection: Option<TranscriptionSelection>,
     /// Unique to this process; never persisted or accepted from the UI.
     #[serde(skip)]
     pub instance_nonce: String,
@@ -37,6 +43,8 @@ struct ConfigFile {
     llm_connection: Option<crate::llm::LlmConnection>,
     default_screenshots: Option<bool>,
     default_retention: Option<RetentionPolicy>,
+    #[serde(default)]
+    last_transcription_selection: Option<TranscriptionSelection>,
 }
 
 impl Default for Config {
@@ -52,12 +60,84 @@ impl Default for Config {
                 llm_connection: None,
                 default_screenshots: false,
                 default_retention: RetentionPolicy::Recommended,
+                last_transcription_selection: None,
                 instance_nonce: new_instance_nonce(),
             })
     }
 }
 
 impl Config {
+    /// Return inputs for constructing a new Job.
+    ///
+    /// Existing queue/state entries are intentionally not interpreted here:
+    /// their persisted transcription selection remains authoritative (or is
+    /// reported as `legacy-unrecorded` by `jobs`).
+    pub fn job_creation_defaults(&self) -> JobCreationDefaults {
+        JobCreationDefaults {
+            runtime_project: self.effective_runtime_project(),
+            runtime_data_dir: self.runtime_data_dir.clone(),
+            requested_language: SourceLanguage::Auto,
+            retention: self.default_retention,
+        }
+    }
+
+    /// Choose the initial language shown by the App confirmation modal.
+    /// Only a selection from the same current Runtime identity is reusable;
+    /// otherwise the first-use product default is Chinese.
+    pub fn app_default_language(&self, runtime_identity: &str) -> SourceLanguage {
+        self.last_transcription_selection
+            .as_ref()
+            .filter(|selection| selection.runtime_identity == runtime_identity)
+            .map(|selection| selection.requested_language)
+            .unwrap_or(SourceLanguage::Zh)
+    }
+
+    /// Resolve the complete frozen transcription selection for a new Job.
+    ///
+    /// Existing Jobs never call this method during load/recovery: their
+    /// persisted selection (or `legacy-unrecorded`) remains authoritative.
+    pub fn job_transcription_selection(
+        &self,
+        created_from: CreatedFrom,
+        requested_language: SourceLanguage,
+    ) -> Result<TranscriptionSelection, String> {
+        let defaults = self.job_creation_defaults();
+        let project = defaults
+            .runtime_project
+            .ok_or_else(|| "未配置 FunASR Runtime".to_string())?;
+        let runtime_source = if self.runtime_project.is_some() {
+            RuntimeSource::External
+        } else {
+            RuntimeSource::Bundled
+        };
+        let description =
+            crate::funasr::describe_runtime(&project, &defaults.runtime_data_dir, runtime_source)
+                .map_err(|error| format!("解析 FunASR Runtime：{error}"))?;
+        if description.contract_version != crate::funasr::SUPPORTED_CONTRACT_VERSION {
+            return Err(crate::funasr::FunasrError::ContractUpgradeRequired(
+                description.contract_version,
+            )
+            .to_string());
+        }
+        if !description.ready {
+            return Err(crate::funasr::FunasrError::NotReady.to_string());
+        }
+        let selection = TranscriptionSelection::new(
+            description.source,
+            description.project,
+            description.data_dir,
+            description.identity,
+            description.backend,
+            description.model_description,
+            requested_language,
+            created_from,
+        );
+        selection
+            .validate()
+            .map_err(|error| format!("任务转写选择无效：{error}"))?;
+        Ok(selection)
+    }
+
     pub fn effective_runtime_project(&self) -> Option<PathBuf> {
         crate::funasr::resolve_runtime_project(self.runtime_project.as_deref())
     }
@@ -72,6 +152,7 @@ impl Config {
             llm_connection: None,
             default_screenshots: false,
             default_retention: RetentionPolicy::Recommended,
+            last_transcription_selection: None,
             instance_nonce: new_instance_nonce(),
         }
     }
@@ -108,6 +189,7 @@ impl Config {
         if let Some(value) = file.default_retention {
             config.default_retention = value;
         }
+        config.last_transcription_selection = file.last_transcription_selection;
         Ok(config)
     }
 
@@ -352,6 +434,61 @@ mod tests {
     fn default_config_uses_recommended_retention() {
         let cfg = Config::default();
         assert_eq!(cfg.default_retention, RetentionPolicy::Recommended);
+    }
+
+    #[test]
+    fn job_creation_defaults_only_read_current_config_for_new_jobs() {
+        let config = Config {
+            runtime_project: Some(PathBuf::from("/external/runtime")),
+            runtime_data_dir: PathBuf::from("/external/runtime-data"),
+            default_retention: RetentionPolicy::KeepAll,
+            ..Config::default()
+        };
+
+        let defaults = config.job_creation_defaults();
+        assert_eq!(defaults.runtime_project, config.runtime_project);
+        assert_eq!(defaults.runtime_data_dir, config.runtime_data_dir);
+        assert_eq!(defaults.requested_language, SourceLanguage::Auto);
+        assert_eq!(defaults.retention, RetentionPolicy::KeepAll);
+    }
+
+    #[test]
+    fn v1_runtime_is_readable_but_new_job_creation_requires_upgrade() {
+        let root =
+            std::env::temp_dir().join(format!("bimyscribe-config-v1-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("schemas")).unwrap();
+        std::fs::write(
+            root.join(crate::funasr::RUNTIME_MANIFEST),
+            r#"contract_version = 1
+backend = "native-uv"
+entrypoint = "transcribe.py"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+"#,
+        )
+        .unwrap();
+        for file in [
+            "transcribe.py",
+            "pyproject.toml",
+            ".python-version",
+            "uv.lock",
+            "schemas/normalized-v1.schema.json",
+        ] {
+            std::fs::write(root.join(file), "fixture").unwrap();
+        }
+        let config = Config {
+            runtime_project: Some(root.clone()),
+            runtime_data_dir: std::env::temp_dir().join(format!(
+                "bimyscribe-config-v1-data-{}",
+                uuid::Uuid::new_v4()
+            )),
+            ..Config::default()
+        };
+        let error = config
+            .job_transcription_selection(CreatedFrom::Cli, SourceLanguage::En)
+            .unwrap_err();
+        assert!(error.starts_with("runtime-contract-upgrade-required:"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

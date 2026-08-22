@@ -7,6 +7,7 @@ import { AddBar } from "components/add-bar.slint";
 import { JobRowView } from "components/job-row.slint";
 import { JobDetail } from "components/job-detail.slint";
 import { SettingsModal } from "components/settings.slint";
+import { TranscriptionConfirmModal } from "components/transcription-confirm.slint";
 import { PrimaryButton, DangerOutlineButton } from "components/button.slint";
 // Not yet wired into any screen (integration is a later issue); imported so
 // these new components are type-checked by `cargo check` / clippy, which
@@ -19,7 +20,9 @@ import { AppSwitch } from "components/switch.slint";
 // via `slint::include_modules!()`.
 export component App inherits Window {
     // Keep implementation status in task state, not in the window chrome.
-    title: root.ui-verification-fixture.is-empty
+    title: root.ui-verification-empty
+        ? "BiMyScribe — UI Fixture (empty)"
+        : root.ui-verification-fixture.is-empty
         ? "BiMyScribe"
         : "BiMyScribe — UI Fixture (" + root.ui-verification-fixture + ")";
     preferred-width: Theme.window-width;
@@ -61,6 +64,13 @@ export component App inherits Window {
         can-cancel: false, can-retry: false, can-open: false, can-reveal: false,
         can-edit-speakers: false,
         screenshots-enabled: false, retention-label: "推荐",
+        transcription-runtime: "未记录",
+        transcription-source: "未记录",
+        transcription-backend: "未记录",
+        transcription-model: "未提供",
+        requested-language: "未记录",
+        reported-language: "未报告",
+        reported-model: "未报告",
     };
     in property <[StageView]> stages: [];
     in property <[SpeakerEntry]> speakers: [];
@@ -81,13 +91,27 @@ export component App inherits Window {
         default-retention: "推荐",
     };
     in-out property <bool> settings-visible: false;
+    in-out property <bool> transcription-confirm-visible: false;
+    in property <string> transcription-confirm-video: "";
+    in property <string> transcription-confirm-runtime-name: "未提供";
+    in property <string> transcription-confirm-runtime-source: "未提供";
+    in property <string> transcription-confirm-runtime-backend: "未提供";
+    in property <string> transcription-confirm-model: "未提供";
+    in property <string> transcription-confirm-recommended: "未提供";
+    in property <string> transcription-confirm-limitations: "未提供";
+    in property <string> transcription-confirm-error: "";
+    in property <bool> transcription-confirm-ready: false;
+    in property <bool> transcription-confirm-auto-available: false;
+    in property <string> transcription-confirm-language: "zh";
+    in property <bool> transcription-confirm-can-create: false;
 
     // UI-only long-detail verification state. Empty means normal startup;
     // visual QA may select running/failed/completed without persistent data.
     in property <string> ui-verification-fixture: "";
     // UI-only empty-queue verification switch. Keep false for normal startup;
     // visual QA may temporarily enable it without mutating persisted jobs.
-    property <bool> ui-verification-empty: false;
+    in property <bool> ui-verification-empty: false;
+    in property <int> ui-verification-inspector-page: 0;
     property <[JobRow]> display-jobs: root.ui-verification-empty ? [] : root.jobs;
 
     // ---- Public callbacks (handled in Rust) ----
@@ -107,6 +131,11 @@ export component App inherits Window {
     callback save-settings(SettingsView);
     callback install-runtime(SettingsView);
     callback cancel-settings;
+    callback transcription-confirm-language-changed(string);
+    callback transcription-confirm-runtime-changed(int);
+    callback transcription-confirmed;
+    callback transcription-cancelled;
+    callback transcription-open-settings;
     callback choose-directory(string) -> string;
     callback default-directory(string) -> string;
     callback inspector-focus-requested(bool);
@@ -270,12 +299,20 @@ export component App inherits Window {
                     video-duration: root.detail.video-duration;
                     media-size: root.detail.media-size;
                     document-words: root.detail.document-words;
+                    transcription-runtime: root.detail.transcription-runtime;
+                    transcription-source: root.detail.transcription-source;
+                    transcription-backend: root.detail.transcription-backend;
+                    transcription-model: root.detail.transcription-model;
+                    requested-language: root.detail.requested-language;
+                    reported-language: root.detail.reported-language;
+                    reported-model: root.detail.reported-model;
                     action-feedback: root.action-feedback;
                     action-pending: root.action-pending;
                     action-feedback-error: root.action-feedback-error;
                     speaker-feedback: root.speaker-feedback;
                     speaker-feedback-error: root.speaker-feedback-error;
                     verification-fixture: root.ui-verification-fixture;
+                    verification-inspector-page: root.ui-verification-inspector-page;
                     inspector-toggle-focus-generation: root.inspector-toggle-focus-generation;
                     inspector-tab-focus-generation: root.inspector-tab-focus-generation;
 
@@ -306,5 +343,26 @@ export component App inherits Window {
         cancel => { root.cancel-settings(); }
         choose-directory(kind) => { root.choose-directory(kind) }
         default-directory(kind) => { root.default-directory(kind) }
+    }
+
+    TranscriptionConfirmModal {
+        shown <=> root.transcription-confirm-visible;
+        video-label: root.transcription-confirm-video;
+        runtime-name: root.transcription-confirm-runtime-name;
+        runtime-source: root.transcription-confirm-runtime-source;
+        runtime-backend: root.transcription-confirm-runtime-backend;
+        model-description: root.transcription-confirm-model;
+        recommended-languages: root.transcription-confirm-recommended;
+        known-limitations: root.transcription-confirm-limitations;
+        runtime-error: root.transcription-confirm-error;
+        runtime-ready: root.transcription-confirm-ready;
+        auto-available: root.transcription-confirm-auto-available;
+        selected-language: root.transcription-confirm-language;
+        can-create: root.transcription-confirm-can-create;
+        language-changed(value) => { root.transcription-confirm-language-changed(value); }
+        runtime-changed(index) => { root.transcription-confirm-runtime-changed(index); }
+        confirm => { root.transcription-confirmed(); }
+        cancel => { root.transcription-cancelled(); }
+        open-settings => { root.transcription-open-settings(); }
     }
 }

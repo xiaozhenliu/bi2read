@@ -1,0 +1,356 @@
+import { ComboBox, ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { PrimaryButton, SecondaryButton } from "button.slint";
+
+component LanguageChoice inherits Rectangle {
+    in property <string> text;
+    in property <string> value;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked;
+
+    accessible-role: radio-button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.focus();
+            root.clicked();
+        }
+    }
+    forward-focus: focus-scope;
+
+    min-width: 84px;
+    height: Theme.control-height;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : Theme.border;
+    background: !root.enabled ? Theme.surface-disabled
+        : root.selected ? Theme.surface-selected
+        : touch.has-hover ? Theme.surface-hover : Theme.surface;
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? Theme.text-disabled
+            : root.selected ? Theme.accent-pressed : Theme.text-primary;
+        font-size: Theme.font-body;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if root.enabled && (event.text == " " || event.text == Key.Return) {
+                root.focus();
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus && root.enabled : Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: Theme.radius-md + 2px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+        background: transparent;
+    }
+}
+
+export component TranscriptionConfirmModal inherits Rectangle {
+    in-out property <bool> shown: false;
+    in property <string> video-label: "";
+    in property <string> runtime-name: "未提供";
+    in property <string> runtime-source: "未提供";
+    in property <string> runtime-backend: "未提供";
+    in property <string> model-description: "未提供";
+    in property <string> recommended-languages: "未提供";
+    in property <string> known-limitations: "未提供";
+    in property <string> runtime-error: "";
+    in property <bool> runtime-ready: false;
+    in property <bool> auto-available: false;
+    in property <string> selected-language: "zh";
+    in property <bool> can-create: false;
+    callback language-changed(string);
+    callback runtime-changed(int);
+    callback confirm();
+    callback cancel();
+    callback open-settings();
+
+    visible: root.shown;
+
+    modal-focus := FocusScope {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+        enabled: root.shown;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.cancel();
+                return accept;
+            }
+            if event.text == Key.Return {
+                if root.can-create {
+                    root.confirm();
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    changed shown => {
+        if root.shown {
+            modal-focus.focus();
+        }
+    }
+
+    if root.shown : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.overlay;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { }
+        }
+
+        modal-surface := Rectangle {
+            width: min(520px, parent.width - 40px);
+            height: min(560px, parent.height - 40px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.surface;
+            border-radius: Theme.radius-lg;
+            drop-shadow-offset-y: 12px;
+            drop-shadow-blur: 36px;
+            drop-shadow-color: Theme.shadow-modal;
+            clip: true;
+            accessible-role: groupbox;
+            accessible-label: "确认转写设置";
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+                clicked => { }
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: 64px;
+                    background: Theme.surface;
+                    HorizontalLayout {
+                        padding-left: Theme.space-lg;
+                        padding-right: Theme.space-md;
+                        spacing: Theme.space-sm;
+                        Text {
+                            text: "确认转写设置";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-title;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: "创建前确认";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-caption;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.separator; }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+                    VerticalLayout {
+                        padding: Theme.space-lg;
+                        spacing: Theme.space-md;
+
+                        VerticalLayout {
+                            spacing: Theme.space-xxs;
+                            Text {
+                                text: "视频";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: root.video-label;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-body;
+                                wrap: word-wrap;
+                                height: self.preferred-height;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: Theme.space-xxs;
+                            Text {
+                                text: "Runtime";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                font-weight: 600;
+                            }
+                            runtime-combo := ComboBox {
+                                accessible-label: "Runtime 选择";
+                                model: [root.runtime-name];
+                                current-index: 0;
+                                height: Theme.control-height;
+                                selected(_) => { root.runtime-changed(0); }
+                            }
+                            Text {
+                                text: root.runtime-source + " · " + root.runtime-backend;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-caption;
+                                height: 18px;
+                            }
+                            Text {
+                                text: "模型说明：" + root.model-description;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                wrap: word-wrap;
+                                height: self.preferred-height;
+                            }
+                            Text {
+                                text: "建议语言：" + root.recommended-languages;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                wrap: word-wrap;
+                                height: self.preferred-height;
+                            }
+                            Text {
+                                text: "已知限制：" + root.known-limitations;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                wrap: word-wrap;
+                                height: self.preferred-height;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: Theme.space-xxs;
+                            Text {
+                                text: "视频语言";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                font-weight: 600;
+                            }
+                            HorizontalLayout {
+                                spacing: Theme.space-xs;
+                                accessible-role: radio-group;
+                                accessible-label: "视频语言";
+                                LanguageChoice {
+                                    text: "中文";
+                                    value: "zh";
+                                    selected: root.selected-language == "zh";
+                                    clicked => { root.language-changed("zh"); }
+                                }
+                                LanguageChoice {
+                                    text: "英文";
+                                    value: "en";
+                                    selected: root.selected-language == "en";
+                                    clicked => { root.language-changed("en"); }
+                                }
+                                if root.auto-available : LanguageChoice {
+                                    text: "自动检测";
+                                    value: "auto";
+                                    selected: root.selected-language == "auto";
+                                    clicked => { root.language-changed("auto"); }
+                                }
+                            }
+                            if root.auto-available : Text {
+                                text: "自动检测仅在所选 Runtime 明确提供时显示。";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-caption;
+                                height: 18px;
+                            }
+                        }
+
+                        Rectangle {
+                            height: max(58px, compatibility-message.preferred-height + 32px);
+                            background: Theme.surface-muted;
+                            border-radius: Theme.radius-md;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            compatibility-message := Text {
+                                text: "请根据 Runtime 说明选择；BiMyScribe 不验证该 Runtime 是否适合当前视频。";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-caption;
+                                wrap: word-wrap;
+                                x: Theme.space-sm;
+                                y: Theme.space-sm;
+                                width: parent.width - Theme.space-lg;
+                                height: self.preferred-height;
+                                accessible-role: text;
+                            }
+                        }
+
+                        if !root.runtime-error.is-empty : Text {
+                            text: root.runtime-error;
+                            color: Theme.danger-text;
+                            font-size: Theme.font-caption;
+                            wrap: word-wrap;
+                            height: self.preferred-height;
+                            accessible-live-region: polite;
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.separator; }
+
+                Rectangle {
+                    height: 68px;
+                    background: Theme.surface-footer;
+                    HorizontalLayout {
+                        padding-left: Theme.space-lg;
+                        padding-right: Theme.space-lg;
+                        spacing: Theme.space-xs;
+                        alignment: end;
+                        if !root.runtime-ready : SecondaryButton {
+                            text: "打开设置";
+                            clicked => { root.open-settings(); }
+                        }
+                        SecondaryButton {
+                            text: "取消";
+                            clicked => { root.cancel(); }
+                        }
+                        PrimaryButton {
+                            text: "创建任务";
+                            disabled: !root.can-create;
+                            clicked => { root.confirm(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

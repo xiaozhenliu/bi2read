@@ -306,12 +306,20 @@ export component JobDetail inherits Rectangle {
     in property <string> video-duration;
     in property <string> media-size;
     in property <string> document-words;
+    in property <string> transcription-runtime;
+    in property <string> transcription-source;
+    in property <string> transcription-backend;
+    in property <string> transcription-model;
+    in property <string> requested-language;
+    in property <string> reported-language;
+    in property <string> reported-model;
     in property <string> action-feedback: "";
     in property <bool> action-pending: false;
     in property <bool> action-feedback-error: false;
     in property <string> speaker-feedback: "";
     in property <bool> speaker-feedback-error: false;
     in property <string> verification-fixture: "";
+    in property <int> verification-inspector-page: 0;
 
     property <bool> fixture-enabled: !root.verification-fixture.is-empty;
     property <bool> fixture-running: root.verification-fixture == "running";
@@ -373,9 +381,29 @@ export component JobDetail inherits Rectangle {
         ? "尚未生成"
         : root.fixture-failed ? "18,640 字（原始稿）"
         : root.fixture-completed ? "15,284 字" : root.document-words;
+    property <string> display-transcription-runtime: root.fixture-enabled
+        ? "内置 Runtime" : root.transcription-runtime;
+    property <string> display-transcription-source: root.fixture-enabled
+        ? "bundled" : root.transcription-source;
+    property <string> display-transcription-backend: root.fixture-enabled
+        ? "native-uv" : root.transcription-backend;
+    property <string> display-transcription-model: root.fixture-enabled
+        ? "未提供" : root.transcription-model;
+    property <string> display-requested-language: root.fixture-enabled
+        ? "中文" : root.requested-language;
+    property <string> display-reported-language: root.fixture-enabled
+        ? (root.fixture-completed ? "未报告" : "未报告") : root.reported-language;
+    property <string> display-reported-model: root.fixture-enabled
+        ? "未报告" : root.reported-model;
     property <bool> display-has-actions: root.display-can-cancel || root.display-can-retry
         || root.display-can-open || root.display-can-reveal;
     property <bool> display-completed: root.display-status == "已完成";
+
+    changed verification-inspector-page => {
+        if root.verification-inspector-page > 0 {
+            root.inspector-page = root.verification-inspector-page;
+        }
+    }
 
     property <[StageView]> fixture-stages: [
         { name: "metadata", label: "元数据", done: true, active: false, progress: 100, indeterminate: false, error: false, skipped: false },
@@ -932,6 +960,46 @@ export component JobDetail inherits Rectangle {
                                 wrap: word-wrap;
                                 height: self.preferred-height;
                             }
+
+                            VerticalLayout {
+                                spacing: Theme.space-xxs;
+                                Text {
+                                    text: "转写设置";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-caption;
+                                    font-weight: 600;
+                                }
+                                OptionRow {
+                                    label: "Runtime";
+                                    value: root.display-transcription-runtime;
+                                }
+                                OptionRow {
+                                    label: "来源";
+                                    value: root.display-transcription-source;
+                                }
+                                OptionRow {
+                                    label: "Backend";
+                                    value: root.display-transcription-backend;
+                                }
+                                OptionRow {
+                                    label: "模型说明";
+                                    value: root.display-transcription-model;
+                                }
+                                OptionRow {
+                                    label: "请求语言";
+                                    value: root.display-requested-language;
+                                }
+                                OptionRow {
+                                    label: "实际语言";
+                                    value: root.display-reported-language;
+                                }
+                                OptionRow {
+                                    label: "实际模型";
+                                    value: root.display-reported-model;
+                                }
+                            }
+
+                            Rectangle { height: 1px; background: Theme.separator; }
 
                             VerticalLayout {
                                 spacing: Theme.space-xxs;

@@ -12,7 +12,7 @@ export component IconButton inherits Rectangle {
     in property <bool> bordered: true;
     // Optional focus-recall generation counter. Callers that need to move
     // keyboard focus back onto this button after an external state change
-    // (e.g. the inspector collapse/expand toggle, redesign-v2 issue 11)
+    // (e.g. the inspector collapse/expand toggle)
     // bump this from Rust; unused callers keep the default `0` and never
     // change it, so `root.focus()` is never called out from under them.
     in property <int> focus-generation: 0;

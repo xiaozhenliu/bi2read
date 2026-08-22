@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "reported_language": "zh",
+  "model": "fixture-model-zh",
+  "runtime_identity": "contract-v2:fixture:e2e",
+  "segments": [
+    {
+      "text": "大家好，欢迎来到中文集成测试示例视频。",
+      "start_ms": 0,
+      "end_ms": 1500,
+      "speaker": "speaker-1"
+    },
+    {
+      "text": "今天我们演示完整的流水线产物生成。",
+      "start_ms": 1800,
+      "end_ms": 3200,
+      "speaker": "speaker-2"
+    },
+    {
+      "text": "感谢观看中文模板渲染。",
+      "start_ms": 3500,
+      "end_ms": 4500,
+      "speaker": null
+    }
+  ]
+}

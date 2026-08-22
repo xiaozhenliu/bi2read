@@ -151,6 +151,59 @@ pub fn render_full_markdown(
     s.push_str(&format!("- 时长: {}\n", fmt_duration(meta.duration_ms)));
     let video_url = meta.video_url();
     s.push_str(&format!("- 原视频链接: [{video_url}]({video_url})\n"));
+    if let Some(selection) = &job.transcription_selection {
+        s.push_str(&format!(
+            "- Runtime: {}\n",
+            selection.runtime_source.label()
+        ));
+        s.push_str(&format!(
+            "- Runtime source: {}\n",
+            selection.runtime_source.as_str()
+        ));
+        s.push_str(&format!(
+            "- Runtime backend: {}\n",
+            selection.runtime_backend.as_str()
+        ));
+        s.push_str(&format!(
+            "- Runtime identity: {}\n",
+            selection.runtime_identity
+        ));
+        s.push_str(&format!(
+            "- 模型说明: {}\n",
+            selection.model_description.as_deref().unwrap_or("未提供")
+        ));
+        s.push_str(&format!(
+            "- 请求语言: {}\n",
+            selection.requested_language.label()
+        ));
+    } else {
+        s.push_str("- Runtime: 未记录（legacy-unrecorded）\n");
+        s.push_str("- 请求语言: 未记录\n");
+    }
+    if let Some(result) = &job.transcription_result {
+        s.push_str(&format!(
+            "- 实际语言: {}\n",
+            result
+                .reported_language
+                .map(crate::jobs::SourceLanguage::label)
+                .unwrap_or("未报告")
+        ));
+        s.push_str(&format!(
+            "- 实际模型: {}\n",
+            result.reported_model.as_deref().unwrap_or("未报告")
+        ));
+        s.push_str(&format!(
+            "- 实际 Runtime identity: {}\n",
+            result
+                .reported_runtime_identity
+                .as_deref()
+                .unwrap_or("未报告")
+        ));
+    } else {
+        s.push_str("- 实际语言: 未报告\n");
+        s.push_str("- 实际模型: 未报告\n");
+        s.push_str("- 实际 Runtime identity: 未报告\n");
+    }
 
     let body = readable
         .filter(|body| !body.trim().is_empty())
@@ -200,7 +253,10 @@ fn fmt_duration(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{Job, StageState};
+    use crate::jobs::{
+        CreatedFrom, Job, RuntimeBackend, RuntimeSource, SourceLanguage, StageState,
+        TranscriptionResult, TranscriptionSelection,
+    };
     use uuid::Uuid;
 
     fn sample_job() -> Job {
@@ -276,6 +332,41 @@ mod tests {
         };
         let md = render_full_markdown(&job, &meta, &[], None, Path::new("/x.md"));
         assert!(md.contains("?p=2"));
+    }
+
+    #[test]
+    fn full_markdown_records_requested_and_reported_runtime_identity() {
+        let mut job = sample_job();
+        job.transcription_selection = Some(TranscriptionSelection::new(
+            RuntimeSource::External,
+            Path::new("/runtime/project").to_path_buf(),
+            Path::new("/runtime/data").to_path_buf(),
+            "runtime-v2-fingerprint".into(),
+            RuntimeBackend::DockerCompose,
+            Some("English model".into()),
+            SourceLanguage::En,
+            CreatedFrom::Cli,
+        ));
+        job.transcription_result = Some(TranscriptionResult::new(
+            Some(SourceLanguage::En),
+            Some("reported-model".into()),
+            Some("runtime-v2-fingerprint".into()),
+        ));
+        let meta = DocMeta {
+            title: "t".into(),
+            up_name: "u".into(),
+            duration_ms: 1000,
+            bvid: "BV1test".into(),
+            page: 1,
+            source_url: None,
+        };
+        let md = render_full_markdown(&job, &meta, &sample_utts(), None, Path::new("/raw.md"));
+        assert!(md.contains("Runtime source: external"));
+        assert!(md.contains("Runtime backend: docker-compose"));
+        assert!(md.contains("Runtime identity: runtime-v2-fingerprint"));
+        assert!(md.contains("请求语言: 英文"));
+        assert!(md.contains("实际语言: 英文"));
+        assert!(md.contains("实际模型: reported-model"));
     }
 
     #[test]

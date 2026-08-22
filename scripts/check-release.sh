@@ -119,6 +119,10 @@ PY
 case "$stage" in
 source)
     case "$candidate" in private|public) ;; *) fail "candidate private or public" "$candidate" "pass --candidate private|public" ;; esac
+    if [ "$candidate" = private ]; then
+        [ -x "$repo_root/scripts/check-governance.sh" ] || fail "private governance check" missing "restore scripts/check-governance.sh"
+        "$repo_root/scripts/check-governance.sh" || fail "project governance checks" failed "fix roadmap, archive, or Markdown links"
+    fi
     [ -n "$issue" ] && [ -f "$issue" ] || fail "existing release issue" "${issue:-missing}" "create and pass the release issue"
     [ -n "$build_root" ] || fail "explicit absolute build root" missing "pass --build-root"
     case "$build_root" in /*) ;; *) fail "absolute build root" "$build_root" "choose an approved external absolute path" ;; esac

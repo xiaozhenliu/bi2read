@@ -63,6 +63,13 @@ export struct JobDetailData {
     video-duration: string,    // Job.duration_ms only; unknown/zero is "—"
     media-size: string,        // existing source.audio/video bytes or retention placeholder
     document-words: string,    // final full.md, then raw markdown with "原始稿"
+    transcription-runtime: string,
+    transcription-source: string,
+    transcription-backend: string,
+    transcription-model: string,
+    requested-language: string,
+    reported-language: string,
+    reported-model: string,
 }
 
 // Settings view model bound to the settings modal.

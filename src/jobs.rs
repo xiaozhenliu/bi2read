@@ -8,10 +8,305 @@
 //! stage's required artifacts against the documented minimum-artifact table.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// The source language requested from a transcription Runtime.
+///
+/// This is deliberately a closed set.  The wire representation is shared by
+/// persisted jobs, the CLI and Runtime adapters, so adding another language
+/// must be an explicit product/schema change rather than an arbitrary string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceLanguage {
+    #[default]
+    Auto,
+    Zh,
+    En,
+}
+
+impl SourceLanguage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Zh => "zh",
+            Self::En => "en",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动检测",
+            Self::Zh => "中文",
+            Self::En => "英文",
+        }
+    }
+}
+
+impl fmt::Display for SourceLanguage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLanguageParseError {
+    value: String,
+}
+
+impl fmt::Display for SourceLanguageParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid source language {:?}; expected auto, zh, or en",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for SourceLanguageParseError {}
+
+impl FromStr for SourceLanguage {
+    type Err = SourceLanguageParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "zh" => Ok(Self::Zh),
+            "en" => Ok(Self::En),
+            _ => Err(SourceLanguageParseError {
+                value: value.to_string(),
+            }),
+        }
+    }
+}
+
+/// Whether a Runtime comes from the packaged application or an external
+/// project selected by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeSource {
+    Bundled,
+    External,
+}
+
+impl RuntimeSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled",
+            Self::External => "external",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bundled => "内置 Runtime",
+            Self::External => "自定义 Runtime",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The execution backend frozen into a job's transcription selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeBackend {
+    NativeUv,
+    DockerCompose,
+}
+
+impl RuntimeBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeUv => "native-uv",
+            Self::DockerCompose => "docker-compose",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NativeUv => "native-uv",
+            Self::DockerCompose => "docker-compose",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The product entry point that created a Job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CreatedFrom {
+    App,
+    Cli,
+}
+
+impl CreatedFrom {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Cli => "cli",
+        }
+    }
+}
+
+impl fmt::Display for CreatedFrom {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A frozen Runtime and source-language choice persisted with each new Job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptionSelection {
+    pub runtime_source: RuntimeSource,
+    pub runtime_project: PathBuf,
+    pub runtime_data_dir: PathBuf,
+    pub runtime_identity: String,
+    pub runtime_backend: RuntimeBackend,
+    pub model_description: Option<String>,
+    pub requested_language: SourceLanguage,
+    pub created_from: CreatedFrom,
+}
+
+impl TranscriptionSelection {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        runtime_source: RuntimeSource,
+        runtime_project: PathBuf,
+        runtime_data_dir: PathBuf,
+        runtime_identity: String,
+        runtime_backend: RuntimeBackend,
+        model_description: Option<String>,
+        requested_language: SourceLanguage,
+        created_from: CreatedFrom,
+    ) -> Self {
+        Self {
+            runtime_source,
+            runtime_project,
+            runtime_data_dir,
+            runtime_identity,
+            runtime_backend,
+            model_description,
+            requested_language,
+            created_from,
+        }
+    }
+
+    /// Validate invariants that are guaranteed by the task-creation seam.
+    ///
+    /// Deserialization intentionally remains permissive about path existence:
+    /// a persisted Job must remain inspectable after a drive is disconnected.
+    /// Runtime readiness and identity validation belong to the Runtime seam.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.runtime_project.is_absolute() {
+            return Err("runtime_project must be an absolute path".into());
+        }
+        if !self.runtime_data_dir.is_absolute() {
+            return Err("runtime_data_dir must be an absolute path".into());
+        }
+        if self.runtime_identity.trim().is_empty() {
+            return Err("runtime_identity must not be empty".into());
+        }
+        Ok(())
+    }
+}
+
+/// The processing identity reported by the Runtime after a transcription run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptionResult {
+    #[serde(default)]
+    pub reported_language: Option<SourceLanguage>,
+    #[serde(default)]
+    pub reported_model: Option<String>,
+    #[serde(default)]
+    pub reported_runtime_identity: Option<String>,
+}
+
+impl TranscriptionResult {
+    pub fn new(
+        reported_language: Option<SourceLanguage>,
+        reported_model: Option<String>,
+        reported_runtime_identity: Option<String>,
+    ) -> Self {
+        Self {
+            reported_language,
+            reported_model,
+            reported_runtime_identity,
+        }
+    }
+}
+
+/// Inputs accepted by the shared GUI/CLI Job-construction interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCreationInput {
+    pub id: Uuid,
+    pub bvid: String,
+    pub page: u32,
+    pub selection: TranscriptionSelection,
+    pub retention: RetentionPolicy,
+}
+
+impl JobCreationInput {
+    pub fn new(
+        id: Uuid,
+        bvid: String,
+        page: u32,
+        selection: TranscriptionSelection,
+        retention: RetentionPolicy,
+    ) -> Self {
+        Self {
+            id,
+            bvid,
+            page,
+            selection,
+            retention,
+        }
+    }
+}
+
+/// Defaults read from Config when constructing a *new* task.
+///
+/// This intentionally contains no persisted-job parsing or migration logic.
+/// A caller must resolve the Runtime description and build a complete
+/// [`TranscriptionSelection`] before calling [`Job::from_creation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCreationDefaults {
+    pub runtime_project: Option<PathBuf>,
+    pub runtime_data_dir: PathBuf,
+    pub requested_language: SourceLanguage,
+    pub retention: RetentionPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptionSelectionStatus {
+    Recorded,
+    LegacyUnrecorded,
+}
+
+impl TranscriptionSelectionStatus {
+    pub const fn marker(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::LegacyUnrecorded => LEGACY_UNRECORDED,
+        }
+    }
+}
+
+pub const LEGACY_UNRECORDED: &str = "legacy-unrecorded";
 
 /// All pipeline stages plus the non-linear waiting and terminal states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -264,7 +559,9 @@ impl JobCapabilities {
             .unwrap_or(false);
         Self {
             can_cancel: !is_terminal,
-            can_retry: job.status == JobStatus::Failed || job.status == JobStatus::NeedsUserAction,
+            can_retry: (job.status == JobStatus::Failed
+                || job.status == JobStatus::NeedsUserAction)
+                && job.transcription_selection.is_some(),
             can_open_document: is_done,
             can_reveal: job.work_dir.is_some(),
             can_edit_speakers: has_transcript,
@@ -299,6 +596,13 @@ pub struct JobViewSnapshot {
     pub warning: Option<JobWarning>,
     pub capabilities: JobCapabilities,
     pub retention_label: String,
+    pub transcription_runtime: String,
+    pub transcription_source: String,
+    pub transcription_backend: String,
+    pub transcription_model: String,
+    pub requested_language: String,
+    pub reported_language: String,
+    pub reported_model: String,
 }
 
 impl JobViewSnapshot {
@@ -318,6 +622,45 @@ impl JobViewSnapshot {
                 state: job.stage_state(s),
             })
             .collect();
+        let (
+            transcription_runtime,
+            transcription_source,
+            transcription_backend,
+            transcription_model,
+            requested_language,
+        ) = match &job.transcription_selection {
+            Some(selection) => (
+                selection.runtime_source.label().to_string(),
+                selection.runtime_source.as_str().to_string(),
+                selection.runtime_backend.label().to_string(),
+                selection
+                    .model_description
+                    .clone()
+                    .unwrap_or_else(|| "未提供".to_string()),
+                selection.requested_language.label().to_string(),
+            ),
+            None => (
+                "未记录".to_string(),
+                "未记录".to_string(),
+                "未记录".to_string(),
+                "未提供".to_string(),
+                "未记录".to_string(),
+            ),
+        };
+        let (reported_language, reported_model) = match &job.transcription_result {
+            Some(result) => (
+                result
+                    .reported_language
+                    .map(SourceLanguage::label)
+                    .unwrap_or("未报告")
+                    .to_string(),
+                result
+                    .reported_model
+                    .clone()
+                    .unwrap_or_else(|| "未报告".to_string()),
+            ),
+            None => ("未报告".to_string(), "未报告".to_string()),
+        };
         Self {
             id: job.id,
             title: job.title.clone(),
@@ -333,6 +676,13 @@ impl JobViewSnapshot {
             warning: job.warning.clone(),
             capabilities: JobCapabilities::from_job(job),
             retention_label: job.retention.label().to_string(),
+            transcription_runtime,
+            transcription_source,
+            transcription_backend,
+            transcription_model,
+            requested_language,
+            reported_language,
+            reported_model,
         }
     }
 }
@@ -386,6 +736,14 @@ pub struct Job {
     /// Final output directory where `full.md` was written.
     #[serde(default)]
     pub final_output_dir: Option<PathBuf>,
+    /// Frozen Runtime and source-language choice. `None` is preserved for
+    /// pre-v0.4 jobs and is reported as `legacy-unrecorded` rather than being
+    /// filled from the current Config.
+    #[serde(default)]
+    pub transcription_selection: Option<TranscriptionSelection>,
+    /// Runtime-reported processing identity, if the Runtime supplied one.
+    #[serde(default)]
+    pub transcription_result: Option<TranscriptionResult>,
 }
 
 impl Job {
@@ -413,7 +771,53 @@ impl Job {
             warning: None,
             retention: RetentionPolicy::default(),
             final_output_dir: None,
+            transcription_selection: None,
+            transcription_result: None,
         }
+    }
+
+    /// Construct a new Job through the shared GUI/CLI creation seam.
+    ///
+    /// `selection` is copied into the Job before it can enter the queue and is
+    /// never re-derived from Config during recovery or retry.
+    pub fn from_creation(input: JobCreationInput) -> Self {
+        let mut job = Self::new(input.id, input.bvid, input.page);
+        job.transcription_selection = Some(input.selection);
+        job.retention = input.retention;
+        for stage in pipeline_stages() {
+            job.set_stage_state(stage, StageState::Pending);
+        }
+        job
+    }
+
+    /// Convenience form of [`Job::from_creation`] for callers that already
+    /// have the four core identity fields.
+    pub fn new_with_selection(
+        id: Uuid,
+        bvid: String,
+        page: u32,
+        selection: TranscriptionSelection,
+        retention: RetentionPolicy,
+    ) -> Self {
+        Self::from_creation(JobCreationInput::new(id, bvid, page, selection, retention))
+    }
+
+    pub fn transcription_selection_status(&self) -> TranscriptionSelectionStatus {
+        if self.transcription_selection.is_some() {
+            TranscriptionSelectionStatus::Recorded
+        } else {
+            TranscriptionSelectionStatus::LegacyUnrecorded
+        }
+    }
+
+    /// Stable marker used by queue/state migration and machine-readable error
+    /// handling. It must not be replaced with a current Config value.
+    pub fn transcription_selection_marker(&self) -> &'static str {
+        self.transcription_selection_status().marker()
+    }
+
+    pub fn requires_transcription_rebuild(&self) -> bool {
+        self.transcription_selection.is_none()
     }
 
     /// Overall progress across all pipeline stages (0..100).
@@ -631,6 +1035,30 @@ pub fn recover(queue: &mut Queue) -> Vec<RecoveryReport> {
             job.status = JobStatus::Queued;
             job.stage = next_pending_stage(job).unwrap_or(Stage::Queued);
             job.stage_progress = 0;
+        }
+
+        // A pre-v0.4 Job has no trustworthy Runtime or language identity.
+        // Keep completed Evidence readable, but never resume or retry a
+        // legacy task using the current Config. A completed legacy task is
+        // already an immutable historical result; if it needs processing
+        // again, the user must explicitly rebuild it with a new selection.
+        if job.requires_transcription_rebuild() {
+            if job.status == JobStatus::Completed {
+                job.stage = Stage::Completed;
+                job.stage_progress = 100;
+                reports.push(report);
+                continue;
+            }
+
+            job.status = JobStatus::NeedsUserAction;
+            job.stage = Stage::NeedsUserAction;
+            job.stage_progress = 0;
+            job.finished_at = None;
+            job.error = Some(format!(
+                "{LEGACY_UNRECORDED}: task must be rebuilt with explicit transcription settings"
+            ));
+            reports.push(report);
+            continue;
         }
 
         // Completed jobs have already applied their retention policy. Validate
@@ -880,9 +1308,15 @@ fn transcript_valid(path: &Path) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
+    if utterances.is_empty() {
+        return false;
+    }
     let mut ids = std::collections::HashSet::new();
     for utterance in &utterances {
         if !ids.insert(&utterance.id) {
+            return false;
+        }
+        if utterance.text.trim().is_empty() {
             return false;
         }
         if utterance.start_ms > utterance.end_ms {
@@ -906,6 +1340,253 @@ mod tests {
     use std::sync::Mutex;
 
     static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sample_selection(created_from: CreatedFrom) -> TranscriptionSelection {
+        TranscriptionSelection::new(
+            RuntimeSource::External,
+            PathBuf::from("/tmp/funasr-runtime"),
+            PathBuf::from("/tmp/funasr-data"),
+            "runtime-test-identity".into(),
+            RuntimeBackend::DockerCompose,
+            Some("测试模型".into()),
+            SourceLanguage::En,
+            created_from,
+        )
+    }
+
+    #[test]
+    fn source_language_uses_closed_wire_values() {
+        for (language, wire) in [
+            (SourceLanguage::Auto, "auto"),
+            (SourceLanguage::Zh, "zh"),
+            (SourceLanguage::En, "en"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&language).unwrap(),
+                format!("\"{wire}\"")
+            );
+            assert_eq!(SourceLanguage::from_str(wire).unwrap(), language);
+        }
+        for invalid in ["", "zh-cn", "中文", "de"] {
+            assert!(SourceLanguage::from_str(invalid).is_err());
+            assert!(serde_json::from_str::<SourceLanguage>(&format!("\"{invalid}\"")).is_err());
+        }
+    }
+
+    #[test]
+    fn selection_and_result_serde_roundtrip_preserves_identity() {
+        let selection = sample_selection(CreatedFrom::Cli);
+        let result = TranscriptionResult::new(
+            Some(SourceLanguage::En),
+            Some("model-en".into()),
+            Some("runtime-reported-identity".into()),
+        );
+        let json = serde_json::to_string(&selection).unwrap();
+        let decoded: TranscriptionSelection = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, selection);
+        assert!(json.contains("\"runtime_source\":\"external\""));
+        assert!(json.contains("\"runtime_backend\":\"docker-compose\""));
+        assert!(json.contains("\"requested_language\":\"en\""));
+        assert!(json.contains("\"created_from\":\"cli\""));
+
+        let result_json = serde_json::to_string(&result).unwrap();
+        let decoded_result: TranscriptionResult = serde_json::from_str(&result_json).unwrap();
+        assert_eq!(decoded_result, result);
+    }
+
+    #[test]
+    fn canonical_job_creation_freezes_selection_and_initializes_stages() {
+        let selection = sample_selection(CreatedFrom::App);
+        let job = Job::from_creation(JobCreationInput::new(
+            Uuid::new_v4(),
+            "BV1frozen".into(),
+            2,
+            selection.clone(),
+            RetentionPolicy::KeepAll,
+        ));
+        assert_eq!(job.transcription_selection.as_ref(), Some(&selection));
+        assert_eq!(job.retention, RetentionPolicy::KeepAll);
+        assert_eq!(job.transcription_selection_marker(), "recorded");
+        for stage in pipeline_stages() {
+            assert_eq!(job.stage_state(stage), StageState::Pending);
+        }
+    }
+
+    #[test]
+    fn app_and_cli_creation_share_the_same_job_semantics() {
+        let app_job = Job::from_creation(JobCreationInput::new(
+            Uuid::new_v4(),
+            "BV1same".into(),
+            2,
+            sample_selection(CreatedFrom::App),
+            RetentionPolicy::KeepAll,
+        ));
+        let cli_job = Job::from_creation(JobCreationInput::new(
+            Uuid::new_v4(),
+            "BV1same".into(),
+            2,
+            sample_selection(CreatedFrom::Cli),
+            RetentionPolicy::KeepAll,
+        ));
+
+        assert_eq!(app_job.bvid, cli_job.bvid);
+        assert_eq!(app_job.page, cli_job.page);
+        assert_eq!(app_job.retention, cli_job.retention);
+        assert_eq!(app_job.stages, cli_job.stages);
+        let app_selection = app_job.transcription_selection.as_ref().unwrap();
+        let cli_selection = cli_job.transcription_selection.as_ref().unwrap();
+        assert_eq!(app_selection.runtime_source, cli_selection.runtime_source);
+        assert_eq!(app_selection.runtime_project, cli_selection.runtime_project);
+        assert_eq!(
+            app_selection.runtime_data_dir,
+            cli_selection.runtime_data_dir
+        );
+        assert_eq!(
+            app_selection.runtime_identity,
+            cli_selection.runtime_identity
+        );
+        assert_eq!(app_selection.runtime_backend, cli_selection.runtime_backend);
+        assert_eq!(
+            app_selection.model_description,
+            cli_selection.model_description
+        );
+        assert_eq!(
+            app_selection.requested_language,
+            cli_selection.requested_language
+        );
+        assert_eq!(app_selection.created_from, CreatedFrom::App);
+        assert_eq!(cli_selection.created_from, CreatedFrom::Cli);
+    }
+
+    #[test]
+    fn old_queue_and_state_entries_are_readable_without_config_backfill() {
+        let id = Uuid::new_v4();
+        let old_json = format!(
+            r#"{{"id":"{}","bvid":"BV1legacy","page":1,"title":"legacy","stage":"queued","status":"queued","stage_progress":0,"error":null,"work_dir":null,"stages":{{}},"speaker_map":{{}}}}"#,
+            id
+        );
+        let queue_dir = std::env::temp_dir().join(format!("bimyscribe-queue-fixture-{id}"));
+        std::fs::remove_dir_all(&queue_dir).ok();
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let queue_path = queue_dir.join("queue.json");
+        std::fs::write(&queue_path, format!(r#"{{"jobs":[{}]}}"#, old_json)).unwrap();
+
+        let queue = Queue::load_from(&queue_path).unwrap();
+        let job = &queue.jobs[0];
+        assert_eq!(job.id, id);
+        assert_eq!(job.transcription_selection, None);
+        assert_eq!(job.transcription_selection_marker(), LEGACY_UNRECORDED);
+        assert!(job.requires_transcription_rebuild());
+
+        let state_dir = queue_dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), old_json).unwrap();
+        let state = load_job_state(&state_dir).unwrap();
+        assert_eq!(state.transcription_selection_marker(), LEGACY_UNRECORDED);
+        std::fs::remove_dir_all(queue_dir).ok();
+    }
+
+    #[test]
+    fn persisted_selection_survives_config_changes_and_reload() {
+        let selection = sample_selection(CreatedFrom::Cli);
+        let job = Job::from_creation(JobCreationInput::new(
+            Uuid::new_v4(),
+            "BV1stable".into(),
+            1,
+            selection.clone(),
+            RetentionPolicy::Recommended,
+        ));
+        let queue_path =
+            std::env::temp_dir().join(format!("bimyscribe-selection-freeze-{}.json", job.id));
+        let queue = Queue { jobs: vec![job] };
+        std::fs::write(&queue_path, serde_json::to_vec_pretty(&queue).unwrap()).unwrap();
+
+        // A later settings edit is input for new Jobs only. Loading an
+        // existing queue must not consult it or alter the frozen selection.
+        let config = crate::config::Config {
+            runtime_project: Some(PathBuf::from("/tmp/changed-runtime")),
+            runtime_data_dir: PathBuf::from("/tmp/changed-runtime-data"),
+            default_retention: RetentionPolicy::KeepAll,
+            ..crate::config::Config::default()
+        };
+
+        let reloaded = Queue::load_from(&queue_path).unwrap();
+        assert_eq!(reloaded.jobs[0].transcription_selection, Some(selection));
+        assert_eq!(reloaded.jobs[0].retention, RetentionPolicy::Recommended);
+        assert_eq!(config.default_retention, RetentionPolicy::KeepAll);
+        std::fs::remove_file(queue_path).ok();
+    }
+
+    #[test]
+    fn legacy_recovery_requires_explicit_rebuild_but_completed_evidence_stays_readable() {
+        let mut legacy = Job::new(Uuid::new_v4(), "BV1legacy".into(), 1);
+        legacy.status = JobStatus::Queued;
+        let mut queue = Queue { jobs: vec![legacy] };
+        recover(&mut queue);
+        assert_eq!(queue.jobs[0].status, JobStatus::NeedsUserAction);
+        assert_eq!(queue.jobs[0].stage, Stage::NeedsUserAction);
+        assert!(queue.jobs[0]
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains(LEGACY_UNRECORDED)));
+
+        let id = Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("bimyscribe-legacy-complete-{id}"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("full.md"),
+            format!("<!-- job-id: {id} -->\nlegacy evidence"),
+        )
+        .unwrap();
+        let mut completed = Job::new(id, "BV1legacy".into(), 1);
+        completed.status = JobStatus::Completed;
+        completed.stage = Stage::Completed;
+        completed.stage_progress = 100;
+        completed.work_dir = Some(dir.clone());
+        completed.final_output_dir = Some(dir.clone());
+        completed.set_stage_state(Stage::FinalDocument, StageState::Completed);
+        let mut queue = Queue {
+            jobs: vec![completed],
+        };
+        recover(&mut queue);
+        assert_eq!(queue.jobs[0].status, JobStatus::Completed);
+        assert!(queue.jobs[0]
+            .work_dir
+            .as_ref()
+            .unwrap()
+            .join("full.md")
+            .is_file());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recovery_preserves_recorded_selection_for_retry() {
+        let selection = sample_selection(CreatedFrom::App);
+        let mut job = Job::from_creation(JobCreationInput::new(
+            Uuid::new_v4(),
+            "BV1retry".into(),
+            1,
+            selection.clone(),
+            RetentionPolicy::Recommended,
+        ));
+        job.status = JobStatus::Running;
+        job.stage = Stage::Transcribe;
+        job.set_stage_state(Stage::Transcribe, StageState::Running);
+        let mut queue = Queue { jobs: vec![job] };
+
+        recover(&mut queue);
+
+        assert_eq!(
+            queue.jobs[0].transcription_selection.as_ref(),
+            Some(&selection)
+        );
+        assert_eq!(queue.jobs[0].status, JobStatus::Queued);
+        assert_eq!(
+            queue.jobs[0].stage_state(Stage::Transcribe),
+            StageState::Pending
+        );
+    }
 
     #[test]
     fn stage_name_roundtrip() {
@@ -1005,6 +1686,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let mut job = Job::new(id, "BV1test".into(), 1);
+        job.transcription_selection = Some(sample_selection(CreatedFrom::App));
         job.work_dir = Some(dir.clone());
         job.set_stage_state(Stage::Metadata, StageState::Completed);
         job.set_stage_state(Stage::DownloadAudio, StageState::Running);
@@ -1089,6 +1771,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let mut job = Job::new(id, "BV1test".into(), 1);
+        job.transcription_selection = Some(sample_selection(CreatedFrom::App));
         job.work_dir = Some(dir.clone());
         job.final_output_dir = Some(dir.clone());
         job.retention = retention;
@@ -1106,7 +1789,11 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("source.audio"), b"source audio").unwrap();
         std::fs::write(dir.join("normalized.wav"), b"normalized audio").unwrap();
-        std::fs::write(dir.join("transcript.raw.json"), b"[]").unwrap();
+        std::fs::write(
+            dir.join("transcript.raw.json"),
+            br#"[{"id":"u0001","text":"fixture","start_ms":0,"end_ms":1,"speaker_id":0}]"#,
+        )
+        .unwrap();
         std::fs::write(
             dir.join("transcript.raw.md"),
             format!("<!-- job-id: {} -->\nraw", job.id),
@@ -1278,7 +1965,11 @@ mod tests {
     fn recover_missing_final_requeues_from_earliest_rebuildable_stage() {
         let (job, dir) = completed_job_with_retained_artifacts(RetentionPolicy::Recommended);
         std::fs::remove_file(dir.join("full.md")).unwrap();
-        std::fs::write(dir.join("transcript.raw.json"), "[]").unwrap();
+        std::fs::write(
+            dir.join("transcript.raw.json"),
+            r#"[{"id":"u0001","text":"fixture","start_ms":0,"end_ms":1,"speaker_id":0}]"#,
+        )
+        .unwrap();
         let mut queue = Queue { jobs: vec![job] };
         let reports = recover(&mut queue);
         let recovered = &queue.jobs[0];
@@ -1309,7 +2000,11 @@ mod tests {
     fn capabilities_for_completed_job() {
         let dir = std::env::temp_dir().join(format!("bimyscribe-caps-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("transcript.raw.json"), b"[]").unwrap();
+        std::fs::write(
+            dir.join("transcript.raw.json"),
+            br#"[{"id":"u0001","text":"fixture","start_ms":0,"end_ms":1,"speaker_id":0}]"#,
+        )
+        .unwrap();
         let mut job = Job::new(Uuid::new_v4(), "BV1test".into(), 1);
         job.status = JobStatus::Completed;
         job.work_dir = Some(dir.clone());
@@ -1324,6 +2019,7 @@ mod tests {
     #[test]
     fn capabilities_for_failed_job() {
         let mut job = Job::new(Uuid::new_v4(), "BV1test".into(), 1);
+        job.transcription_selection = Some(sample_selection(CreatedFrom::Cli));
         job.status = JobStatus::Failed;
         let caps = JobCapabilities::from_job(&job);
         assert!(!caps.can_cancel);

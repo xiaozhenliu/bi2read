@@ -19,18 +19,20 @@ BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录�
 
 目前支持 macOS。安装前请准备：
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.92 或更高版本
+- [Rust](https://www.rust-lang.org/tools/install) 1.92 或更高版本；仓库用
+  `rust-toolchain.toml` 固定贡献者工具链为 1.95，`Cargo.toml` 的 1.92 是 MSRV
 - [FFmpeg](https://ffmpeg.org/)；命令需要位于 `PATH`
 - [uv](https://docs.astral.sh/uv/)（通过 Cargo 运行原生 Runtime 时需要；构建 App
   的脚本会自动下载）
-- [BiMyScribe FunASR Runtime v1.0.0](https://github.com/xiaozhenliu/bimyscribe-funasr-runtime/releases/tag/v1.0.0)
+- BiMyScribe FunASR Runtime contract v2（contract v1 仍可读取，但不能创建新的 v0.4.0 任务）
 
 Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器镜像不
 包含在本仓库中。Docker Desktop 仅在选择 Docker Runtime 时需要。
 
 ## 安装与启动
 
-当前源码版本为 **v0.2.2**；完整中英文变化、兼容性与限制见 [`docs/releases/v0.2.2.md`](docs/releases/v0.2.2.md)。
+App 版本以 [`Cargo.toml`](Cargo.toml) 为唯一来源；当前版本的完整中英文变化、兼容性与
+限制见 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)。
 
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
@@ -77,7 +79,7 @@ App 内的同一个可执行文件也提供无界面命令。以下示例先用�
 ```bash
 CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 "$CLI" --help
-"$CLI" transcribe 'https://www.bilibili.com/video/BV...'
+"$CLI" transcribe 'https://www.bilibili.com/video/BV...' --language zh
 ```
 
 命令会读取与桌面界面相同的设置，等待下载、转码、转录和文档生成全部完成，然后
@@ -86,6 +88,7 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 
 ```bash
 "$CLI" runtime status
+"$CLI" runtime status --json
 "$CLI" runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime
 ```
 
@@ -110,7 +113,8 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 1. **工作目录**：默认位于应用数据目录的 `Jobs`，保存任务中间产物。
 2. **Markdown 输出目录**：默认为 `~/Documents/BiMyScribe`。
 3. **FunASR Runtime 项目目录**：本机构建的 App 会自动使用内置 Runtime；通过
-   Cargo 运行或需要 Docker 后端时，可在此选择自定义 Runtime v1 项目。
+   Cargo 运行或需要 Docker 后端时，可在此选择自定义 Runtime v2 项目。旧 v1 Runtime
+   可以查看状态，但创建任务前必须升级。
 4. **Runtime 数据目录**：保存 Python 环境、依赖、模型与缓存。通常需要数 GB
    空间，可以直接选择外挂盘。
 5. 点击**安装或重新验证 Runtime**。原生 Runtime 会使用冻结的 uv 锁文件；
@@ -124,9 +128,10 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 
 1. 确认设置中的 Runtime 状态为“已就绪”；Docker Runtime 还需启动 Docker Desktop。
 2. 在顶部输入框粘贴 Bilibili 链接或视频编号。
-3. 将视频加入队列，等待下载、转码、转录和文档生成完成。
-4. 在任务详情中检查识别出的说话人；需要时修改显示名称。
-5. 打开最终文稿，或在 Finder 中显示输出目录。
+3. 在“确认转写设置”中查看 Runtime 说明，选择中文、英文或 Runtime 明确提供的自动检测，确认后才加入队列。
+4. 等待下载、转码、转录和文档生成完成，并在任务信息中核对请求/实际语言和 Runtime identity。
+5. 在任务详情中检查识别出的说话人；需要时修改显示名称。
+6. 打开最终文稿，或在 Finder 中显示输出目录。
 
 修改说话人名称后，BiMyScribe 会直接重建 Markdown，不会重复转录音频。
 
@@ -143,6 +148,11 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 
 ## 当前限制
 
+- 真实视频的识别质量会随音频、领域词汇和 Runtime 模型变化；v0.4.0 使用既有英文视频
+  转写作为 Docker 回归参考，中文不设置正确率 benchmark，只验证契约、结构和失败行为。
+  英文 profile 按既定方案使用 `paraformer-en`，不以其他模型的实验结果替代该验证。
+  这不等同于对所有领域或语言组合做出准确率承诺。现有 AI 润色主要整理标点、明显错字
+  和分段，不等同于已经验证的全文纠错。
 - 暂不提供官方签名并公证的 DMG；可以运行上方脚本，在自己的 Apple Silicon Mac
   上生成 ad-hoc 签名的 `.app`。
 - 仅支持匿名访问，不支持需要登录或 Cookie 的视频。
@@ -151,6 +161,8 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 
 ## 产品与设计文档
 
+- [当前路线图](docs/roadmap.md)
+- [架构与模块接口](docs/architecture.md)
 - [界面设计规范](docs/design/bimyscribe-design-spec.md)
 
 ## 许可证
@@ -179,18 +191,21 @@ speaker information.
 ### Requirements
 
 - macOS
-- Rust 1.92 or newer
+- Rust 1.92 or newer; `rust-toolchain.toml` pins the contributor toolchain to
+  1.95, while 1.92 in `Cargo.toml` remains the MSRV
 - FFmpeg available on `PATH`
 - uv when running the native runtime through Cargo; the app build script
   downloads it automatically
-- [BiMyScribe FunASR Runtime v1.0.0](https://github.com/xiaozhenliu/bimyscribe-funasr-runtime/releases/tag/v1.0.0)
+- BiMyScribe FunASR Runtime contract v2 (contract v1 remains readable but cannot create new v0.4.0 jobs)
 
 FunASR models are not bundled. Docker Desktop is required only for the optional
 Docker runtime.
 
 ### Install and run
 
-The current source version is **v0.2.2**. See [`docs/releases/v0.2.2.md`](docs/releases/v0.2.2.md) for bilingual changes, compatibility notes, and limitations.
+[`Cargo.toml`](Cargo.toml) is the single source of truth for the app version.
+See [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) for the current bilingual
+release notes, compatibility details, and limitations.
 
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
@@ -231,7 +246,7 @@ The executable inside the app also provides a non-interactive CLI:
 ```bash
 CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 "$CLI" --help
-"$CLI" transcribe 'https://www.bilibili.com/video/BV...'
+"$CLI" transcribe 'https://www.bilibili.com/video/BV...' --language en
 ```
 
 It uses the same saved settings as the desktop app, waits for the production
@@ -240,6 +255,7 @@ available without opening the GUI:
 
 ```bash
 "$CLI" runtime status
+"$CLI" runtime status --json
 "$CLI" runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime
 ```
 
@@ -252,8 +268,9 @@ job.
 ### First-time setup
 
 The locally built app discovers its bundled FunASR Runtime automatically. When
-running through Cargo or using Docker, select a compatible Runtime project in
-Settings. Choose a Runtime Data directory with several gigabytes of free space;
+running through Cargo or using Docker, select a Runtime v2 project in
+Settings. Older v1 Runtimes remain inspectable but must be upgraded before creating
+a new job. Choose a Runtime Data directory with several gigabytes of free space;
 it may be on an external drive. Install or validate the runtime from Settings. Job data defaults
 to the macOS Application Support directory, while Markdown defaults to
 `~/Documents/BiMyScribe`; both locations can be changed with the native folder
@@ -265,10 +282,11 @@ supported in this release.
 
 1. Make sure Settings reports that the runtime is ready. Start Docker Desktop
    only when using the Docker backend.
-2. Paste a Bilibili link or video ID and add it to the queue.
-3. Wait for download, conversion, transcription, and document generation.
-4. Review or rename detected speakers in the task details.
-5. Open the generated `full.md` document or reveal it in Finder.
+2. Paste a Bilibili link or video ID and review the Runtime/language confirmation.
+3. Confirm the language choice before adding the job to the queue.
+4. Wait for download, conversion, transcription, and document generation; verify requested/reported language and Runtime identity in task information.
+5. Review or rename detected speakers in the task details.
+6. Open the generated `full.md` document or reveal it in Finder.
 
 ### Output
 
@@ -277,6 +295,14 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document.
 
 ### Current limitations
 
+- Recognition quality varies with audio, domain vocabulary, and the Runtime
+  model. v0.4.0 uses the existing English video transcription as a Docker
+  regression reference and keeps `paraformer-en` as the explicit English
+  profile; Chinese has contract/structure checks rather than an accuracy
+  benchmark. This is not an accuracy guarantee for every domain or language
+  combination. The current AI refinement mainly adjusts punctuation,
+  obvious typos, and paragraphing, and is not a validated full-transcript
+  correction system.
 - No officially signed and notarized DMG is provided yet. Run the script above
   to create an ad-hoc signed `.app` on your own Apple Silicon Mac.
 - Videos requiring login or cookies are not supported.
@@ -286,6 +312,8 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document.
 
 ### Product and design documents
 
+- [Current roadmap (Chinese)](docs/roadmap.md)
+- [Architecture and module interfaces (Chinese)](docs/architecture.md)
 - [UI design specification (Chinese)](docs/design/bimyscribe-design-spec.md)
 
 ### License

@@ -1,19 +1,14 @@
-//! Pipeline execution and simulation.
+//! Durable transcription pipeline.
 //!
-//! `stage_sequence()` is the ordered list of happy-path stages used by the UI
-//! to render the per-job stages list. `simulate_progress` drives the UI with
-//! fake progress so the interface can be evaluated end-to-end without real
-//! downloads/transcription. `run_job` is the real pipeline entry point and is
-//! a stub returning `NotImplemented` until later steps.
+//! [`run_job`] is the external interface. It owns stage ordering, artifact
+//! validation, recovery semantics, persistence, cancellation, and optional
+//! enhancement fallback. Slint mapping lives in `ui_bridge`.
 
-use std::thread;
-use std::time::Duration;
-
-use slint::{Model, Weak};
-use uuid::Uuid;
+use slint::Weak;
 
 use crate::cancel::CancellationToken;
 use crate::jobs::{pipeline_stages, Stage};
+use crate::ui_bridge::{set_job_error, set_job_progress, set_job_stage};
 use crate::App;
 
 /// The ordered pipeline stages, as owned `Stage` values (for the UI).
@@ -37,6 +32,8 @@ pub enum PipelineError {
     Io(String),
     #[error("docker not running")]
     DockerNotRunning,
+    #[error("{0}: task must be rebuilt with explicit transcription settings")]
+    TranscriptionSelectionRequired(&'static str),
     #[error("external drive not mounted")]
     DriveNotMounted,
     #[error("cancelled")]
@@ -94,6 +91,88 @@ pub fn drive_mounted(working_dir: &std::path::Path) -> bool {
     true
 }
 
+/// All external side effects of the pipeline (metadata fetch, audio download,
+/// transcription). Production uses [`ProdDeps`]; integration tests provide
+/// fixture implementations.
+pub trait PipelineDeps {
+    fn fetch_metadata(
+        &self,
+        bvid: &str,
+        page: Option<u32>,
+    ) -> Result<crate::bilibili::Metadata, PipelineError>;
+    fn fetch_audio(
+        &self,
+        bvid: &str,
+        cid: u64,
+        dest: &std::path::Path,
+        progress: &dyn Fn(u64, u64),
+        cancel_token: &CancellationToken,
+    ) -> Result<(), PipelineError>;
+    fn transcribe(
+        &self,
+        request: crate::funasr::TranscribeRequest<'_>,
+    ) -> Result<crate::funasr::TranscribeOutcome, crate::funasr::FunasrError>;
+}
+
+/// Production implementation talking to the real bilibili API and funasr runtime.
+pub struct ProdDeps;
+
+impl PipelineDeps for ProdDeps {
+    fn fetch_metadata(
+        &self,
+        bvid: &str,
+        page: Option<u32>,
+    ) -> Result<crate::bilibili::Metadata, PipelineError> {
+        Ok(crate::bilibili::fetch_metadata(bvid, page)?)
+    }
+
+    fn fetch_audio(
+        &self,
+        bvid: &str,
+        cid: u64,
+        dest: &std::path::Path,
+        progress: &dyn Fn(u64, u64),
+        cancel_token: &CancellationToken,
+    ) -> Result<(), PipelineError> {
+        // Fetch the audio stream URL (retry once if it 403s on download).
+        let mut last_err: Option<PipelineError> = None;
+        for _attempt in 0..2 {
+            // Check cancellation before each download attempt.
+            cancel_token.check()?;
+            let url = match crate::bilibili::fetch_playurl_audio(bvid, cid) {
+                Ok(u) => u,
+                Err(e) => {
+                    last_err = Some(e.into());
+                    continue;
+                }
+            };
+            match crate::bilibili::download_audio(&url, dest, None, progress) {
+                Ok(_) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.into());
+                    // URL may have expired; loop re-fetches playurl.
+                }
+            }
+        }
+        // Check cancellation after the download.
+        cancel_token.check()?;
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn transcribe(
+        &self,
+        request: crate::funasr::TranscribeRequest<'_>,
+    ) -> Result<crate::funasr::TranscribeOutcome, crate::funasr::FunasrError> {
+        crate::funasr::run(request)
+    }
+}
+
 /// Real pipeline entry point. Runs `job` through every stage,
 /// skipping already-Completed stages whose artifacts validate. Updates the UI
 /// row in place via the weak App handle. Persists `state.json` after each stage.
@@ -109,8 +188,38 @@ pub fn run_job(
     app: &Weak<App>,
     cancel_token: &CancellationToken,
 ) -> Result<(), PipelineError> {
+    run_job_with_deps(job, cfg, app, cancel_token, &ProdDeps)
+}
+
+/// Dependency-injected entry point. `run_job` forwards here with [`ProdDeps`];
+/// integration tests inject fixture dependencies instead. No extra wrapper is
+/// provided: this is the only seam for full-pipeline regression tests.
+pub fn run_job_with_deps(
+    job: &mut crate::jobs::Job,
+    cfg: &crate::config::Config,
+    app: &Weak<App>,
+    cancel_token: &CancellationToken,
+    deps: &dyn PipelineDeps,
+) -> Result<(), PipelineError> {
     // Check cancellation before starting.
     cancel_token.check()?;
+
+    // A pre-v0.4 Job has no trustworthy Runtime or language identity. Reject
+    // it before resolving the current Config or creating any work directory;
+    // recovery and retry must require an explicit new Job selection.
+    if job.requires_transcription_rebuild() {
+        job.status = crate::jobs::JobStatus::NeedsUserAction;
+        job.stage = Stage::NeedsUserAction;
+        job.stage_progress = 0;
+        job.error = Some(format!(
+            "{}: task must be rebuilt with explicit transcription settings",
+            crate::jobs::LEGACY_UNRECORDED
+        ));
+        crate::jobs::save_job_state(job)?;
+        return Err(PipelineError::TranscriptionSelectionRequired(
+            crate::jobs::LEGACY_UNRECORDED,
+        ));
+    }
 
     // Resolve the work directory for this job (on the external drive).
     // `ensure_work_dir` creates the dir and sets `job.work_dir` as a side effect.
@@ -126,7 +235,7 @@ pub fn run_job(
         app,
         cancel_token,
         cleanup_was_complete,
-        |job, app| stage_metadata(job, app, cfg),
+        |job, app| stage_metadata(job, app, cfg, deps),
     )?;
     rebuilt |= run_stage(
         job,
@@ -134,7 +243,7 @@ pub fn run_job(
         app,
         cancel_token,
         cleanup_was_complete,
-        |job, app| stage_download_audio(job, app, cfg, cancel_token),
+        |job, app| stage_download_audio(job, app, cfg, cancel_token, deps),
     )?;
     rebuilt |= run_stage(
         job,
@@ -150,7 +259,7 @@ pub fn run_job(
         app,
         cancel_token,
         cleanup_was_complete,
-        |job, app| stage_transcribe(job, app, cfg, cancel_token),
+        |job, app| stage_transcribe(job, app, cfg, cancel_token, deps),
     )?;
     rebuilt |= run_stage(
         job,
@@ -365,6 +474,7 @@ fn stage_metadata(
     job: &mut crate::jobs::Job,
     app: &Weak<App>,
     _cfg: &crate::config::Config,
+    deps: &dyn PipelineDeps,
 ) -> Result<(), PipelineError> {
     // Resolve short links first.
     let bvid = if job.bvid.starts_with("b23:") {
@@ -376,7 +486,7 @@ fn stage_metadata(
     };
     job.bvid = bvid.clone();
 
-    let meta = crate::bilibili::fetch_metadata(&bvid, Some(job.page))?;
+    let meta = deps.fetch_metadata(&bvid, Some(job.page))?;
     // The metadata API resolves legacy av ids to the canonical BVID.
     job.bvid = meta.bvid.clone();
     job.cid = Some(meta.cid);
@@ -425,6 +535,7 @@ fn stage_download_audio(
     app: &Weak<App>,
     _cfg: &crate::config::Config,
     cancel_token: &CancellationToken,
+    deps: &dyn PipelineDeps,
 ) -> Result<(), PipelineError> {
     let dir = job
         .work_dir
@@ -435,42 +546,21 @@ fn stage_download_audio(
         .cid
         .ok_or_else(|| PipelineError::Bilibili("no cid".into()))?;
 
-    // Fetch the audio stream URL (retry once if it 403s on download).
     let dest = dir.join("source.audio");
-    let mut last_err: Option<PipelineError> = None;
-    for _attempt in 0..2 {
-        // Check cancellation before each download attempt.
-        cancel_token.check()?;
-        let url = match crate::bilibili::fetch_playurl_audio(&bvid, cid) {
-            Ok(u) => u,
-            Err(e) => {
-                last_err = Some(e.into());
-                continue;
-            }
-        };
-        match crate::bilibili::download_audio(&url, &dest, None, |bytes, total| {
+    deps.fetch_audio(
+        &bvid,
+        cid,
+        &dest,
+        &|bytes, total| {
             let pct = if total > 0 {
                 ((bytes as f64 / total as f64) * 100.0) as u8
             } else {
                 0
             };
             set_job_progress(app, job.id, pct.min(99));
-        }) {
-            Ok(_) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                last_err = Some(e.into());
-                // URL may have expired; loop re-fetches playurl.
-            }
-        }
-    }
-    // Check cancellation after the download.
-    cancel_token.check()?;
-    if let Some(e) = last_err {
-        return Err(e);
-    }
+        },
+        cancel_token,
+    )?;
     set_job_progress(app, job.id, 100);
     Ok(())
 }
@@ -543,6 +633,7 @@ fn stage_transcribe(
     app: &Weak<App>,
     cfg: &crate::config::Config,
     cancel_token: &CancellationToken,
+    deps: &dyn PipelineDeps,
 ) -> Result<(), PipelineError> {
     let dir = job
         .work_dir
@@ -550,15 +641,16 @@ fn stage_transcribe(
         .ok_or_else(|| PipelineError::Io("no work dir".into()))?;
     let normalized = dir.join("normalized.wav");
     let log = dir.join("logs").join("funasr.log");
-    let project_dir = cfg
-        .effective_runtime_project()
-        .ok_or_else(|| PipelineError::Io("FunASR Runtime 未配置".into()))?;
+    let selection = job.transcription_selection.as_ref().ok_or(
+        PipelineError::TranscriptionSelectionRequired(crate::jobs::LEGACY_UNRECORDED),
+    )?;
+    job.transcription_result = None;
 
-    let utterances = match crate::funasr::run(crate::funasr::TranscribeRequest {
+    let outcome = match deps.transcribe(crate::funasr::TranscribeRequest {
         job_dir: &dir,
         normalized_wav: &normalized,
-        project_dir: &project_dir,
-        runtime_data_dir: &cfg.runtime_data_dir,
+        selection,
+        duration_ms: job.duration_ms,
         log_path: &log,
         job_id: &job.id,
         instance_nonce: &cfg.instance_nonce,
@@ -580,8 +672,9 @@ fn stage_transcribe(
         }
         Err(error) => return Err(error.into()),
     };
+    job.transcription_result = Some(outcome.result);
     // Store utterances count for display; the raw json is already written by funasr::run.
-    let _ = utterances.len();
+    let _ = outcome.utterances.len();
     set_job_progress(app, job.id, 100);
     Ok(())
 }
@@ -759,233 +852,10 @@ fn sanitize(s: &str) -> String {
         .to_string()
 }
 
-/// Drive the UI with simulated progress for one job. The job is identified by
-/// `job_id`; the matching `JobRow` in `App.jobs` is updated stage by stage.
-///
-/// This runs on a background thread and only touches the UI via
-/// `Weak::upgrade_in_event_loop`, so it is `Send`-safe.
-pub fn simulate_progress(job_id: Uuid, app: Weak<App>) {
-    let stages = stage_sequence();
-    // Skip Queued (index 0) since the row starts there; begin at Metadata.
-    for (_i, stage) in stages.iter().enumerate().skip(1) {
-        let is_transcribe = *stage == Stage::Transcribe;
-        let stage_name = stage.name().to_string();
-        let stage_label = stage.label().to_string();
-        set_job_stage(&app, job_id, &stage_name, &stage_label, is_transcribe);
-
-        if is_transcribe {
-            thread::sleep(Duration::from_millis(4000));
-            set_job_progress(&app, job_id, 100);
-            continue;
-        }
-
-        let steps = 20u8;
-        for s in 0..=steps {
-            let pct = s * 100 / steps;
-            set_job_progress(&app, job_id, pct);
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    set_job_stage(
-        &app,
-        job_id,
-        Stage::Completed.name(),
-        Stage::Completed.label(),
-        false,
-    );
-    set_job_progress(&app, job_id, 100);
-}
-
-/// Apply a full job snapshot to the UI: updates the JobRow and (if selected) the
-/// detail panel + stages model in a single event loop callback.
-pub fn apply_snapshot(app: &Weak<App>, snapshot: crate::jobs::JobViewSnapshot) {
-    let app = app.clone();
-    app.upgrade_in_event_loop(move |app| {
-        apply_snapshot_inner(&app, &snapshot);
-    })
-    .ok();
-}
-
-fn apply_snapshot_inner(app: &crate::App, snap: &crate::jobs::JobViewSnapshot) {
-    let id = snap.id.to_string();
-
-    // Build the StageView list from the snapshot (reads persisted StageState,
-    // not inferred from the stage's position in the sequence.
-    let stage_views = stage_views_from_snapshot(snap);
-
-    // Update the stages model.
-    if let Some(vm) = app
-        .get_stages()
-        .as_any()
-        .downcast_ref::<slint::VecModel<crate::StageView>>()
-    {
-        vm.set_vec(stage_views);
-    }
-
-    // Update the JobRow if present.
-    let model = app.get_jobs();
-    let mut found_selected = false;
-    for i in 0..model.row_count() {
-        if let Some(mut row) = model.row_data(i) {
-            if row.id == id {
-                row.title = snap.title.clone().into();
-                row.stage_name = snap.stage.name().into();
-                row.stage_label = snap.stage.label().into();
-                row.stage_progress = snap.stage_progress as i32;
-                row.total_progress = snap.total_progress as i32;
-                row.indeterminate = snap.stage == Stage::Transcribe;
-                row.elapsed_secs = snap.elapsed_secs as i32;
-                row.elapsed = fmt_elapsed(snap.elapsed_secs).into();
-                row.has_error = snap.error.is_some();
-                row.error_text = snap.error.clone().unwrap_or_default().into();
-                row.status_label = snap.status.label().into();
-                model.set_row_data(i, row.clone());
-                if row.selected {
-                    found_selected = true;
-                }
-                break;
-            }
-        }
-    }
-
-    // If the updated row is selected, also refresh the detail panel.
-    if found_selected {
-        let caps = &snap.capabilities;
-        let mut d = app.get_detail();
-        d.has_job = true;
-        d.title = snap.title.clone().into();
-        d.bvid = snap.bvid.clone().into();
-        d.page = snap.page as i32;
-        d.status_label = snap.status.label().into();
-        d.total_progress = snap.total_progress as i32;
-        d.elapsed_secs = snap.elapsed_secs as i32;
-        d.elapsed = fmt_elapsed(snap.elapsed_secs).into();
-        d.error_text = snap.error.clone().unwrap_or_default().into();
-        d.has_error = snap.error.is_some();
-        d.warning_text = snap
-            .warning
-            .as_ref()
-            .map(|warning| warning.label())
-            .unwrap_or_default()
-            .into();
-        d.can_cancel = caps.can_cancel;
-        d.can_retry = caps.can_retry;
-        d.can_open = caps.can_open_document;
-        d.can_reveal = caps.can_reveal;
-        d.can_edit_speakers = caps.can_edit_speakers;
-        d.retention_label = snap.retention_label.clone().into();
-        app.set_detail(d);
-    }
-}
-
-/// Convert persisted stage semantics into the one UI representation used by
-/// initial selection and background snapshot updates.
-pub fn stage_views_from_snapshot(snap: &crate::jobs::JobViewSnapshot) -> Vec<crate::StageView> {
-    snap.stages
-        .iter()
-        .map(|s| {
-            let is_current = s.name == snap.stage.name();
-            crate::StageView {
-                name: s.name.clone().into(),
-                label: s.label.clone().into(),
-                done: s.state == crate::jobs::StageState::Completed,
-                skipped: s.state == crate::jobs::StageState::Skipped,
-                active: is_current && snap.status == crate::jobs::JobStatus::Running,
-                progress: if is_current {
-                    snap.stage_progress as i32
-                } else {
-                    0
-                },
-                indeterminate: is_current
-                    && snap.status == crate::jobs::JobStatus::Running
-                    && snap.stage == Stage::Transcribe,
-                error: is_current && snap.status == crate::jobs::JobStatus::Failed,
-            }
-        })
-        .collect()
-}
-
-/// Update a job row's stage fields (called from background thread).
-fn set_job_stage(app: &Weak<App>, job_id: Uuid, name: &str, label: &str, indeterminate: bool) {
-    let id = job_id.to_string();
-    let name = name.to_string();
-    let label = label.to_string();
-    let app = app.clone();
-    app.upgrade_in_event_loop(move |app| {
-        update_row(&app, &id, |row| {
-            row.stage_name = name.clone().into();
-            row.stage_label = label.clone().into();
-            row.indeterminate = indeterminate;
-            row.status_label = label.clone().into();
-            row.stage_progress = 0;
-            row.total_progress = recompute_total(row.stage_name.as_str(), row.stage_progress);
-        });
-    })
-    .ok();
-}
-
-fn set_job_progress(app: &Weak<App>, job_id: Uuid, pct: u8) {
-    let id = job_id.to_string();
-    let app = app.clone();
-    app.upgrade_in_event_loop(move |app| {
-        update_row(&app, &id, |row| {
-            row.stage_progress = pct as i32;
-            row.total_progress = recompute_total(row.stage_name.as_str(), row.stage_progress);
-        });
-    })
-    .ok();
-}
-
-/// Mark a job row as failed with an error message (called from the worker thread).
-fn set_job_error(app: &Weak<App>, job_id: Uuid, err: &str) {
-    let id = job_id.to_string();
-    let err = err.to_string();
-    let app = app.clone();
-    app.upgrade_in_event_loop(move |app| {
-        update_row(&app, &id, |row| {
-            row.has_error = true;
-            row.error_text = err.clone().into();
-        });
-    })
-    .ok();
-}
-
-/// Mutate a single JobRow identified by its stringified id.
-fn update_row<F: FnOnce(&mut crate::JobRow)>(app: &crate::App, id: &str, f: F) {
-    let model = app.get_jobs();
-    let len = model.row_count();
-    for i in 0..len {
-        if let Some(mut row) = model.row_data(i) {
-            if row.id == id {
-                f(&mut row);
-                model.set_row_data(i, row.clone());
-                break;
-            }
-        }
-    }
-}
-
-pub fn fmt_elapsed(secs: u64) -> String {
-    let h = secs / 3600;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{}:{:02}:{:02}", h, m, s)
-    } else {
-        format!("{:02}:{:02}", m, s)
-    }
-}
-
-fn recompute_total(stage_name: &str, stage_progress: i32) -> i32 {
-    Stage::from_name(stage_name)
-        .map(|stage| crate::jobs::total_progress_for(stage, stage_progress.clamp(0, 100) as u8))
-        .unwrap_or(0) as i32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn job_directory_name_is_readable_and_stable() {
@@ -1085,6 +955,27 @@ mod tests {
     }
 
     #[test]
+    fn run_job_rejects_legacy_selection_before_using_config() {
+        let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1legacy".into(), 1);
+        let result = run_job(
+            &mut job,
+            &crate::config::Config::default(),
+            &Weak::<App>::default(),
+            &CancellationToken::new(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(PipelineError::TranscriptionSelectionRequired(
+                crate::jobs::LEGACY_UNRECORDED
+            ))
+        ));
+        assert_eq!(job.status, crate::jobs::JobStatus::NeedsUserAction);
+        assert_eq!(job.stage, Stage::NeedsUserAction);
+        assert!(job.work_dir.is_none());
+    }
+
+    #[test]
     fn disabled_screenshot_stage_is_persisted_as_skipped() {
         let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1test".into(), 1);
         skip_stage(
@@ -1120,19 +1011,6 @@ mod tests {
             job.stage_state(Stage::ReadableDocument),
             crate::jobs::StageState::Skipped
         );
-    }
-
-    #[test]
-    fn live_progress_uses_the_jobs_progress_algorithm() {
-        for stage in stage_sequence() {
-            for progress in [0, 50, 99, 100] {
-                assert_eq!(
-                    recompute_total(stage.name(), progress),
-                    crate::jobs::total_progress_for(stage, progress as u8) as i32
-                );
-            }
-        }
-        assert_eq!(recompute_total(Stage::Completed.name(), 0), 100);
     }
 
     #[test]

@@ -429,8 +429,6 @@ struct Page {
     #[serde(default)]
     #[allow(dead_code)]
     part: String,
-    #[serde(default)]
-    duration: u64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -74,6 +74,7 @@ impl JobRunner for PipelineJobRunner {
             Ok(()) => JobResult::Completed,
             Err(PipelineError::Cancelled) => JobResult::Cancelled,
             Err(PipelineError::DockerNotRunning) => JobResult::NeedsUserAction,
+            Err(PipelineError::TranscriptionSelectionRequired(_)) => JobResult::NeedsUserAction,
             Err(PipelineError::DriveNotMounted) => JobResult::WaitingForDrive,
             Err(error) => JobResult::Failed(error.to_string()),
         }
@@ -89,7 +90,7 @@ impl JobRunner for PipelineJobRunner {
 
     fn apply_snapshot(&self, app: &Weak<App>, job: &Job) {
         let snapshot = crate::jobs::JobViewSnapshot::from_job(job, chrono::Utc::now());
-        crate::pipeline::apply_snapshot(app, snapshot);
+        crate::ui_bridge::apply_snapshot(app, snapshot);
     }
 }
 
@@ -187,6 +188,7 @@ impl Scheduler {
                 stored.work_dir = job.work_dir.clone();
                 stored.final_output_dir = job.final_output_dir.clone();
                 stored.warning = job.warning.clone();
+                stored.transcription_result = job.transcription_result.clone();
                 // Guard: a cancelled job must not be overwritten by Completed/Failed.
                 if stored.status == JobStatus::Cancelled || stored.status == JobStatus::Cancelling {
                     stored.status = JobStatus::Cancelled;
