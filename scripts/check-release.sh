@@ -32,6 +32,35 @@ pass() {
     json_result "$stage" success "$1" "$1" none
 }
 
+public_release_json() {
+    local slug=$1 release_tag=$2 request_id release_json repo_json repo_id
+    request_id="$$-$(date +%s)"
+    release_json=$(curl --fail --silent --show-error \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -H 'User-Agent: BiMyScribe-release-gate' \
+        "https://api.github.com/repos/$slug/releases/tags/$release_tag?release_gate=$request_id" \
+        2>/dev/null || true)
+    if [ -n "$release_json" ]; then
+        printf '%s' "$release_json"
+        return 0
+    fi
+    repo_json=$(curl --fail --silent --show-error \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -H 'User-Agent: BiMyScribe-release-gate' \
+        "https://api.github.com/repos/$slug?release_gate=$request_id" \
+        2>/dev/null || true)
+    repo_id=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' <<<"$repo_json" 2>/dev/null || true)
+    [ -n "$repo_id" ] || return 1
+    curl --fail --silent --show-error \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -H 'User-Agent: BiMyScribe-release-gate' \
+        "https://api.github.com/repositories/$repo_id/releases/tags/$release_tag?release_gate=$request_id" \
+        2>/dev/null
+}
+
 value() {
     python3 - "$config" "$1" <<'PY'
 import sys, tomllib
@@ -282,12 +311,7 @@ runtime)
     curl --fail --location --silent --show-error --output "$archive" "$public_remote/archive/refs/tags/$runtime_tag.tar.gz" || fail "anonymous Runtime source archive" unavailable "publish the Runtime tag publicly"
     tar -tzf "$archive" | rg -q '/bimyscribe-runtime.toml$' || fail "Runtime manifest in downloaded archive" missing "publish a complete Runtime tag"
     runtime_slug=${public_remote#https://github.com/}
-    runtime_release=$(curl --fail --silent --show-error \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        -H 'User-Agent: BiMyScribe-release-gate' \
-        "https://api.github.com/repos/$runtime_slug/releases/tags/$runtime_tag?release_gate=$(date +%s)" \
-        2>/dev/null || true)
+    runtime_release=$(public_release_json "$runtime_slug" "$runtime_tag" || true)
     [ -n "$runtime_release" ] || fail "public Runtime GitHub Release" unavailable "publish the Runtime Release"
     python3 - "$runtime_evidence" "$runtime_revision" "$runtime_contract" <<'PY' || fail "Runtime install/self-check/fixed-sample evidence" mismatch "revalidate the published Runtime with frozen uv"
 import json, sys
@@ -572,12 +596,7 @@ assert data.get("evidence_sha256")=={n:hashlib.sha256(open(p,"rb").read()).hexdi
 PY
         case "$download_dir" in /*) ;; *) fail "absolute fresh download dir" "$download_dir" "choose a new absolute directory" ;; esac
         [ ! -e "$download_dir" ] || fail "nonexistent download directory" exists "choose a fresh path"
-        release_json=$(curl --fail --silent --show-error \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            -H 'User-Agent: BiMyScribe-release-gate' \
-            "https://api.github.com/repos/$repo_slug/releases/tags/$tag?release_gate=$(date +%s)" \
-            2>/dev/null || true)
+        release_json=$(public_release_json "$repo_slug" "$tag" || true)
         [ -n "$release_json" ] || fail "public Release API" unavailable "publish the GitHub Release"
         remote_revision=$(git ls-remote "https://github.com/$repo_slug.git" "refs/tags/$tag^{}" 2>/dev/null | awk 'NR==1 {print $1}')
         [ "$remote_revision" = "$public_revision" ] || fail "annotated tag at $public_revision" "${remote_revision:-missing-or-lightweight}" "publish the immutable annotated tag"
@@ -630,12 +649,7 @@ PY
     [ "$approved_protected" = "$supplied_protected" ] || fail "approved protected path set" "$supplied_protected" "use the exact Step 12 protected paths"
     case "$download_dir" in /*) ;; *) fail "absolute fresh download dir" "$download_dir" "choose a new absolute directory" ;; esac
     [ ! -e "$download_dir" ] || fail "nonexistent download directory" exists "choose a fresh path"
-    release_api="https://api.github.com/repos/$repo_slug/releases/tags/$tag?release_gate=$(date +%s)"
-    release_json=$(curl --fail --silent --show-error \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        -H 'User-Agent: BiMyScribe-release-gate' \
-        "$release_api" 2>/dev/null || true)
+    release_json=$(public_release_json "$repo_slug" "$tag" || true)
     [ -n "$release_json" ] || fail "public Release API" unavailable "publish the GitHub Release"
     remote_revision=$(git ls-remote "https://github.com/$repo_slug.git" "refs/tags/$tag^{}" 2>/dev/null | awk 'NR==1 {print $1}')
     [ -n "$remote_revision" ] || fail "annotated tag $tag" lightweight-or-missing "create an annotated immutable tag"
