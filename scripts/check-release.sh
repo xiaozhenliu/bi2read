@@ -572,8 +572,12 @@ assert data.get("evidence_sha256")=={n:hashlib.sha256(open(p,"rb").read()).hexdi
 PY
         case "$download_dir" in /*) ;; *) fail "absolute fresh download dir" "$download_dir" "choose a new absolute directory" ;; esac
         [ ! -e "$download_dir" ] || fail "nonexistent download directory" exists "choose a fresh path"
-        release_json=$(curl --fail --silent --show-error -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/$repo_slug/releases/tags/$tag" 2>/dev/null || true)
+        release_json=$(curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H 'User-Agent: BiMyScribe-release-gate' \
+            "https://api.github.com/repos/$repo_slug/releases/tags/$tag?release_gate=$(date +%s)" \
+            2>/dev/null || true)
         [ -n "$release_json" ] || fail "public Release API" unavailable "publish the GitHub Release"
         remote_revision=$(git ls-remote "https://github.com/$repo_slug.git" "refs/tags/$tag^{}" 2>/dev/null | awk 'NR==1 {print $1}')
         [ "$remote_revision" = "$public_revision" ] || fail "annotated tag at $public_revision" "${remote_revision:-missing-or-lightweight}" "publish the immutable annotated tag"
@@ -626,8 +630,12 @@ PY
     [ "$approved_protected" = "$supplied_protected" ] || fail "approved protected path set" "$supplied_protected" "use the exact Step 12 protected paths"
     case "$download_dir" in /*) ;; *) fail "absolute fresh download dir" "$download_dir" "choose a new absolute directory" ;; esac
     [ ! -e "$download_dir" ] || fail "nonexistent download directory" exists "choose a fresh path"
-    release_api="https://api.github.com/repos/$repo_slug/releases/tags/$tag"
-    release_json=$(curl --fail --silent --show-error -H 'Accept: application/vnd.github+json' "$release_api" 2>/dev/null || true)
+    release_api="https://api.github.com/repos/$repo_slug/releases/tags/$tag?release_gate=$(date +%s)"
+    release_json=$(curl --fail --silent --show-error \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -H 'User-Agent: BiMyScribe-release-gate' \
+        "$release_api" 2>/dev/null || true)
     [ -n "$release_json" ] || fail "public Release API" unavailable "publish the GitHub Release"
     remote_revision=$(git ls-remote "https://github.com/$repo_slug.git" "refs/tags/$tag^{}" 2>/dev/null | awk 'NR==1 {print $1}')
     [ -n "$remote_revision" ] || fail "annotated tag $tag" lightweight-or-missing "create an annotated immutable tag"
