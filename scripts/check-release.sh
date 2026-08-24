@@ -282,7 +282,12 @@ runtime)
     curl --fail --location --silent --show-error --output "$archive" "$public_remote/archive/refs/tags/$runtime_tag.tar.gz" || fail "anonymous Runtime source archive" unavailable "publish the Runtime tag publicly"
     tar -tzf "$archive" | rg -q '/bimyscribe-runtime.toml$' || fail "Runtime manifest in downloaded archive" missing "publish a complete Runtime tag"
     runtime_slug=${public_remote#https://github.com/}
-    runtime_release=$(curl --fail --silent --show-error "https://api.github.com/repos/$runtime_slug/releases/tags/$runtime_tag" 2>/dev/null || true)
+    runtime_release=$(curl --fail --silent --show-error \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        -H 'User-Agent: BiMyScribe-release-gate' \
+        "https://api.github.com/repos/$runtime_slug/releases/tags/$runtime_tag?release_gate=$(date +%s)" \
+        2>/dev/null || true)
     [ -n "$runtime_release" ] || fail "public Runtime GitHub Release" unavailable "publish the Runtime Release"
     python3 - "$runtime_evidence" "$runtime_revision" "$runtime_contract" <<'PY' || fail "Runtime install/self-check/fixed-sample evidence" mismatch "revalidate the published Runtime with frozen uv"
 import json, sys

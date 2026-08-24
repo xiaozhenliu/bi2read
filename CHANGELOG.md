@@ -13,6 +13,22 @@ This file keeps short per-version summaries; see `docs/releases/` for details.
 
 - None.
 
+## 0.5.1 - 2026-08-24
+
+### 中文
+
+- 修复公开源码归档中 ADR 与历史 design-plan 指向内部排除文档的失效链接；改为公开可达的
+  Design Spec 或不带链接的产品依据说明。产品行为与 Runtime 输入不变。
+- 匿名 Runtime Release 门禁使用 GitHub 标准 API 请求头和唯一查询参数，避免边缘节点缓存的
+  504 响应阻塞可用 Release 的核验。
+
+### English
+
+- Fixed broken links from public ADRs and the historical design-plan to excluded internal documents. References
+  now use the public Design Spec or plain product-basis text. Product behavior and Runtime inputs are unchanged.
+- The anonymous Runtime Release gate now uses standard GitHub API headers and a unique query parameter so a
+  cached edge 504 cannot repeatedly block verification of an available release.
+
 ## 0.5.0 - 2026-08-24
 
 ### 中文

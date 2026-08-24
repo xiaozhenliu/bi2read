@@ -33,7 +33,7 @@ Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器�
 ## 安装与启动
 
 App 版本以 [`Cargo.toml`](Cargo.toml) 为唯一来源；当前版本的完整中英文变化、兼容性与
-限制见 [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md)。
+限制见 [`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md)。
 
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
@@ -213,7 +213,7 @@ Docker runtime.
 ### Install and run
 
 [`Cargo.toml`](Cargo.toml) is the single source of truth for the app version.
-See [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md) for the current bilingual
+See [`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md) for the current bilingual
 release notes, compatibility details, and limitations.
 
 ```bash
