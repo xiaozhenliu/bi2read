@@ -81,6 +81,42 @@ impl Config {
         }
     }
 
+    /// Freeze the v0.5 content plan once at Job creation. The conversion is
+    /// shared by CLI and desktop so enabled-invalid AI settings become an
+    /// explicit Unavailable marker instead of silently becoming Disabled.
+    pub(crate) fn content_setup(&self) -> crate::content_results::ContentSetupV1 {
+        crate::content_results::resolve_content_setup(
+            self.llm_enabled,
+            self.llm_connection.as_ref(),
+        )
+    }
+
+    /// Resolve the target for an explicit enhancement regeneration using the
+    /// exact same strict conversion as Job creation. It intentionally does
+    /// not return a target when the current Config is disabled or unavailable.
+    pub(crate) fn content_target(
+        &self,
+    ) -> Result<
+        crate::content_results::ReadyGenerationTargetV1,
+        crate::content_results::TargetUnavailableV1,
+    > {
+        let setup = crate::content_results::resolve_content_setup(
+            self.llm_enabled,
+            self.llm_connection.as_ref(),
+        );
+        match setup.initial_target {
+            crate::content_results::InitialTargetV1::Ready(target) => Ok(target),
+            crate::content_results::InitialTargetV1::Unavailable(reason) => Err(reason),
+            crate::content_results::InitialTargetV1::Disabled => {
+                Err(crate::content_results::TargetUnavailableV1 {
+                    code: crate::content_results::TargetUnavailableCodeV1::ConnectionMissing,
+                    message: "未配置本地 AI".into(),
+                    invalid_field: Some("llm_connection".into()),
+                })
+            }
+        }
+    }
+
     /// Choose the initial language shown by the App confirmation modal.
     /// Only a selection from the same current Runtime identity is reusable;
     /// otherwise the first-use product default is Chinese.

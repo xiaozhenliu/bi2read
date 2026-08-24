@@ -7,6 +7,7 @@
 use slint::Weak;
 
 use crate::cancel::CancellationToken;
+use crate::content_results::{ContentSnapshotV1, ContentViewV1, Intent};
 use crate::jobs::{pipeline_stages, Stage};
 use crate::ui_bridge::{set_job_error, set_job_progress, set_job_stage};
 use crate::App;
@@ -40,6 +41,13 @@ pub enum PipelineError {
     Cancelled,
     #[error("{0}")]
     Other(String),
+}
+
+fn content_pipeline_error(error: crate::content_results::ContentError) -> PipelineError {
+    match error {
+        crate::content_results::ContentError::Cancelled => PipelineError::Cancelled,
+        other => PipelineError::Document(other.to_string()),
+    }
 }
 
 impl From<crate::bilibili::MetadataError> for PipelineError {
@@ -229,7 +237,7 @@ pub fn run_job_with_deps(
         job.stage_state(Stage::Cleanup) == crate::jobs::StageState::Completed;
     let mut rebuilt = false;
 
-    rebuilt |= run_stage(
+    let metadata_rebuilt = run_stage(
         job,
         Stage::Metadata,
         app,
@@ -237,6 +245,7 @@ pub fn run_job_with_deps(
         cleanup_was_complete,
         |job, app| stage_metadata(job, app, cfg, deps),
     )?;
+    rebuilt |= metadata_rebuilt;
     rebuilt |= run_stage(
         job,
         Stage::DownloadAudio,
@@ -253,7 +262,7 @@ pub fn run_job_with_deps(
         cleanup_was_complete,
         |job, app| stage_normalize_audio(job, app, cfg, cancel_token),
     )?;
-    rebuilt |= run_stage(
+    let transcribe_rebuilt = run_stage(
         job,
         Stage::Transcribe,
         app,
@@ -261,7 +270,8 @@ pub fn run_job_with_deps(
         cleanup_was_complete,
         |job, app| stage_transcribe(job, app, cfg, cancel_token, deps),
     )?;
-    rebuilt |= run_stage(
+    rebuilt |= transcribe_rebuilt;
+    let raw_document_rebuilt = run_stage(
         job,
         Stage::RawDocument,
         app,
@@ -269,14 +279,29 @@ pub fn run_job_with_deps(
         cleanup_was_complete,
         stage_raw_document,
     )?;
-    rebuilt |= run_stage(
+    rebuilt |= raw_document_rebuilt;
+    if job.content_setup.is_some() && (metadata_rebuilt || transcribe_rebuilt) {
+        // Metadata changes alter source context and transcription changes
+        // Evidence. Force Initial before Final so an old completed readable
+        // stage cannot let Final consume a mismatched current snapshot.
+        job.set_stage_state(Stage::ReadableDocument, crate::jobs::StageState::Pending);
+    }
+    let readable_rebuilt = run_stage(
         job,
         Stage::ReadableDocument,
         app,
         cancel_token,
         cleanup_was_complete,
-        |job, app| stage_readable_document(job, app, cfg),
+        |job, app| stage_readable_document(job, app, cfg, cancel_token),
     )?;
+    rebuilt |= readable_rebuilt;
+    if job.content_setup.is_some() && (metadata_rebuilt || raw_document_rebuilt || readable_rebuilt)
+    {
+        // A new current or Evidence-derived readable output invalidates any
+        // previous final Presentation. Keep the final stage explicit so a
+        // retry cannot accidentally open an older full.md.
+        job.set_stage_state(Stage::FinalDocument, crate::jobs::StageState::Pending);
+    }
     skip_stage(job, Stage::Screenshots, app, cancel_token)?;
     rebuilt |= run_stage(
         job,
@@ -380,6 +405,12 @@ where
             }
             crate::jobs::save_job_state(job)?;
             Ok(true)
+        }
+        Err(PipelineError::Cancelled) => {
+            // Cancellation is not a failed stage. Leave the in-memory stage
+            // as Running for Scheduler's Cancelled convergence; importantly,
+            // do not persist Failed/error or surface a false failure banner.
+            Err(PipelineError::Cancelled)
         }
         Err(e) => {
             job.set_stage_state(stage, crate::jobs::StageState::Failed);
@@ -491,6 +522,7 @@ fn stage_metadata(
     job.bvid = meta.bvid.clone();
     job.cid = Some(meta.cid);
     job.up_name = Some(meta.up_name.clone());
+    job.part_title = meta.part_title.clone();
     job.duration_ms = Some(meta.duration_ms);
     job.title = meta.title.clone();
 
@@ -503,6 +535,7 @@ fn stage_metadata(
         "bvid": meta.bvid,
         "cid": meta.cid,
         "title": meta.title,
+        "part_title": meta.part_title,
         "up_name": meta.up_name,
         "duration_ms": meta.duration_ms,
         "page": job.page,
@@ -684,6 +717,24 @@ fn stage_raw_document(job: &mut crate::jobs::Job, app: &Weak<App>) -> Result<(),
         .work_dir
         .clone()
         .ok_or_else(|| PipelineError::Io("no work dir".into()))?;
+    if job.content_setup.is_some() {
+        let evidence = match crate::content_results::current(job)
+            .map_err(|error| PipelineError::Document(error.to_string()))?
+        {
+            ContentViewV1::Current(snapshot) => snapshot.evidence.utterances,
+            ContentViewV1::RawOnly { evidence, .. } => evidence.utterances,
+            ContentViewV1::Legacy => {
+                return Err(PipelineError::Document(
+                    "v0.5 Job unexpectedly resolved as legacy".into(),
+                ))
+            }
+        };
+        let md = crate::document::render_raw_markdown(job, &evidence);
+        let path = dir.join("transcript.raw.md");
+        crate::jobs::atomic_write(&path, md.as_bytes())?;
+        set_job_progress(app, job.id, 100);
+        return Ok(());
+    }
     let utts = load_utterances(&dir.join("transcript.raw.json"))?;
     let md = crate::document::render_raw_markdown(job, &utts);
     let path = dir.join("transcript.raw.md");
@@ -696,11 +747,18 @@ fn stage_readable_document(
     job: &mut crate::jobs::Job,
     app: &Weak<App>,
     cfg: &crate::config::Config,
+    cancel_token: &CancellationToken,
 ) -> Result<(), PipelineError> {
     let dir = job
         .work_dir
         .clone()
         .ok_or_else(|| PipelineError::Io("no work dir".into()))?;
+    if job.content_setup.is_some() {
+        let _snapshot = crate::content_results::execute(job, Intent::Initial, cancel_token)
+            .map_err(content_pipeline_error)?;
+        set_job_progress(app, job.id, 100);
+        return Ok(());
+    }
     let utts = load_utterances(&dir.join("transcript.raw.json"))?;
 
     let readable: Option<Vec<String>> = if cfg.llm_enabled {
@@ -753,6 +811,16 @@ fn stage_final_document(
         .work_dir
         .clone()
         .ok_or_else(|| PipelineError::Io("no work dir".into()))?;
+    if job.content_setup.is_some() {
+        let out_dir = final_output_dir(job, cfg, &dir);
+        std::fs::create_dir_all(&out_dir)?;
+        job.final_output_dir = Some(out_dir);
+        let snapshot = current_snapshot(job)?;
+        crate::document::rebuild_presentation(job, &snapshot)
+            .map_err(|error| PipelineError::Document(error.to_string()))?;
+        set_job_progress(app, job.id, 100);
+        return Ok(());
+    }
     let utts = load_utterances(&dir.join("transcript.raw.json"))?;
     let raw_md = dir.join("transcript.raw.md");
 
@@ -768,28 +836,69 @@ fn stage_final_document(
     let md = crate::document::render_full_markdown(job, &meta, &utts, readable.as_deref(), &raw_md);
 
     // Write into the configured output dir; fall back to the job dir.
-    let out_dir = if cfg.output_dir.as_os_str().is_empty() {
-        dir.clone()
-    } else {
-        let safe_title = sanitize(&job.title);
-        let name = format!("{} [{}-P{}]", safe_title, job.bvid, job.page);
-        cfg.output_dir.join(name)
-    };
+    let out_dir = final_output_dir(job, cfg, &dir);
     std::fs::create_dir_all(&out_dir)?;
     let full_path = out_dir.join("full.md");
     crate::jobs::atomic_write(&full_path, md.as_bytes())?;
 
     // Store the final output dir so Speaker edits can rebuild it without
     // inferring from the current config.
+    job.final_output_dir = Some(out_dir.clone());
     if out_dir != dir {
-        job.final_output_dir = Some(out_dir.clone());
-        // Also mirror full.md into the job dir for reveal-in-finder consistency.
+        // Legacy jobs retain the historical work-dir mirror for compatibility.
         let _ = std::fs::copy(&full_path, dir.join("full.md"));
-    } else {
-        job.final_output_dir = Some(dir.clone());
     }
     set_job_progress(app, job.id, 100);
     Ok(())
+}
+
+pub(crate) fn ensure_final_output_dir(
+    job: &mut crate::jobs::Job,
+    cfg: &crate::config::Config,
+) -> Result<std::path::PathBuf, PipelineError> {
+    if job.content_setup.is_none() {
+        return Err(PipelineError::Document(
+            "legacy Job 使用旧的最终文档路径".into(),
+        ));
+    }
+    let work_dir = job
+        .work_dir
+        .as_deref()
+        .ok_or_else(|| PipelineError::Io("no work dir".into()))?;
+    let output_dir = final_output_dir(job, cfg, work_dir);
+    std::fs::create_dir_all(&output_dir)?;
+    job.final_output_dir = Some(output_dir.clone());
+    Ok(output_dir)
+}
+
+fn final_output_dir(
+    job: &crate::jobs::Job,
+    cfg: &crate::config::Config,
+    work_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    if let Some(existing) = &job.final_output_dir {
+        return existing.clone();
+    }
+    if cfg.output_dir.as_os_str().is_empty() {
+        return work_dir.to_path_buf();
+    }
+    let safe_title = sanitize(&job.title);
+    let name = format!("{} [{}-P{}]", safe_title, job.bvid, job.page);
+    cfg.output_dir.join(name)
+}
+
+fn current_snapshot(job: &crate::jobs::Job) -> Result<ContentSnapshotV1, PipelineError> {
+    match crate::content_results::current(job)
+        .map_err(|error| PipelineError::Document(error.to_string()))?
+    {
+        ContentViewV1::Current(snapshot) => Ok(snapshot),
+        ContentViewV1::RawOnly { .. } => Err(PipelineError::Document(
+            "可信文字结果尚未生成，请修复文字结果".into(),
+        )),
+        ContentViewV1::Legacy => Err(PipelineError::Document(
+            "v0.5 Job unexpectedly resolved as legacy".into(),
+        )),
+    }
 }
 
 fn stage_cleanup(
@@ -813,15 +922,24 @@ fn stage_cleanup(
             }
         }
         crate::jobs::RetentionPolicy::DocumentsOnly => {
-            // Delete all audio + raw data, keep only .md documents.
-            for f in [
-                "source.audio",
-                "source.video",
-                "normalized.wav",
-                "transcript.raw.json",
-                "transcript.readable.md",
-                "metadata.json",
-            ] {
+            // v0.5 content jobs retain machine-readable Evidence, current and
+            // metadata so the result page can reopen, map sources and
+            // regenerate an enhancement without rerunning ASR. Legacy jobs
+            // keep the historical documents-only behavior.
+            let files = if job.content_setup.is_some() {
+                ["source.audio", "source.video", "normalized.wav"].as_slice()
+            } else {
+                [
+                    "source.audio",
+                    "source.video",
+                    "normalized.wav",
+                    "transcript.raw.json",
+                    "transcript.readable.md",
+                    "metadata.json",
+                ]
+                .as_slice()
+            };
+            for f in files {
                 let _ = std::fs::remove_file(dir.join(f));
             }
         }
@@ -973,6 +1091,63 @@ mod tests {
         assert_eq!(job.status, crate::jobs::JobStatus::NeedsUserAction);
         assert_eq!(job.stage, Stage::NeedsUserAction);
         assert!(job.work_dir.is_none());
+    }
+
+    #[test]
+    fn content_cancellation_is_a_pipeline_cancellation() {
+        assert!(matches!(
+            content_pipeline_error(crate::content_results::ContentError::Cancelled),
+            PipelineError::Cancelled
+        ));
+    }
+
+    #[test]
+    fn readable_content_cancellation_does_not_publish_or_mark_failed() {
+        let root =
+            std::env::temp_dir().join(format!("bimyscribe-readable-cancel-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1cancel".into(), 1);
+        job.content_setup = Some(crate::content_results::ContentSetupV1::disabled());
+        job.work_dir = Some(root.clone());
+        job.cid = Some(7);
+        job.duration_ms = Some(1000);
+        job.status = crate::jobs::JobStatus::Running;
+        job.stage = Stage::ReadableDocument;
+        std::fs::write(
+            root.join("transcript.raw.json"),
+            br#"[{"id":"u1","text":"raw","start_ms":0,"end_ms":1,"speaker_id":0}]"#,
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = stage_readable_document(
+            &mut job,
+            &Weak::<App>::default(),
+            &crate::config::Config::default(),
+            &cancel,
+        );
+        assert!(matches!(result, Err(PipelineError::Cancelled)));
+        assert!(job.error.is_none());
+        assert_ne!(job.status, crate::jobs::JobStatus::Failed);
+        assert!(!root.join("content-current.v1.json").exists());
+        job.set_stage_state(Stage::ReadableDocument, crate::jobs::StageState::Pending);
+        let stage_cancel = CancellationToken::new();
+        let stage_result = run_stage(
+            &mut job,
+            Stage::ReadableDocument,
+            &Weak::<App>::default(),
+            &stage_cancel,
+            false,
+            |_job, _app| Err(PipelineError::Cancelled),
+        );
+        assert!(matches!(stage_result, Err(PipelineError::Cancelled)));
+        assert_eq!(job.status, crate::jobs::JobStatus::Running);
+        assert_eq!(
+            job.stage_state(Stage::ReadableDocument),
+            crate::jobs::StageState::Running
+        );
+        assert!(job.error.is_none());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -74,6 +74,7 @@ fn apply_snapshot_inner(app: &crate::App, snap: &crate::jobs::JobViewSnapshot) {
             .into();
         detail.can_cancel = capabilities.can_cancel;
         detail.can_retry = capabilities.can_retry;
+        detail.can_rebuild = capabilities.can_rebuild;
         detail.can_open = capabilities.can_open_document;
         detail.can_reveal = capabilities.can_reveal;
         detail.can_delete = capabilities.can_delete;

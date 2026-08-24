@@ -566,7 +566,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bimyscribe"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -575,6 +575,7 @@ dependencies = [
  "fs2",
  "libc",
  "log",
+ "ring",
  "serde",
  "serde_json",
  "slint",
@@ -582,6 +583,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml 0.8.23",
  "ureq",
+ "url",
  "uuid",
 ]
 

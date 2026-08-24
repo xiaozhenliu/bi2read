@@ -9,8 +9,19 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::content_results::{
+    ArtifactKindV1, ContentBlockV1, ContentSnapshotV1, EffectivePathV1, SourceStatusV1,
+};
 use crate::funasr::Utterance;
 use crate::jobs::Job;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DocumentError {
+    #[error("document I/O: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("document snapshot: {0}")]
+    Snapshot(String),
+}
 
 /// Metadata needed to render the document header. Populated at the `metadata`
 /// stage and stored in `metadata.json`; passed here so the renderer is pure.
@@ -30,27 +41,8 @@ pub struct DocMeta {
 impl DocMeta {
     /// The canonical bilibili video URL, including the page if > 1.
     pub fn video_url(&self) -> String {
-        canonical_video_url(&self.bvid, self.page)
+        crate::bilibili::video_url(&self.bvid, self.page, None)
     }
-}
-
-/// Build a stable Bilibili video URL from the identifier resolved onto a job.
-fn canonical_video_url(video_id: &str, page: u32) -> String {
-    let base = format!("https://www.bilibili.com/video/{}", video_id);
-    if page > 1 {
-        format!("{base}?p={page}")
-    } else {
-        base
-    }
-}
-
-/// Build a seek link using Bilibili's supported `p=N&t=seconds` parameters.
-fn timestamp_url(video_id: &str, page: u32, start_ms: u64) -> String {
-    format!(
-        "https://www.bilibili.com/video/{video_id}?p={}&t={}",
-        page.max(1),
-        start_ms / 1000
-    )
 }
 
 fn render_utterances(job: &Job, utterances: &[Utterance], refined: Option<&[String]>) -> String {
@@ -66,7 +58,7 @@ fn render_utterances(job: &Job, utterances: &[Utterance], refined: Option<&[Stri
             "**[{}]** [{}]({})\n{}\n\n",
             job.speaker_name(u.speaker_id),
             fmt_ts(u.start_ms),
-            timestamp_url(&job.bvid, job.page, u.start_ms),
+            crate::bilibili::video_url(&job.bvid, job.page, Some(u.start_ms)),
             text
         ));
     }
@@ -128,12 +120,327 @@ pub fn render_readable_body(
             "**[{}]** [{}]({})\n{}\n\n",
             job.speaker_name(speaker_id),
             fmt_ts(first.start_ms),
-            timestamp_url(&job.bvid, job.page, first.start_ms),
+            crate::bilibili::video_url(&job.bvid, job.page, Some(first.start_ms)),
             text
         ));
     }
 
     body
+}
+
+/// Render a v0.5 Presentation exclusively from the validated snapshot.
+///
+/// The snapshot already contains the raw Evidence view and the validated
+/// faithful/AI records. This function intentionally has no filesystem reads
+/// other than writing its three output files, so a stale or hand-edited raw
+/// transcript cannot silently become the displayed document.
+pub(crate) fn rebuild_presentation(
+    job: &Job,
+    snapshot: &ContentSnapshotV1,
+) -> Result<(), DocumentError> {
+    let Some(work_dir) = job.work_dir.as_deref() else {
+        return Err(DocumentError::Snapshot("任务没有工作目录".into()));
+    };
+    if snapshot.current.job_id != job.id {
+        return Err(DocumentError::Snapshot("snapshot 与任务 ID 不匹配".into()));
+    }
+    if snapshot.current.evidence != snapshot.evidence.descriptor {
+        return Err(DocumentError::Snapshot(
+            "snapshot Evidence descriptor 不匹配".into(),
+        ));
+    }
+    let faithful = snapshot
+        .current
+        .slots
+        .get(ArtifactKindV1::FaithfulText)
+        .current
+        .as_ref()
+        .ok_or_else(|| DocumentError::Snapshot("snapshot 缺少忠实正文".into()))?;
+
+    let raw = render_raw_markdown(job, &snapshot.evidence.utterances);
+    let readable = render_faithful_body(
+        job,
+        faithful.blocks.as_slice(),
+        &snapshot.evidence.utterances,
+    );
+    let raw_path = work_dir.join("transcript.raw.md");
+    let meta = DocMeta {
+        title: job.title.clone(),
+        up_name: job.up_name.clone().unwrap_or_default(),
+        duration_ms: job.duration_ms.unwrap_or(0),
+        bvid: job.bvid.clone(),
+        page: job.page,
+        source_url: job.source_url.clone(),
+    };
+    let full = render_snapshot_full_markdown(job, &meta, snapshot, &readable, &raw_path);
+
+    crate::jobs::atomic_write(&raw_path, raw.as_bytes())?;
+    crate::jobs::atomic_write(
+        &work_dir.join("transcript.readable.md"),
+        readable.as_bytes(),
+    )?;
+
+    let output_dir = job
+        .final_output_dir
+        .as_deref()
+        .ok_or_else(|| DocumentError::Snapshot("任务没有最终输出目录".into()))?;
+    std::fs::create_dir_all(output_dir)?;
+    crate::jobs::atomic_write(&output_dir.join("full.md"), full.as_bytes())?;
+    Ok(())
+}
+
+/// Render the faithful record while preserving source links for mapped
+/// blocks. A limited block is shown honestly without inventing a timestamp.
+fn render_faithful_body(job: &Job, blocks: &[ContentBlockV1], utterances: &[Utterance]) -> String {
+    let by_id = utterances
+        .iter()
+        .map(|utterance| (utterance.id.as_str(), utterance))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut body = String::new();
+    for block in blocks {
+        let first = block
+            .source_refs
+            .first()
+            .and_then(|source_ref| source_ref.utterance_ids.first())
+            .and_then(|id| by_id.get(id.as_str()).copied());
+        let speaker = first
+            .map(|utterance| job.speaker_name(utterance.speaker_id))
+            .unwrap_or_else(|| "来源受限".into());
+        if block.source_status == SourceStatusV1::Mapped {
+            if let Some(utterance) = first {
+                body.push_str(&format!(
+                    "**[{}]** [{}]({})\n{}\n\n",
+                    speaker,
+                    fmt_ts(utterance.start_ms),
+                    crate::bilibili::video_url(&job.bvid, job.page, Some(utterance.start_ms)),
+                    block.text
+                ));
+                continue;
+            }
+        }
+        body.push_str(&format!("> 来源受限\n{}\n\n", block.text));
+    }
+    body
+}
+
+fn render_snapshot_full_markdown(
+    job: &Job,
+    meta: &DocMeta,
+    snapshot: &ContentSnapshotV1,
+    faithful_body: &str,
+    raw_path: &Path,
+) -> String {
+    // Reuse the stable legacy header and faithful body formatting, then insert
+    // the structured v0.5 records before the full transcript section.
+    let mut document = render_full_markdown(
+        job,
+        meta,
+        &snapshot.evidence.utterances,
+        Some(faithful_body),
+        raw_path,
+    );
+    if let Some(index) = document.find("## 全文") {
+        document.insert_str(index, &render_snapshot_sections(job, snapshot));
+    }
+    document
+}
+
+fn render_snapshot_sections(job: &Job, snapshot: &ContentSnapshotV1) -> String {
+    let mut sections = String::new();
+    sections.push_str("## 内容来源说明\n\n");
+    sections.push_str(
+        "- 原始稿：FunASR Evidence 的完整输出，未经过 LLM；原始 Markdown 位于任务工作目录的 `transcript.raw.md`。\n",
+    );
+    sections.push_str(&format!(
+        "- Evidence identity：`{}`；来源片段数：{}。\n\n",
+        snapshot.current.evidence.identity, snapshot.current.evidence.utterance_count
+    ));
+
+    let faithful_slot = snapshot.current.slots.get(ArtifactKindV1::FaithfulText);
+    if let Some(record) = faithful_slot.current.as_ref() {
+        sections.push_str("## 忠实整理\n\n");
+        sections.push_str(&format_provenance(record));
+        sections
+            .push_str("忠实正文只允许对 Evidence 做保序、可核对的整理；正文主体见下方“全文”。\n\n");
+    }
+    for (kind, heading) in [
+        (ArtifactKindV1::DefaultSummary, "## 摘要"),
+        (ArtifactKindV1::Highlights, "## 重点"),
+        (ArtifactKindV1::Chapters, "## 章节"),
+    ] {
+        let slot = snapshot.current.slots.get(kind);
+        let Some(record) = slot.current.as_ref() else {
+            if let Some(failure) = slot.last_failure.as_ref() {
+                sections.push_str(&format!(
+                    "{heading}\n\n> 当前未生成：{}\n\n",
+                    failure.message
+                ));
+            }
+            continue;
+        };
+        sections.push_str(&format!(
+            "{heading}\n\n{}> 来源{}\n\n",
+            format_provenance(record),
+            source_status_label(record.validation.record_source_status),
+        ));
+        for block in &record.blocks {
+            if let Some(title) = block.title.as_deref() {
+                sections.push_str(&format!("### {}\n\n", title.trim()));
+            }
+            if block.source_status == SourceStatusV1::Limited {
+                sections.push_str("> 来源受限\n\n");
+            }
+            sections.push_str(block.text.trim());
+            sections.push_str("\n\n");
+            if block.source_status == SourceStatusV1::Mapped {
+                let source = render_block_sources(job, snapshot, block);
+                if !source.is_empty() {
+                    sections.push_str(&format!("来源：{}\n\n", source));
+                }
+            }
+        }
+    }
+    sections
+}
+
+fn format_provenance(record: &crate::content_results::DerivationRecordV1) -> String {
+    let provenance = &record.provenance;
+    let mut line = format!(
+        "> 类型：{}；路径：{}；revision {}；生成时间：{}；recipe {} v{}；rules {} v{}。\n",
+        artifact_kind_label(record.kind),
+        effective_path_label(provenance.effective_path),
+        record.revision,
+        record.created_at.to_rfc3339(),
+        provenance.recipe_id,
+        provenance.recipe_version,
+        provenance.rules_id,
+        provenance.rules_version,
+    );
+    if let (Some(prompt_id), Some(prompt_version)) =
+        (provenance.prompt_id.as_deref(), provenance.prompt_version)
+    {
+        line.push_str(&format!("> prompt {prompt_id} v{prompt_version}。\n"));
+    }
+    if let Some(provider) = provenance.provider {
+        line.push_str(&format!(
+            "> AI：{} / {}；endpoint：`{}`；模型：`{}`；参数：{}。\n",
+            provider_label(provider),
+            api_format_label(provenance.api_format),
+            provenance.endpoint.as_deref().unwrap_or("未提供"),
+            provenance.model.as_deref().unwrap_or("未提供"),
+            parameters_label(provenance.parameters.as_ref()),
+        ));
+    }
+    if let Some(reason) = provenance.fallback_reason.as_ref() {
+        line.push_str(&format!(
+            "> 回退原因：{}（{}）。\n",
+            fallback_reason_code_label(reason.code),
+            reason.message
+        ));
+    }
+    line
+}
+
+fn fallback_reason_code_label(code: crate::content_results::FallbackReasonCodeV1) -> &'static str {
+    match code {
+        crate::content_results::FallbackReasonCodeV1::TargetUnavailable => {
+            "target_unavailable / AI 配置不可用"
+        }
+        crate::content_results::FallbackReasonCodeV1::GenerationFailed => {
+            "generation_failed / AI 生成失败"
+        }
+        crate::content_results::FallbackReasonCodeV1::ResponseInvalid => {
+            "response_invalid / AI 响应未通过校验"
+        }
+    }
+}
+
+fn render_block_sources(job: &Job, snapshot: &ContentSnapshotV1, block: &ContentBlockV1) -> String {
+    let by_id = snapshot
+        .evidence
+        .utterances
+        .iter()
+        .map(|utterance| (utterance.id.as_str(), utterance))
+        .collect::<std::collections::HashMap<_, _>>();
+    block
+        .source_refs
+        .iter()
+        .filter_map(|source_ref| {
+            let first = source_ref
+                .utterance_ids
+                .first()
+                .and_then(|id| by_id.get(id.as_str()).copied())?;
+            let last = source_ref
+                .utterance_ids
+                .last()
+                .and_then(|id| by_id.get(id.as_str()).copied())?;
+            let span =
+                crate::bilibili::source_span(std::iter::once((first.start_ms, last.end_ms)))?;
+            Some(format!(
+                "[{}]({})–[{}]({})",
+                fmt_ts(span.start_ms),
+                crate::bilibili::video_url(&job.bvid, job.page, Some(span.start_ms)),
+                fmt_ts(span.end_ms),
+                crate::bilibili::video_url(&job.bvid, job.page, Some(span.end_ms)),
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn artifact_kind_label(kind: ArtifactKindV1) -> &'static str {
+    match kind {
+        ArtifactKindV1::FaithfulText => "忠实正文",
+        ArtifactKindV1::DefaultSummary => "默认摘要",
+        ArtifactKindV1::Highlights => "重点",
+        ArtifactKindV1::Chapters => "章节",
+    }
+}
+
+fn provider_label(provider: crate::content_results::GenerationProviderV1) -> &'static str {
+    match provider {
+        crate::content_results::GenerationProviderV1::OpenAiCompatible => "OpenAI-compatible",
+        crate::content_results::GenerationProviderV1::AnthropicCompatible => "Anthropic-compatible",
+    }
+}
+
+fn api_format_label(
+    api_format: Option<crate::content_results::GenerationApiFormatV1>,
+) -> &'static str {
+    match api_format {
+        Some(crate::content_results::GenerationApiFormatV1::OpenAiChatCompletions) => {
+            "chat-completions"
+        }
+        Some(crate::content_results::GenerationApiFormatV1::AnthropicMessages) => "messages",
+        None => "未使用",
+    }
+}
+
+fn parameters_label(parameters: Option<&crate::content_results::GenerationParametersV1>) -> String {
+    match parameters {
+        Some(crate::content_results::GenerationParametersV1::OpenAiChatCompletions {
+            temperature,
+        }) => format!("temperature={temperature}"),
+        Some(crate::content_results::GenerationParametersV1::AnthropicMessages { max_tokens }) => {
+            format!("max_tokens={max_tokens}")
+        }
+        None => "none".into(),
+    }
+}
+
+fn effective_path_label(path: EffectivePathV1) -> &'static str {
+    match path {
+        EffectivePathV1::Rules => "规则生成",
+        EffectivePathV1::Llm => "AI 生成",
+        EffectivePathV1::RulesFallback => "规则回退",
+    }
+}
+
+fn source_status_label(status: SourceStatusV1) -> &'static str {
+    match status {
+        SourceStatusV1::Mapped => "可映射",
+        SourceStatusV1::Limited => "受限",
+    }
 }
 
 /// Generate `full.md`. Embeds the job id for recovery verification.
@@ -546,5 +853,207 @@ mod tests {
     #[test]
     fn _stage_state_import_kept() {
         let _ = StageState::Pending;
+    }
+
+    #[test]
+    fn snapshot_renderer_exports_source_and_provenance_without_reading_raw() {
+        use crate::content_results::{
+            ArtifactSlotV1, ContentBlockRoleV1, ContentCurrentV1, ContentSetupV1, ContentSlotsV1,
+            DerivationProvenanceV1, DerivationRecordV1, EffectivePathV1, EvidenceDescriptorV1,
+            SourceContextSnapshotV1, SourceRefV1, SourceStatusV1, ValidatedEvidenceViewV1,
+            ValidationCheckV1, ValidationReportV1,
+        };
+
+        let root = std::env::temp_dir().join(format!("bimyscribe-renderer-{}", Uuid::new_v4()));
+        let work = root.join("work");
+        let output = root.join("output");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut job = sample_job();
+        job.title = "快照渲染测试".into();
+        job.cid = Some(7);
+        job.duration_ms = Some(1000);
+        job.work_dir = Some(work.clone());
+        job.final_output_dir = Some(output.clone());
+        job.content_setup = Some(ContentSetupV1::disabled());
+        let utterances = sample_utts();
+        let mut descriptor = EvidenceDescriptorV1 {
+            identity: "a".repeat(64),
+            job_id: job.id,
+            platform: "bilibili".into(),
+            bvid: job.bvid.clone(),
+            page: job.page,
+            cid: 7,
+            duration_ms: 3000,
+            raw_sha256: "b".repeat(64),
+            utterance_count: utterances.len(),
+        };
+        descriptor.identity = descriptor.recompute_identity().unwrap();
+        let context = SourceContextSnapshotV1 {
+            main_title: job.title.clone(),
+            part_title: Some("分P测试".into()),
+            terms: Vec::new(),
+        };
+        let record = DerivationRecordV1 {
+            schema_version: 1,
+            revision: 1,
+            kind: ArtifactKindV1::FaithfulText,
+            evidence_identity: descriptor.identity.clone(),
+            source_context: context.clone(),
+            provenance: DerivationProvenanceV1 {
+                recipe_id: "faithful-text".into(),
+                recipe_version: 1,
+                prompt_id: None,
+                prompt_version: None,
+                rules_id: "faithful-text".into(),
+                rules_version: 1,
+                provider: None,
+                api_format: None,
+                endpoint: None,
+                model: None,
+                parameters: None,
+                effective_path: EffectivePathV1::Rules,
+                fallback_reason: None,
+            },
+            blocks: vec![ContentBlockV1 {
+                id: "block-1".into(),
+                role: ContentBlockRoleV1::Paragraph,
+                title: None,
+                text: "你好世界".into(),
+                source_refs: vec![SourceRefV1 {
+                    utterance_ids: vec!["u001".into()],
+                    start_ms: 0,
+                    end_ms: 1500,
+                }],
+                source_status: SourceStatusV1::Mapped,
+            }],
+            validation: ValidationReportV1 {
+                processed_utterance_count: utterances.len(),
+                total_utterance_count: utterances.len(),
+                processing_coverage_complete: true,
+                processing_chunks: Vec::new(),
+                record_source_status: SourceStatusV1::Mapped,
+                checks: vec![ValidationCheckV1 {
+                    name: "renderer-test".into(),
+                    passed: true,
+                    message: None,
+                }],
+            },
+            created_at: chrono::Utc::now(),
+        };
+        let slots = ContentSlotsV1 {
+            faithful_text: ArtifactSlotV1 {
+                current: Some(record),
+                last_failure: None,
+            },
+            ..ContentSlotsV1::default()
+        };
+        let snapshot = ContentSnapshotV1 {
+            current: ContentCurrentV1 {
+                schema_version: 1,
+                job_id: job.id,
+                evidence: descriptor.clone(),
+                source_context: context,
+                setup: ContentSetupV1::disabled(),
+                slots,
+            },
+            evidence: ValidatedEvidenceViewV1 {
+                descriptor,
+                utterances,
+            },
+        };
+
+        rebuild_presentation(&job, &snapshot).unwrap();
+        let full = std::fs::read_to_string(output.join("full.md")).unwrap();
+        assert!(full.contains("## 内容来源说明"));
+        assert!(full.contains("## 忠实整理"));
+        assert!(full.contains("recipe faithful-text v1"));
+        assert!(full.contains("Evidence identity"));
+        assert!(full.contains("## 全文"));
+        assert!(!work.join("full.md").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provenance_renderer_includes_frozen_prompt_and_target() {
+        use crate::content_results::{
+            ContentBlockRoleV1, DerivationProvenanceV1, DerivationRecordV1, EffectivePathV1,
+            FallbackReasonCodeV1, FallbackReasonV1, GenerationApiFormatV1, GenerationParametersV1,
+            GenerationProviderV1, SourceContextSnapshotV1, SourceStatusV1, ValidationReportV1,
+        };
+
+        let record = DerivationRecordV1 {
+            schema_version: 1,
+            revision: 2,
+            kind: ArtifactKindV1::DefaultSummary,
+            evidence_identity: "a".repeat(64),
+            source_context: SourceContextSnapshotV1 {
+                main_title: "测试".into(),
+                part_title: None,
+                terms: Vec::new(),
+            },
+            provenance: DerivationProvenanceV1 {
+                recipe_id: "default-summary".into(),
+                recipe_version: 1,
+                prompt_id: Some("default-summary".into()),
+                prompt_version: Some(1),
+                rules_id: "default-summary".into(),
+                rules_version: 1,
+                provider: Some(GenerationProviderV1::OpenAiCompatible),
+                api_format: Some(GenerationApiFormatV1::OpenAiChatCompletions),
+                endpoint: Some("http://localhost:8000".into()),
+                model: Some("local-model".into()),
+                parameters: Some(GenerationParametersV1::openai_default()),
+                effective_path: EffectivePathV1::Llm,
+                fallback_reason: None,
+            },
+            blocks: vec![crate::content_results::ContentBlockV1 {
+                id: "summary-1".into(),
+                role: ContentBlockRoleV1::Summary,
+                title: None,
+                text: "摘要".into(),
+                source_refs: Vec::new(),
+                source_status: SourceStatusV1::Limited,
+            }],
+            validation: ValidationReportV1 {
+                processed_utterance_count: 1,
+                total_utterance_count: 1,
+                processing_coverage_complete: true,
+                processing_chunks: Vec::new(),
+                record_source_status: SourceStatusV1::Limited,
+                checks: Vec::new(),
+            },
+            created_at: chrono::Utc::now(),
+        };
+
+        let rendered = format_provenance(&record);
+        assert!(rendered.contains("prompt default-summary v1"));
+        assert!(rendered.contains("OpenAI-compatible / chat-completions"));
+        assert!(rendered.contains("http://localhost:8000"));
+        assert!(rendered.contains("local-model"));
+        assert!(rendered.contains("temperature=0.2"));
+
+        let mut fallback = record;
+        fallback.kind = ArtifactKindV1::FaithfulText;
+        fallback.provenance = DerivationProvenanceV1 {
+            recipe_id: "faithful-text".into(),
+            recipe_version: 1,
+            prompt_id: None,
+            prompt_version: None,
+            rules_id: "faithful-text".into(),
+            rules_version: 1,
+            provider: None,
+            api_format: None,
+            endpoint: None,
+            model: None,
+            parameters: None,
+            effective_path: EffectivePathV1::RulesFallback,
+            fallback_reason: Some(FallbackReasonV1 {
+                code: FallbackReasonCodeV1::TargetUnavailable,
+                message: "本地 AI 配置不可用".into(),
+            }),
+        };
+        let rendered = format_provenance(&fallback);
+        assert!(rendered.contains("target_unavailable / AI 配置不可用"));
+        assert!(rendered.contains("本地 AI 配置不可用"));
     }
 }

@@ -134,29 +134,26 @@ impl Scheduler {
     /// Find and run the next runnable job. Returns `Idle` if none, or
     /// `Waiting` if the only candidate needs external action.
     pub fn drain_next(&self, cfg: &Config, app: &Weak<App>) -> DrainOutcome {
-        // Find the next job to run.
-        let job_id = {
-            let q = self.queue.lock().unwrap();
-            q.jobs.iter().find(|j| is_runnable(j)).map(|j| j.id)
-        };
-        let Some(job_id) = job_id else {
-            return DrainOutcome::Idle;
-        };
-
-        // Register a cancellation token for this job.
-        let token = self.cancel_registry.register(job_id);
-
-        // Mark running and persist.
-        {
+        // Select, register and mark Running under one queue lock. A concurrent
+        // UI cancellation therefore linearizes either before this block
+        // (immediate Cancelled, never selected) or after token registration
+        // (cooperative cancellation); it cannot be overwritten in between.
+        let (job_id, token) = {
             let mut q = self.queue.lock().unwrap();
-            if let Some(job) = q.get_mut(job_id) {
-                job.status = JobStatus::Running;
-                job.stage = next_run_stage(job);
-                job.started_at = job.started_at.or_else(|| Some(chrono::Utc::now()));
-                self.runner.persist_job(job);
-            }
+            let Some(job_id) = q.jobs.iter().find(|j| is_runnable(j)).map(|j| j.id) else {
+                return DrainOutcome::Idle;
+            };
+            let token = self.cancel_registry.register(job_id);
+            let job = q
+                .get_mut(job_id)
+                .expect("selected Job remains in locked queue");
+            job.status = JobStatus::Running;
+            job.stage = next_run_stage(job);
+            job.started_at = job.started_at.or_else(|| Some(chrono::Utc::now()));
+            self.runner.persist_job(job);
             self.runner.persist_queue(&q);
-        }
+            (job_id, token)
+        };
 
         // Run the pipeline on a clone; write back on completion.
         let job = {
@@ -181,14 +178,18 @@ impl Scheduler {
                 stored.error = job.error.clone();
                 stored.cid = job.cid;
                 stored.up_name = job.up_name.clone();
+                stored.part_title = job.part_title.clone();
                 stored.duration_ms = job.duration_ms;
                 stored.title = job.title.clone();
                 stored.bvid = job.bvid.clone();
+                stored.page = job.page;
                 stored.stages = job.stages.clone();
                 stored.work_dir = job.work_dir.clone();
                 stored.final_output_dir = job.final_output_dir.clone();
                 stored.warning = job.warning.clone();
                 stored.transcription_result = job.transcription_result.clone();
+                stored.source_url = job.source_url.clone();
+                stored.content_setup = job.content_setup.clone();
                 // Guard: a cancelled job must not be overwritten by Completed/Failed.
                 if stored.status == JobStatus::Cancelled || stored.status == JobStatus::Cancelling {
                     stored.status = JobStatus::Cancelled;
@@ -532,6 +533,30 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_queued_job_never_registers_token_or_runs() {
+        let mut job = queued_job();
+        let id = job.id;
+        assert_eq!(
+            job.request_cancellation(chrono::Utc::now()),
+            crate::jobs::CancellationTransition::Immediate
+        );
+        let queue = Arc::new(Mutex::new(Queue { jobs: vec![job] }));
+        let runner = ScriptedRunner::new(vec![]);
+        let scheduler = Scheduler::with_runner(queue.clone(), runner.clone());
+
+        assert_eq!(
+            scheduler.drain_next(&Config::default(), &Weak::<App>::default()),
+            DrainOutcome::Idle
+        );
+        assert!(scheduler.cancel_registry.get(id).is_none());
+        assert!(runner.calls().is_empty());
+        assert_eq!(
+            queue.lock().unwrap().get(id).unwrap().status,
+            JobStatus::Cancelled
+        );
+    }
+
+    #[test]
     fn cancelled_job_not_overwritten_by_completed() {
         // Simulate a job that was cancelled but the pipeline returned Ok.
         let id = Uuid::new_v4();
@@ -554,5 +579,46 @@ mod tests {
         // The job stays Cancelled.
         let q = queue.lock().unwrap();
         assert_eq!(q.get(id).unwrap().status, JobStatus::Cancelled);
+    }
+
+    #[test]
+    fn clone_writeback_preserves_page_part_and_content_setup() {
+        struct ContextRunner;
+
+        impl JobRunner for ContextRunner {
+            fn run_job(
+                &self,
+                job: &mut Job,
+                _cfg: &Config,
+                _app: &Weak<App>,
+                _token: &CancellationToken,
+            ) -> JobResult {
+                job.page = 3;
+                job.part_title = Some("第三集".into());
+                job.content_setup = Some(crate::content_results::ContentSetupV1::disabled());
+                fake_complete(job);
+                JobResult::Completed
+            }
+        }
+
+        let job = queued_job();
+        let id = job.id;
+        let queue = Arc::new(Mutex::new(Queue { jobs: vec![job] }));
+        let scheduler = Scheduler::with_runner(queue.clone(), ContextRunner);
+        assert!(matches!(
+            scheduler.drain_next(&Config::default(), &Weak::<App>::default()),
+            DrainOutcome::Ran {
+                result: JobResult::Completed,
+                ..
+            }
+        ));
+        let q = queue.lock().unwrap();
+        let stored = q.get(id).unwrap();
+        assert_eq!(stored.page, 3);
+        assert_eq!(stored.part_title.as_deref(), Some("第三集"));
+        assert_eq!(
+            stored.content_setup,
+            Some(crate::content_results::ContentSetupV1::disabled())
+        );
     }
 }

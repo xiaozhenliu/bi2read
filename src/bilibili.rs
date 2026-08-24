@@ -18,6 +18,55 @@ pub struct ParsedVideo {
     pub page: Option<u32>,
 }
 
+/// A validated source span used by both the Markdown renderer and the result
+/// projection.  The source unit owns the timestamp semantics; consumers only
+/// decide how to format the two endpoints for their surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceSpan {
+    pub(crate) start_ms: u64,
+    pub(crate) end_ms: u64,
+}
+
+/// Collapse a sequence of source ranges into one inclusive display span.
+/// Empty input and reversed ranges are rejected rather than repaired so a
+/// caller cannot manufacture a seek link from malformed source data.
+pub(crate) fn source_span<I>(ranges: I) -> Option<SourceSpan>
+where
+    I: IntoIterator<Item = (u64, u64)>,
+{
+    let mut span: Option<SourceSpan> = None;
+    for (start_ms, end_ms) in ranges {
+        if end_ms < start_ms {
+            return None;
+        }
+        span = Some(match span {
+            Some(previous) => SourceSpan {
+                start_ms: previous.start_ms.min(start_ms),
+                end_ms: previous.end_ms.max(end_ms),
+            },
+            None => SourceSpan { start_ms, end_ms },
+        });
+    }
+    span
+}
+
+/// Build the canonical Bilibili URL used by source and document links.
+///
+/// A plain video link omits `p=1`; a timestamp link always carries the page
+/// and second-level seek position because that is the stable form accepted by
+/// the source affordances.
+pub(crate) fn video_url(video_id: &str, page: u32, start_ms: Option<u64>) -> String {
+    let page = page.max(1);
+    let mut url = format!("https://www.bilibili.com/video/{video_id}");
+    if start_ms.is_some() || page > 1 {
+        url.push_str(&format!("?p={page}"));
+    }
+    if let Some(start_ms) = start_ms {
+        url.push_str(&format!("&t={}", start_ms / 1000));
+    }
+    url
+}
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("empty input")]
@@ -197,10 +246,16 @@ fn fetch_metadata_with(
         .get((page as usize).saturating_sub(1))
         .map(|p| p.cid)
         .unwrap_or(data.cid);
+    let part_title = data
+        .pages
+        .get((page as usize).saturating_sub(1))
+        .map(|p| p.part.trim().to_string())
+        .filter(|part| !part.is_empty());
     Ok(Metadata {
         bvid: data.bvid,
         cid,
         title: data.title,
+        part_title,
         up_name: data.owner.name,
         duration_ms: (data.duration as u64) * 1000,
     })
@@ -375,6 +430,8 @@ pub struct Metadata {
     pub bvid: String,
     pub cid: u64,
     pub title: String,
+    /// The selected page's `part` label, kept separate from the main title.
+    pub part_title: Option<String>,
     pub up_name: String,
     pub duration_ms: u64,
 }
@@ -509,6 +566,27 @@ mod tests {
     }
 
     #[test]
+    fn source_links_and_spans_share_one_canonical_helper() {
+        assert_eq!(
+            video_url("BV1test", 1, None),
+            "https://www.bilibili.com/video/BV1test"
+        );
+        assert_eq!(
+            video_url("BV1test", 2, Some(3_999)),
+            "https://www.bilibili.com/video/BV1test?p=2&t=3"
+        );
+        assert_eq!(
+            source_span([(3_000, 4_000), (1_000, 2_000)]),
+            Some(SourceSpan {
+                start_ms: 1_000,
+                end_ms: 4_000,
+            })
+        );
+        assert_eq!(source_span([]), None);
+        assert_eq!(source_span([(2_000, 1_000)]), None);
+    }
+
+    #[test]
     fn rejects_garbage() {
         assert!(matches!(
             parse_url("hello world"),
@@ -537,6 +615,7 @@ mod tests {
         assert_eq!(data.owner.name, "索尼音乐中国");
         assert_eq!(data.videos, 1);
         assert_eq!(data.pages[0].cid, 137649199);
+        assert_eq!(data.pages[0].part, "song");
     }
 
     #[test]
@@ -546,7 +625,7 @@ mod tests {
             "code": 0, "data": {
                 "bvid": "BV1test", "cid": 100, "title": "t", "duration": 60, "videos": 2,
                 "owner": {"name": "up"},
-                "pages": [{"cid":100,"page":1},{"cid":200,"page":2}]
+                "pages": [{"cid":100,"page":1,"part":"intro"},{"cid":200,"page":2,"part":"song"}]
             }
         }"#;
         let v: ApiResponse<ViewData> = serde_json::from_str(json).unwrap();
@@ -555,6 +634,7 @@ mod tests {
         assert_eq!(data.pages.first().map(|p| p.cid), Some(100));
         // page 2 -> pages[1].cid (200)
         assert_eq!(data.pages.get(1).map(|p| p.cid), Some(200));
+        assert_eq!(data.pages.get(1).map(|p| p.part.as_str()), Some("song"));
     }
 
     #[test]

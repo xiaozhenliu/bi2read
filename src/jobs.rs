@@ -15,6 +15,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::content_results::ContentSetupV1;
+
 /// The source language requested from a transcription Runtime.
 ///
 /// This is deliberately a closed set.  The wire representation is shared by
@@ -251,22 +253,26 @@ impl TranscriptionResult {
 }
 
 /// Inputs accepted by the shared GUI/CLI Job-construction interface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobCreationInput {
-    pub id: Uuid,
-    pub bvid: String,
-    pub page: u32,
-    pub selection: TranscriptionSelection,
-    pub retention: RetentionPolicy,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JobCreationInput {
+    pub(crate) id: Uuid,
+    pub(crate) bvid: String,
+    pub(crate) page: u32,
+    pub(crate) selection: TranscriptionSelection,
+    pub(crate) retention: RetentionPolicy,
+    /// Frozen v0.5 content plan. Every production creation path must provide
+    /// the resolved Disabled/Ready/Unavailable value explicitly.
+    pub(crate) content_setup: ContentSetupV1,
 }
 
 impl JobCreationInput {
-    pub fn new(
+    pub(crate) fn new(
         id: Uuid,
         bvid: String,
         page: u32,
         selection: TranscriptionSelection,
         retention: RetentionPolicy,
+        content_setup: ContentSetupV1,
     ) -> Self {
         Self {
             id,
@@ -274,6 +280,7 @@ impl JobCreationInput {
             page,
             selection,
             retention,
+            content_setup,
         }
     }
 }
@@ -455,6 +462,32 @@ impl JobStatus {
             JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
         )
     }
+
+    /// Whether the persisted state machine accepts an explicit cancellation
+    /// request from the user.
+    pub const fn can_request_cancel(self) -> bool {
+        matches!(
+            self,
+            JobStatus::Queued
+                | JobStatus::Running
+                | JobStatus::Paused
+                | JobStatus::NeedsUserAction
+                | JobStatus::WaitingForDrive
+        )
+    }
+}
+
+/// Deterministic result of applying a cancellation request to a persisted Job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationTransition {
+    /// A running pipeline owns resources and must observe its cancellation token.
+    Cooperative,
+    /// No pipeline resources are owned, so the Job reached `Cancelled` directly.
+    Immediate,
+    /// The Job was already converging toward cancellation.
+    AlreadyCancelling,
+    /// Terminal states do not accept cancellation.
+    Unavailable,
 }
 
 /// Per-stage completion state, persisted in `state.json`.
@@ -550,6 +583,7 @@ impl JobWarning {
 pub struct JobCapabilities {
     pub can_cancel: bool,
     pub can_retry: bool,
+    pub can_rebuild: bool,
     pub can_open_document: bool,
     pub can_reveal: bool,
     pub can_edit_speakers: bool,
@@ -563,16 +597,43 @@ impl JobCapabilities {
         let has_transcript = job
             .work_dir
             .as_ref()
-            .map(|d| d.join("transcript.raw.json").exists())
+            .map(|d| transcript_valid(&d.join("transcript.raw.json")))
             .unwrap_or(false);
+        let v05_view = if job.content_setup.is_some() && is_terminal {
+            crate::content_results::current(job).ok()
+        } else {
+            None
+        };
+        let v05_raw_only = matches!(
+            &v05_view,
+            Some(crate::content_results::ContentViewV1::RawOnly { .. })
+        );
+        let v05_current = matches!(
+            &v05_view,
+            Some(crate::content_results::ContentViewV1::Current(_))
+        );
         Self {
-            can_cancel: !is_terminal,
+            can_cancel: job.status.can_request_cancel(),
+            can_rebuild: job.status == JobStatus::NeedsUserAction
+                && job.requires_transcription_rebuild(),
             can_retry: (job.status == JobStatus::Failed
                 || job.status == JobStatus::NeedsUserAction)
-                && job.transcription_selection.is_some(),
-            can_open_document: is_done,
+                && job.transcription_selection.is_some()
+                && !v05_raw_only,
+            // v0.5 result views are terminal-only and can intentionally open
+            // Failed/Cancelled jobs as RawOnly when their Evidence survives.
+            // Legacy jobs retain the historical Completed-only affordance.
+            can_open_document: if job.content_setup.is_some() {
+                is_terminal && (v05_current || v05_raw_only)
+            } else {
+                is_done
+            },
             can_reveal: job.work_dir.is_some(),
-            can_edit_speakers: has_transcript,
+            can_edit_speakers: if job.content_setup.is_some() {
+                is_terminal && v05_current
+            } else {
+                has_transcript
+            },
             can_delete: is_terminal,
         }
     }
@@ -716,6 +777,10 @@ pub struct Job {
     pub cid: Option<u64>,
     /// UP主 name, filled at metadata time.
     pub up_name: Option<String>,
+    /// Selected Bilibili page (分P) title, filled at metadata time. It remains
+    /// separate from the main video title for v0.5 source context.
+    #[serde(default)]
+    pub part_title: Option<String>,
     /// Duration in ms, filled at metadata time.
     pub duration_ms: Option<u64>,
     /// Per-stage completion state. Absent entry == Pending.
@@ -753,6 +818,10 @@ pub struct Job {
     /// Runtime-reported processing identity, if the Runtime supplied one.
     #[serde(default)]
     pub transcription_result: Option<TranscriptionResult>,
+    /// Explicit v0.5 marker and frozen initial content setup. `None` is
+    /// permanently reserved for legacy jobs; it is never inferred from files.
+    #[serde(default)]
+    pub(crate) content_setup: Option<ContentSetupV1>,
 }
 
 impl Job {
@@ -770,6 +839,7 @@ impl Job {
             work_dir: None,
             cid: None,
             up_name: None,
+            part_title: None,
             duration_ms: None,
             stages: BTreeMap::new(),
             speaker_map: BTreeMap::new(),
@@ -782,6 +852,7 @@ impl Job {
             final_output_dir: None,
             transcription_selection: None,
             transcription_result: None,
+            content_setup: None,
         }
     }
 
@@ -789,26 +860,37 @@ impl Job {
     ///
     /// `selection` is copied into the Job before it can enter the queue and is
     /// never re-derived from Config during recovery or retry.
-    pub fn from_creation(input: JobCreationInput) -> Self {
+    pub(crate) fn from_creation(input: JobCreationInput) -> Self {
         let mut job = Self::new(input.id, input.bvid, input.page);
         job.transcription_selection = Some(input.selection);
         job.retention = input.retention;
+        job.content_setup = Some(input.content_setup);
         for stage in pipeline_stages() {
             job.set_stage_state(stage, StageState::Pending);
         }
         job
     }
 
-    /// Convenience form of [`Job::from_creation`] for callers that already
-    /// have the four core identity fields.
-    pub fn new_with_selection(
+    /// Construct a v0.5 Job for headless package/smoke drivers that already
+    /// hold a verified transcription selection. The production App/CLI use
+    /// the richer crate-internal creation seam so their Config-derived
+    /// Disabled/Ready/Unavailable content setup is frozen explicitly.
+    #[doc(hidden)]
+    pub fn new_v05_disabled_with_selection(
         id: Uuid,
         bvid: String,
         page: u32,
         selection: TranscriptionSelection,
         retention: RetentionPolicy,
     ) -> Self {
-        Self::from_creation(JobCreationInput::new(id, bvid, page, selection, retention))
+        Self::from_creation(JobCreationInput::new(
+            id,
+            bvid,
+            page,
+            selection,
+            retention,
+            ContentSetupV1::disabled(),
+        ))
     }
 
     pub fn transcription_selection_status(&self) -> TranscriptionSelectionStatus {
@@ -827,6 +909,39 @@ impl Job {
 
     pub fn requires_transcription_rebuild(&self) -> bool {
         self.transcription_selection.is_none()
+    }
+
+    /// Apply the single persisted cancellation state contract.
+    ///
+    /// Running work remains cooperative so its pipeline/runtime resources can
+    /// shut down through the registered token. States that do not own runtime
+    /// resources converge immediately and idempotently to a deletable terminal
+    /// state. Callers persist the mutated Job and queue before reporting success.
+    pub fn request_cancellation(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> CancellationTransition {
+        match self.status {
+            JobStatus::Running => {
+                self.status = JobStatus::Cancelling;
+                CancellationTransition::Cooperative
+            }
+            JobStatus::Queued
+            | JobStatus::Paused
+            | JobStatus::NeedsUserAction
+            | JobStatus::WaitingForDrive => {
+                self.status = JobStatus::Cancelled;
+                self.stage = Stage::Cancelled;
+                self.stage_progress = 0;
+                self.error = None;
+                self.finished_at = Some(now);
+                CancellationTransition::Immediate
+            }
+            JobStatus::Cancelling => CancellationTransition::AlreadyCancelling,
+            JobStatus::Failed | JobStatus::Cancelled | JobStatus::Completed => {
+                CancellationTransition::Unavailable
+            }
+        }
     }
 
     /// Overall progress across all pipeline stages (0..100).
@@ -1084,9 +1199,13 @@ pub fn recover(queue: &mut Queue) -> Vec<RecoveryReport> {
         // already an immutable historical result; if it needs processing
         // again, the user must explicitly rebuild it with a new selection.
         if job.requires_transcription_rebuild() {
-            if job.status == JobStatus::Completed {
-                job.stage = Stage::Completed;
-                job.stage_progress = 100;
+            if job.status.is_terminal() {
+                if job.status == JobStatus::Completed {
+                    job.stage = Stage::Completed;
+                    job.stage_progress = 100;
+                } else if job.status == JobStatus::Cancelled {
+                    job.stage = Stage::Cancelled;
+                }
                 reports.push(report);
                 continue;
             }
@@ -1098,6 +1217,26 @@ pub fn recover(queue: &mut Queue) -> Vec<RecoveryReport> {
             job.error = Some(format!(
                 "{LEGACY_UNRECORDED}: task must be rebuilt with explicit transcription settings"
             ));
+            reports.push(report);
+            continue;
+        }
+
+        // v0.5 terminal jobs are facts, not scheduler work items. A missing or
+        // corrupt current is surfaced as RawOnly by ContentResults; recovery
+        // must not silently requeue the whole media/ASR pipeline. Presentation
+        // files are rebuilt lazily by open/export or an explicit repair.
+        if job.content_setup.is_some() && job.status.is_terminal() {
+            if job.status == JobStatus::Completed {
+                job.stage = Stage::Completed;
+                job.stage_progress = 100;
+                for stage in pipeline_stages() {
+                    if stage == Stage::Screenshots {
+                        job.set_stage_state(stage, StageState::Skipped);
+                    } else {
+                        job.set_stage_state(stage, StageState::Completed);
+                    }
+                }
+            }
             reports.push(report);
             continue;
         }
@@ -1168,18 +1307,31 @@ pub fn artifact_expected_removed(job: &Job, stage: Stage) -> bool {
         RetentionPolicy::Recommended => {
             matches!(stage, Stage::DownloadAudio | Stage::NormalizeAudio)
         }
-        RetentionPolicy::DocumentsOnly => matches!(
-            stage,
-            Stage::Metadata
-                | Stage::DownloadAudio
-                | Stage::NormalizeAudio
-                | Stage::Transcribe
-                | Stage::ReadableDocument
-        ),
+        RetentionPolicy::DocumentsOnly => {
+            if job.content_setup.is_some() {
+                matches!(stage, Stage::DownloadAudio | Stage::NormalizeAudio)
+            } else {
+                matches!(
+                    stage,
+                    Stage::Metadata
+                        | Stage::DownloadAudio
+                        | Stage::NormalizeAudio
+                        | Stage::Transcribe
+                        | Stage::ReadableDocument
+                )
+            }
+        }
     }
 }
 
 fn final_document_valid(job: &Job) -> bool {
+    if job.content_setup.is_some() {
+        return job
+            .final_output_dir
+            .as_ref()
+            .map(|dir| md_has_job_id(&dir.join("full.md"), job))
+            .unwrap_or(false);
+    }
     let output = job.final_output_dir.as_ref().map(|dir| dir.join("full.md"));
     let work = job.work_dir.as_ref().map(|dir| dir.join("full.md"));
     output
@@ -1326,14 +1478,29 @@ pub fn artifact_valid(stage: Stage, dir: &Path, job: &Job) -> bool {
         }
         Stage::Transcribe => transcript_valid(&dir.join("transcript.raw.json")),
         Stage::RawDocument => md_has_job_id(&dir.join("transcript.raw.md"), job),
-        Stage::ReadableDocument => std::fs::read_to_string(dir.join("transcript.readable.md"))
-            .map(|body| !body.trim().is_empty())
-            .unwrap_or(false),
+        Stage::ReadableDocument => {
+            if job.content_setup.is_some() {
+                matches!(
+                    crate::content_results::current(job),
+                    Ok(crate::content_results::ContentViewV1::Current(_))
+                )
+            } else {
+                std::fs::read_to_string(dir.join("transcript.readable.md"))
+                    .map(|body| !body.trim().is_empty())
+                    .unwrap_or(false)
+            }
+        }
         Stage::Screenshots => {
             // Skipped stages are always "valid" (nothing to check).
             true
         }
-        Stage::FinalDocument => md_has_job_id(&dir.join("full.md"), job),
+        Stage::FinalDocument => {
+            if job.content_setup.is_some() {
+                final_document_valid(job)
+            } else {
+                md_has_job_id(&dir.join("full.md"), job)
+            }
+        }
         Stage::Cleanup | Stage::Completed => true,
         _ => true,
     }
@@ -1438,15 +1605,22 @@ mod tests {
     #[test]
     fn canonical_job_creation_freezes_selection_and_initializes_stages() {
         let selection = sample_selection(CreatedFrom::App);
+        let setup = ContentSetupV1::unavailable(crate::content_results::TargetUnavailableV1 {
+            code: crate::content_results::TargetUnavailableCodeV1::ConnectionMissing,
+            message: "本地 AI 未运行".into(),
+            invalid_field: None,
+        });
         let job = Job::from_creation(JobCreationInput::new(
             Uuid::new_v4(),
             "BV1frozen".into(),
             2,
             selection.clone(),
             RetentionPolicy::KeepAll,
+            setup.clone(),
         ));
         assert_eq!(job.transcription_selection.as_ref(), Some(&selection));
         assert_eq!(job.retention, RetentionPolicy::KeepAll);
+        assert_eq!(job.content_setup, Some(setup));
         assert_eq!(job.transcription_selection_marker(), "recorded");
         for stage in pipeline_stages() {
             assert_eq!(job.stage_state(stage), StageState::Pending);
@@ -1461,6 +1635,7 @@ mod tests {
             2,
             sample_selection(CreatedFrom::App),
             RetentionPolicy::KeepAll,
+            ContentSetupV1::disabled(),
         ));
         let cli_job = Job::from_creation(JobCreationInput::new(
             Uuid::new_v4(),
@@ -1468,6 +1643,7 @@ mod tests {
             2,
             sample_selection(CreatedFrom::Cli),
             RetentionPolicy::KeepAll,
+            ContentSetupV1::disabled(),
         ));
 
         assert_eq!(app_job.bvid, cli_job.bvid);
@@ -1528,6 +1704,126 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_capability_and_transition_share_one_status_matrix() {
+        let now = chrono::Utc::now();
+        for (status, can_cancel, transition, final_status) in [
+            (
+                JobStatus::Queued,
+                true,
+                CancellationTransition::Immediate,
+                JobStatus::Cancelled,
+            ),
+            (
+                JobStatus::Running,
+                true,
+                CancellationTransition::Cooperative,
+                JobStatus::Cancelling,
+            ),
+            (
+                JobStatus::Paused,
+                true,
+                CancellationTransition::Immediate,
+                JobStatus::Cancelled,
+            ),
+            (
+                JobStatus::NeedsUserAction,
+                true,
+                CancellationTransition::Immediate,
+                JobStatus::Cancelled,
+            ),
+            (
+                JobStatus::WaitingForDrive,
+                true,
+                CancellationTransition::Immediate,
+                JobStatus::Cancelled,
+            ),
+            (
+                JobStatus::Cancelling,
+                false,
+                CancellationTransition::AlreadyCancelling,
+                JobStatus::Cancelling,
+            ),
+            (
+                JobStatus::Completed,
+                false,
+                CancellationTransition::Unavailable,
+                JobStatus::Completed,
+            ),
+            (
+                JobStatus::Failed,
+                false,
+                CancellationTransition::Unavailable,
+                JobStatus::Failed,
+            ),
+            (
+                JobStatus::Cancelled,
+                false,
+                CancellationTransition::Unavailable,
+                JobStatus::Cancelled,
+            ),
+        ] {
+            let mut job = Job::new(Uuid::new_v4(), "BV1cancel".into(), 1);
+            job.status = status;
+            job.stage = Stage::Transcribe;
+            assert_eq!(JobCapabilities::from_job(&job).can_cancel, can_cancel);
+            assert_eq!(job.request_cancellation(now), transition);
+            assert_eq!(job.status, final_status);
+            if transition == CancellationTransition::Immediate {
+                assert_eq!(job.stage, Stage::Cancelled);
+                assert_eq!(job.finished_at, Some(now));
+                assert!(!JobCapabilities::from_job(&job).can_cancel);
+                assert!(JobCapabilities::from_job(&job).can_delete);
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_legacy_job_persists_reloads_and_does_not_resurrect() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-cancel-reload-{id}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let queue_path = root.join("queue.json");
+        let mut job = Job::new(id, "BV1legacy-cancel".into(), 1);
+        job.status = JobStatus::NeedsUserAction;
+        job.stage = Stage::NeedsUserAction;
+        job.error = Some(format!("{LEGACY_UNRECORDED}: rebuild required"));
+        assert_eq!(
+            job.request_cancellation(chrono::Utc::now()),
+            CancellationTransition::Immediate
+        );
+        let queue = Queue { jobs: vec![job] };
+        std::fs::write(&queue_path, serde_json::to_vec_pretty(&queue).unwrap()).unwrap();
+
+        let mut reloaded = Queue::load_from(&queue_path).unwrap();
+        assert_eq!(reloaded.jobs[0].status, JobStatus::Cancelled);
+        assert!(reloaded.jobs[0].transcription_selection.is_none());
+        recover(&mut reloaded);
+        assert_eq!(reloaded.jobs[0].status, JobStatus::Cancelled);
+        assert_eq!(reloaded.jobs[0].stage, Stage::Cancelled);
+        assert!(JobCapabilities::from_job(&reloaded.jobs[0]).can_delete);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_job_marker_is_absent_while_new_job_freezes_disabled_setup() {
+        let legacy = Job::new(Uuid::new_v4(), "BV1legacy-marker".into(), 1);
+        assert!(legacy.content_setup.is_none());
+
+        let created = Job::from_creation(JobCreationInput::new(
+            Uuid::new_v4(),
+            "BV1new-marker".into(),
+            1,
+            sample_selection(CreatedFrom::Cli),
+            RetentionPolicy::Recommended,
+            ContentSetupV1::disabled(),
+        ));
+        assert_eq!(created.content_setup, Some(ContentSetupV1::disabled()));
+        let bytes = serde_json::to_vec(&created).unwrap();
+        let reloaded: Job = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reloaded.content_setup, created.content_setup);
+    }
+
+    #[test]
     fn persisted_selection_survives_config_changes_and_reload() {
         let selection = sample_selection(CreatedFrom::Cli);
         let job = Job::from_creation(JobCreationInput::new(
@@ -1536,6 +1832,7 @@ mod tests {
             1,
             selection.clone(),
             RetentionPolicy::Recommended,
+            ContentSetupV1::disabled(),
         ));
         let queue_path =
             std::env::temp_dir().join(format!("bimyscribe-selection-freeze-{}.json", job.id));
@@ -1610,6 +1907,7 @@ mod tests {
             1,
             selection.clone(),
             RetentionPolicy::Recommended,
+            ContentSetupV1::disabled(),
         ));
         job.status = JobStatus::Running;
         job.stage = Stage::Transcribe;
@@ -1707,7 +2005,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces() {
-        let dir = std::env::temp_dir().join("bimyscribe-jobs-test");
+        let dir = std::env::temp_dir().join(format!("bimyscribe-jobs-test-{}", Uuid::new_v4()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("f.json");
@@ -1728,6 +2026,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut job = Job::new(id, "BV1test".into(), 1);
         job.transcription_selection = Some(sample_selection(CreatedFrom::App));
+        job.content_setup = Some(ContentSetupV1::disabled());
         job.work_dir = Some(dir.clone());
         job.set_stage_state(Stage::Metadata, StageState::Completed);
         job.set_stage_state(Stage::DownloadAudio, StageState::Running);
@@ -1841,6 +2140,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("transcript.readable.md"), "readable").unwrap();
+        // Deliberately keep a same-named v0.5 file on this legacy fixture:
+        // the absent Job marker must remain authoritative and ignore it.
+        std::fs::write(dir.join("content-current.v1.json"), "current fixture").unwrap();
         std::fs::write(
             dir.join("full.md"),
             format!("<!-- job-id: {} -->\ncomplete", job.id),
@@ -1855,11 +2157,11 @@ mod tests {
             }
             RetentionPolicy::DocumentsOnly => {
                 for artifact in [
-                    "metadata.json",
                     "source.audio",
                     "normalized.wav",
                     "transcript.raw.json",
                     "transcript.readable.md",
+                    "metadata.json",
                 ] {
                     std::fs::remove_file(dir.join(artifact)).unwrap();
                 }
@@ -1905,6 +2207,8 @@ mod tests {
         assert!(artifact_valid(Stage::FinalDocument, &dir, &job));
         assert!(!dir.join("metadata.json").exists());
         assert!(!dir.join("transcript.raw.json").exists());
+        assert!(!dir.join("transcript.readable.md").exists());
+        assert!(dir.join("content-current.v1.json").exists());
         // Reproduce the old invalid Completed + Pending mixture.
         job.set_stage_state(Stage::DownloadAudio, StageState::Pending);
         job.set_stage_state(Stage::ReadableDocument, StageState::Skipped);
@@ -1979,6 +2283,8 @@ mod tests {
         recover(&mut queue);
         let recovered = &queue.jobs[0];
         assert_eq!(recovered.status, JobStatus::Queued);
+        // Legacy DocumentsOnly removed raw/metadata, so rebuilding a missing
+        // final document starts at the earliest stage that can recreate them.
         assert_eq!(recovered.stage, Stage::DownloadAudio);
         for stage in [
             Stage::DownloadAudio,
@@ -1987,6 +2293,7 @@ mod tests {
             Stage::RawDocument,
             Stage::ReadableDocument,
             Stage::FinalDocument,
+            Stage::Cleanup,
             Stage::Completed,
         ] {
             assert_eq!(
@@ -2000,6 +2307,52 @@ mod tests {
             StageState::Skipped
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn v05_terminal_missing_or_corrupt_current_stays_terminal_for_raw_only_repair() {
+        for current in [None, Some(br"not-json".as_slice())] {
+            let id = Uuid::new_v4();
+            let dir = std::env::temp_dir().join(format!("bimyscribe-v05-raw-only-{id}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut job = Job::new(id, "BV1v05rawonly".into(), 1);
+            job.content_setup = Some(ContentSetupV1::disabled());
+            job.work_dir = Some(dir.clone());
+            job.final_output_dir = Some(dir.clone());
+            job.cid = Some(7);
+            job.duration_ms = Some(1000);
+            job.status = JobStatus::Completed;
+            job.stage = Stage::Completed;
+            job.stage_progress = 100;
+            for stage in pipeline_stages() {
+                job.set_stage_state(
+                    stage,
+                    if stage == Stage::Screenshots {
+                        StageState::Skipped
+                    } else {
+                        StageState::Completed
+                    },
+                );
+            }
+            std::fs::write(
+                dir.join("transcript.raw.json"),
+                br#"[{"id":"u1","text":"raw","start_ms":0,"end_ms":1,"speaker_id":0}]"#,
+            )
+            .unwrap();
+            if let Some(current) = current {
+                std::fs::write(dir.join("content-current.v1.json"), current).unwrap();
+            }
+            let mut queue = Queue { jobs: vec![job] };
+            let reports = recover(&mut queue);
+            assert!(reports[0].revalidated_stages.is_empty());
+            assert_eq!(queue.jobs[0].status, JobStatus::Completed);
+            assert_eq!(queue.jobs[0].stage, Stage::Completed);
+            assert!(matches!(
+                crate::content_results::current(&queue.jobs[0]),
+                Ok(crate::content_results::ContentViewV1::RawOnly { .. })
+            ));
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]
@@ -2065,6 +2418,60 @@ mod tests {
         let caps = JobCapabilities::from_job(&job);
         assert!(!caps.can_cancel);
         assert!(caps.can_retry);
+    }
+
+    #[test]
+    fn v05_raw_only_failed_job_uses_repair_instead_of_generic_retry() {
+        let id = Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("bimyscribe-caps-raw-only-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("transcript.raw.json"),
+            br#"[{"id":"u1","text":"raw","start_ms":0,"end_ms":1,"speaker_id":0}]"#,
+        )
+        .unwrap();
+        let mut job = Job::new(id, "BV1rawonly".into(), 1);
+        job.content_setup = Some(ContentSetupV1::disabled());
+        job.transcription_selection = Some(sample_selection(CreatedFrom::Cli));
+        job.work_dir = Some(dir.clone());
+        job.cid = Some(7);
+        job.duration_ms = Some(1000);
+        job.status = JobStatus::Failed;
+        let caps = JobCapabilities::from_job(&job);
+        assert!(!caps.can_retry);
+        assert!(caps.can_open_document);
+        assert!(!caps.can_edit_speakers);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn v05_completed_job_with_missing_or_corrupt_evidence_has_no_result_entry() {
+        for raw in [
+            None,
+            Some(b"not-json".as_slice()),
+            Some(
+                br#"[{"id":"u1","text":"raw","start_ms":0,"end_ms":5000,"speaker_id":0}]"#
+                    .as_slice(),
+            ),
+        ] {
+            let id = Uuid::new_v4();
+            let dir = std::env::temp_dir().join(format!("bimyscribe-caps-invalid-{id}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(raw) = raw {
+                std::fs::write(dir.join("transcript.raw.json"), raw).unwrap();
+            }
+            let mut job = Job::new(id, "BV1invalid".into(), 1);
+            job.content_setup = Some(ContentSetupV1::disabled());
+            job.work_dir = Some(dir.clone());
+            job.cid = Some(7);
+            job.duration_ms = Some(1000);
+            job.status = JobStatus::Completed;
+
+            let caps = JobCapabilities::from_job(&job);
+            assert!(!caps.can_open_document);
+            assert!(!caps.can_edit_speakers);
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]

@@ -52,6 +52,7 @@ export struct JobDetailData {
     warning-text: string,      // JobWarning::label(); empty means none
     can-cancel: bool,          // JobCapabilities::can_cancel
     can-retry: bool,           // JobCapabilities::can_retry
+    can-rebuild: bool,         // explicit legacy Job recreation with current settings
     can-open: bool,             // JobCapabilities::can_open_document
     can-reveal: bool,           // JobCapabilities::can_reveal
     can-delete: bool,           // JobCapabilities::can_delete (terminal jobs only)
@@ -71,6 +72,58 @@ export struct JobDetailData {
     requested-language: string,
     reported-language: string,
     reported-model: string,
+    can-view-result: bool,       // terminal v0.5 job with validated raw Evidence
+}
+
+// One flat row in the v0.5 result view.  Section, block, and raw Evidence
+// rows deliberately share this shape so each tab can be rendered by one
+// virtual ListView; source details are inline in the same row rather than a
+// nested scroller or a second business model.
+export struct ContentRow {
+    id: string,
+    kind: string,                // section / block / raw / empty
+    title: string,
+    text: string,
+    declaration: string,
+    status-label: string,
+    status-kind: string,         // mapped / limited / failure / pending / neutral
+    source-text: string,
+    source-speaker: string,
+    source-range: string,
+    source-url: string,
+    can-source: bool,
+    can-jump: bool,
+    action-kind: string,         // summary / highlights / chapters / open-raw
+    action-label: string,
+    action-pending: bool,
+}
+
+// Read-only projection of ContentResults::current.  The Rust controller is
+// the only producer; Slint owns only transient tab/source expansion state.
+export struct ContentResultsData {
+    entry-visible: bool,
+    mode: string,                // current / raw-only / unavailable
+    title: string,
+    job-id: string,
+    bvid: string,
+    page: int,
+    video-duration: string,
+    status-label: string,
+    notice: string,
+    notice-error: bool,
+    source-url: string,
+    default-tab: int,            // 0 summary, 1 chapters, 2 faithful, 3 raw
+    show-summary: bool,
+    show-chapters: bool,
+    show-faithful: bool,
+    show-raw: bool,
+    can-repair: bool,
+    repair-pending: bool,
+    repair-label: string,
+    summary-rows: [ContentRow],
+    chapters-rows: [ContentRow],
+    faithful-rows: [ContentRow],
+    raw-rows: [ContentRow],
 }
 
 // Settings view model bound to the settings modal.

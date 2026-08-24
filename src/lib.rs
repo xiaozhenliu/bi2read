@@ -7,6 +7,7 @@ pub mod bilibili;
 pub mod cancel;
 pub mod cli;
 pub mod config;
+pub(crate) mod content_results;
 pub mod desktop;
 pub mod document;
 pub mod funasr;

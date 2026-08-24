@@ -3,6 +3,37 @@
 本文件保存每个版本的简要摘要；完整说明见 `docs/releases/`。
 This file keeps short per-version summaries; see `docs/releases/` for details.
 
+## Unreleased
+
+### 中文
+
+- 暂无。
+
+### English
+
+- None.
+
+## 0.5.0 - 2026-08-24
+
+### 中文
+
+- 新增可信文字消费结果：终态新任务可在应用内查看忠实正文、章节、默认摘要、
+  重点和原始稿，并区分可核对来源与来源受限状态。
+- 结果由 `ContentResults` 从已验证 Evidence 生成，使用单一 `content-current.v1.json`；章节、
+  默认摘要和重点可在终态单项重新生成，修复与重生成只保留在当前进程内，不改变任务终态。
+- Presentation 只有一个最终 `full.md` 出口；缺少 marker 的旧任务继续兼容路径，
+  不迁移、不从旧 Markdown 反推 v0.5 内容。
+
+### English
+
+- Trusted text consumption for terminal new jobs adds faithful text, chapters,
+  a default summary, highlights, the raw transcript, and explicit mapped or limited source states.
+- `ContentResults` derives the view from validated Evidence and persists one `content-current.v1.json`;
+  chapters, the default summary, and highlights can be regenerated independently in memory without changing
+  the Job terminal state.
+- Presentation has one final `full.md` output. Jobs without the marker keep their legacy
+  compatibility path and are not migrated.
+
 ## 0.4.1 - 2026-08-22
 
 ### 中文
@@ -102,4 +133,3 @@ This file keeps short per-version summaries; see `docs/releases/` for details.
 ### English
 
 - Initial BiMyScribe desktop application release.
-

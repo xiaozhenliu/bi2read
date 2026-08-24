@@ -84,6 +84,11 @@ impl FixtureDeps {
         self
     }
 
+    fn with_title(mut self, title: &'static str) -> Self {
+        self.title = title;
+        self
+    }
+
     fn transcribe_call_count(&self) -> usize {
         self.transcribe_calls.load(Ordering::SeqCst)
     }
@@ -103,6 +108,7 @@ impl PipelineDeps for FixtureDeps {
             bvid: bvid.to_string(),
             cid: 4242,
             title: self.title.to_string(),
+            part_title: Some("fixture-part".into()),
             up_name: "fixture-up".into(),
             duration_ms: 10_000,
         })
@@ -244,7 +250,23 @@ fn fixture_job(sandbox_root: &Path, language: SourceLanguage) -> Job {
     for stage in jobs::pipeline_stages() {
         job.set_stage_state(stage, StageState::Pending);
     }
-    job
+    mark_v05_unavailable(job)
+}
+
+fn mark_v05_unavailable(job: Job) -> Job {
+    let mut value = serde_json::to_value(job).unwrap();
+    value["content_setup"] = serde_json::json!({
+        "schema_version": 1,
+        "enhancements_requested": true,
+        "recipe_set_version": 1,
+        "initial_target": {
+            "kind": "unavailable",
+            "code": "connection_missing",
+            "message": "本地 AI 未运行",
+            "invalid_field": null
+        }
+    });
+    serde_json::from_value(value).unwrap()
 }
 
 fn run_happy_path(deps: FixtureDeps) {
@@ -285,6 +307,14 @@ fn run_happy_path(deps: FixtureDeps) {
     assert_eq!(job.stage_state(Stage::Screenshots), StageState::Skipped);
 
     let work_dir = job.work_dir.clone().expect("工作目录应已建立");
+    assert_eq!(job.title, deps.title);
+    assert_eq!(job.part_title.as_deref(), Some("fixture-part"));
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(work_dir.join("metadata.json")).expect("metadata.json 应存在"),
+    )
+    .unwrap();
+    assert_eq!(metadata["title"].as_str(), Some(deps.title));
+    assert_eq!(metadata["part_title"].as_str(), Some("fixture-part"));
 
     // ---- raw.json: parsed via the real loader, contents from the template. ----
     let utterances = pipeline::load_utterances(&work_dir.join("transcript.raw.json"))
@@ -319,6 +349,23 @@ fn run_happy_path(deps: FixtureDeps) {
     assert!(full_md.contains("[00:00:00]("), "full.md 应包含时间戳链接");
     assert!(full_md.contains(&utterances[0].text));
     assert!(full_md.contains(&utterances[1].text));
+    assert!(work_dir.join("content-current.v1.json").is_file());
+    assert!(work_dir.join("transcript.readable.md").is_file());
+    assert!(
+        !work_dir.join("full.md").exists(),
+        "v0.5 外部输出不应维护 work-dir full.md 镜像"
+    );
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(work_dir.join("content-current.v1.json")).unwrap())
+            .unwrap();
+    assert_eq!(current["source_context"]["part_title"], "fixture-part");
+    assert!(current["slots"]["faithful_text"]["current"].is_object());
+    for kind in ["default_summary", "highlights", "chapters"] {
+        assert!(
+            current["slots"][kind]["last_failure"].is_object(),
+            "Unavailable setup should settle {kind} independently"
+        );
+    }
     // Language identity reported by the fixture Runtime flows into the doc.
     let reported = job
         .transcription_result
@@ -582,7 +629,7 @@ fn recommended_retention_removes_intermediates_and_keeps_documents() {
         "transcript.raw.json",
         "transcript.raw.md",
         "transcript.readable.md",
-        "full.md",
+        "content-current.v1.json",
         "state.json",
     ] {
         assert!(
@@ -608,6 +655,85 @@ fn recommended_retention_removes_intermediates_and_keeps_documents() {
     );
     assert!(reports[0].revalidated_stages.is_empty());
     assert_eq!(queue.jobs[0].status, JobStatus::Completed);
+}
+
+#[test]
+fn v05_documents_only_retains_evidence_current_and_unique_final() {
+    let _home_lock = HOME_LOCK.lock().unwrap();
+    if !ffmpeg_available() {
+        eprintln!("skipping pipeline_e2e: ffmpeg 不在 PATH 上，无法执行真实标准化阶段");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let cfg = Config {
+        working_dir: sandbox.working_root(),
+        output_dir: sandbox.output_root(),
+        ..Config::default()
+    };
+    let deps = FixtureDeps::zh();
+    let mut job = fixture_job(&sandbox.root, SourceLanguage::Zh);
+    job.retention = RetentionPolicy::DocumentsOnly;
+    pipeline::run_job_with_deps(
+        &mut job,
+        &cfg,
+        &headless_weak(),
+        &CancellationToken::new(),
+        &deps,
+    )
+    .expect("v0.5 DocumentsOnly 应完成");
+
+    let work_dir = job.work_dir.clone().unwrap();
+    for kept in [
+        "transcript.raw.json",
+        "content-current.v1.json",
+        "transcript.raw.md",
+        "transcript.readable.md",
+        "metadata.json",
+        "state.json",
+    ] {
+        assert!(work_dir.join(kept).is_file(), "必须保留 {kept}");
+    }
+    assert!(!work_dir.join("source.audio").exists());
+    assert!(!work_dir.join("normalized.wav").exists());
+    let final_dir = job.final_output_dir.clone().unwrap();
+    assert!(final_dir.join("full.md").is_file());
+    assert!(!work_dir.join("full.md").exists());
+
+    let reloaded = jobs::load_job_state(&work_dir).unwrap();
+    let mut queue = jobs::Queue {
+        jobs: vec![reloaded],
+    };
+    let reports = jobs::recover(&mut queue);
+    assert!(reports[0].reset_stages.is_empty());
+    assert!(reports[0].revalidated_stages.is_empty());
+    assert_eq!(queue.jobs[0].status, JobStatus::Completed);
+    assert!(jobs::artifact_valid(
+        Stage::ReadableDocument,
+        &work_dir,
+        &queue.jobs[0]
+    ));
+
+    // Recovery leaves the structured current authoritative. Removing only
+    // Presentation files must be repairable without audio/ASR/upstream work.
+    std::fs::remove_file(work_dir.join("transcript.readable.md")).unwrap();
+    std::fs::remove_file(final_dir.join("full.md")).unwrap();
+    let mut repaired = queue.jobs.remove(0);
+    std::fs::remove_file(work_dir.join("metadata.json")).unwrap();
+    let resume_deps = FixtureDeps::zh().with_title("【集成测试】重建后的标题");
+    pipeline::run_job_with_deps(
+        &mut repaired,
+        &cfg,
+        &headless_weak(),
+        &CancellationToken::new(),
+        &resume_deps,
+    )
+    .expect("保留的 current + raw 应能重建 Presentation");
+    assert_eq!(resume_deps.transcribe_call_count(), 0);
+    assert!(work_dir.join("transcript.readable.md").is_file());
+    assert!(final_dir.join("full.md").is_file());
+    assert!(std::fs::read_to_string(final_dir.join("full.md"))
+        .unwrap()
+        .starts_with("# 【集成测试】重建后的标题\n"));
 }
 
 // ---- Scenario 5: language freeze vs. Config changes ----

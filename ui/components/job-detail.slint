@@ -7,6 +7,8 @@ import { AppTextField } from "text-field.slint";
 import { StatusBadge } from "badge.slint";
 import { ProgressBar } from "progress.slint";
 import { StageView, SpeakerEntry } from "../types.slint";
+import { ContentResultsData } from "../view-model.slint";
+import { ContentResults } from "content-results.slint";
 
 // Segmented-control tab: container is `InspectorTab`'s parent
 // `segment-track` Rectangle; each tab renders its own selected/unselected
@@ -295,6 +297,7 @@ export component JobDetail inherits Rectangle {
     in property <[SpeakerEntry]> speakers;
     in property <bool> can-cancel;
     in property <bool> can-retry;
+    in property <bool> can-rebuild;
     in property <bool> can-open;
     in property <bool> can-reveal;
     in property <bool> can-delete;
@@ -314,8 +317,12 @@ export component JobDetail inherits Rectangle {
     in property <string> requested-language;
     in property <string> reported-language;
     in property <string> reported-model;
+    in property <bool> can-view-result: false;
+    in property <bool> result-open: false;
+    in property <ContentResultsData> result;
     in property <string> action-feedback: "";
     in property <bool> action-pending: false;
+    in property <string> action-pending-kind: "";
     in property <bool> action-feedback-error: false;
     in property <string> speaker-feedback: "";
     in property <bool> speaker-feedback-error: false;
@@ -364,7 +371,9 @@ export component JobDetail inherits Rectangle {
     property <bool> display-warning-visible: !root.display-warning.is-empty;
     property <bool> display-can-cancel: root.fixture-running || (!root.fixture-enabled && root.can-cancel);
     property <bool> display-can-retry: root.fixture-failed || (!root.fixture-enabled && root.can-retry);
+    property <bool> display-can-rebuild: !root.fixture-enabled && root.can-rebuild;
     property <bool> display-can-open: root.fixture-completed || (!root.fixture-enabled && root.can-open);
+    property <bool> display-can-view-result: !root.fixture-enabled && root.can-view-result;
     property <bool> display-can-reveal: root.fixture-completed || (!root.fixture-enabled && root.can-reveal);
     // Terminal fixtures (completed/failed) expose the delete affordance so
     // screenshots cover it; a running task must go through cancel first.
@@ -401,7 +410,8 @@ export component JobDetail inherits Rectangle {
     property <string> display-reported-model: root.fixture-enabled
         ? "未报告" : root.reported-model;
     property <bool> display-has-actions: root.display-can-cancel || root.display-can-retry
-        || root.display-can-open || root.display-can-reveal || root.display-can-delete;
+        || root.display-can-rebuild || root.display-can-open || root.display-can-reveal
+        || root.display-can-delete;
     property <bool> display-completed: root.display-status == "已完成";
 
     changed verification-inspector-page => {
@@ -449,7 +459,15 @@ export component JobDetail inherits Rectangle {
 
     callback cancel-clicked();
     callback retry-clicked();
+    callback rebuild-clicked();
     callback open-md-clicked();
+    callback view-result-clicked();
+    callback result-back-clicked();
+    callback result-open-raw-clicked();
+    callback result-repair-clicked();
+    callback result-regenerate-clicked(string);
+    callback result-source-clicked(string);
+    callback result-jump-clicked(string);
     callback reveal-clicked();
     callback delete-clicked();
     callback toggle-screenshots(bool);
@@ -483,7 +501,7 @@ export component JobDetail inherits Rectangle {
             horizontal-stretch: 1;
             background: Theme.surface;
 
-            VerticalLayout {
+            if !root.result-open : VerticalLayout {
                 spacing: 0px;
 
                 Rectangle {
@@ -577,10 +595,15 @@ export component JobDetail inherits Rectangle {
                             }
                         }
 
-                        if root.display-has-actions : HorizontalLayout {
+                        if root.display-has-actions || root.display-can-view-result : HorizontalLayout {
                             height: Theme.control-height;
                             spacing: Theme.space-xs;
                             alignment: end;
+                            if root.display-can-rebuild : PrimaryButton {
+                                text: "使用新设置重建任务";
+                                disabled: root.action-pending;
+                                clicked => { root.rebuild-clicked(); }
+                            }
                             if root.display-can-retry : PrimaryButton {
                                 text: "重试";
                                 disabled: root.action-pending;
@@ -595,6 +618,16 @@ export component JobDetail inherits Rectangle {
                                 text: "打开 Markdown";
                                 disabled: root.action-pending;
                                 clicked => { root.open-md-clicked(); }
+                            }
+                            if root.display-can-view-result && !root.display-can-retry : PrimaryButton {
+                                text: "查看消费结果";
+                                disabled: root.action-pending;
+                                clicked => { root.view-result-clicked(); }
+                            }
+                            if root.display-can-view-result && root.display-can-retry : SecondaryButton {
+                                text: "查看消费结果";
+                                disabled: root.action-pending;
+                                clicked => { root.view-result-clicked(); }
                             }
                             if root.display-can-reveal : SecondaryButton {
                                 text: "访达中显示";
@@ -613,7 +646,7 @@ export component JobDetail inherits Rectangle {
                             }
                         }
 
-                        if root.display-has-actions : Text {
+                        if root.display-has-actions || root.display-can-view-result : Text {
                             text: root.action-feedback.is-empty ? " " : root.action-feedback;
                             color: root.action-feedback-error ? Theme.danger-text
                                 : root.action-pending ? Theme.text-muted : Theme.success;
@@ -752,6 +785,20 @@ export component JobDetail inherits Rectangle {
                         }
                     }
                 }
+            }
+
+            if root.result-open : ContentResults {
+                data: root.result;
+                operation-pending: root.action-pending;
+                operation-target-kind: root.action-pending-kind;
+                operation-feedback: root.action-feedback;
+                operation-feedback-error: root.action-feedback-error;
+                back-clicked => { root.result-back-clicked(); }
+                open-raw-clicked => { root.result-open-raw-clicked(); }
+                repair-clicked => { root.result-repair-clicked(); }
+                regenerate-clicked(kind) => { root.result-regenerate-clicked(kind); }
+                source-clicked(url) => { root.result-source-clicked(url); }
+                jump-clicked(url) => { root.result-jump-clicked(url); }
             }
         }
 

@@ -14,6 +14,7 @@ BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录�
 - 生成带时间链接的完整 Markdown 文稿
 - 任务中断后可恢复，并支持取消、重试和保留策略
 - 可选连接 Ollama 等本地 LLM，对文稿进行可读性整理
+- v0.5.0 支持终态可信文字消费结果：忠实正文、章节、默认摘要、重点和可核对来源
 
 ## 运行要求
 
@@ -24,7 +25,7 @@ BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录�
 - [FFmpeg](https://ffmpeg.org/)；命令需要位于 `PATH`
 - [uv](https://docs.astral.sh/uv/)（通过 Cargo 运行原生 Runtime 时需要；构建 App
   的脚本会自动下载）
-- BiMyScribe FunASR Runtime contract v2（contract v1 仍可读取，但不能创建新的 v0.4.0 任务）
+- BiMyScribe FunASR Runtime contract v2（contract v1 仍可读取，但不能创建新任务）
 
 Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器镜像不
 包含在本仓库中。Docker Desktop 仅在选择 Docker Runtime 时需要。
@@ -32,7 +33,7 @@ Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器�
 ## 安装与启动
 
 App 版本以 [`Cargo.toml`](Cargo.toml) 为唯一来源；当前版本的完整中英文变化、兼容性与
-限制见 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)。
+限制见 [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md)。
 
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
@@ -45,7 +46,7 @@ cargo run --release
 另行下载经过验证的原生 Runtime：
 
 ```bash
-git clone --branch v1.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
+git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
 ```
 
 ### 在自己的 Mac 上构建 App
@@ -130,8 +131,10 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 2. 在顶部输入框粘贴 Bilibili 链接或视频编号。
 3. 在“确认转写设置”中查看 Runtime 说明，选择中文、英文或 Runtime 明确提供的自动检测，确认后才加入队列。
 4. 等待下载、转码、转录和文档生成完成，并在任务信息中核对请求/实际语言和 Runtime identity。
-5. 在任务详情中检查识别出的说话人；需要时修改显示名称。
-6. 打开最终文稿，或在 Finder 中显示输出目录。
+5. v0.5.0 新任务进入终态后可点击“查看消费结果”，在摘要、章节、忠实正文和原始稿之间切换；
+   可核对来源时展开片段并跳回视频，来源受限时不会显示伪造链接。
+6. 在任务详情中检查识别出的说话人；需要时修改显示名称，然后打开唯一最终文稿，或在 Finder
+   中显示输出目录。
 
 修改说话人名称后，BiMyScribe 会直接重建 Markdown，不会重复转录音频。
 
@@ -143,8 +146,10 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 - `transcript.raw.md`：按原始识别段落生成的 Markdown
 - `transcript.readable.md`：整理后的可读正文
 - `full.md`：包含视频信息、说话人和可点击时间链接的最终文稿
+- `content-current.v1.json`：v0.5.0 新任务的唯一结构化结果事实，供结果视图和文档重建使用
 
-具体保留哪些中间文件由任务的保留策略决定。
+v0.5.0 新任务保留单一最终 `full.md` 出口；legacy 任务继续使用兼容路径。具体保留哪些中间
+文件由任务的保留策略决定。
 
 ## 当前限制
 
@@ -153,6 +158,8 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
   英文 profile 按既定方案使用 `paraformer-en`，不以其他模型的实验结果替代该验证。
   这不等同于对所有领域或语言组合做出准确率承诺。现有 AI 润色主要整理标点、明显错字
   和分段，不等同于已经验证的全文纠错。
+- v0.5.0 可信文字消费结果入口只对带 marker、Evidence 有效且已进入终态的新任务开放，
+  旧任务保持兼容行为。
 - 暂不提供官方签名并公证的 DMG；可以运行上方脚本，在自己的 Apple Silicon Mac
   上生成 ad-hoc 签名的 `.app`。
 - 仅支持匿名访问，不支持需要登录或 Cookie 的视频。
@@ -187,6 +194,8 @@ speaker information.
 - Speaker renaming without re-running transcription
 - Markdown output with clickable Bilibili timestamp links
 - Optional text refinement through a local LLM service such as Ollama
+- v0.5.0 result view for terminal jobs: faithful text, chapters, a default summary,
+  highlights, and verifiable source links
 
 ### Requirements
 
@@ -196,7 +205,7 @@ speaker information.
 - FFmpeg available on `PATH`
 - uv when running the native runtime through Cargo; the app build script
   downloads it automatically
-- BiMyScribe FunASR Runtime contract v2 (contract v1 remains readable but cannot create new v0.4.0 jobs)
+- BiMyScribe FunASR Runtime contract v2 (contract v1 remains readable but cannot create new jobs)
 
 FunASR models are not bundled. Docker Desktop is required only for the optional
 Docker runtime.
@@ -204,7 +213,7 @@ Docker runtime.
 ### Install and run
 
 [`Cargo.toml`](Cargo.toml) is the single source of truth for the app version.
-See [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) for the current bilingual
+See [`docs/releases/v0.5.0.md`](docs/releases/v0.5.0.md) for the current bilingual
 release notes, compatibility details, and limitations.
 
 ```bash
@@ -216,7 +225,7 @@ cargo run --release
 Download the verified native runtime separately:
 
 ```bash
-git clone --branch v1.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
+git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
 ```
 
 ### Build the macOS app locally
@@ -285,13 +294,15 @@ supported in this release.
 2. Paste a Bilibili link or video ID and review the Runtime/language confirmation.
 3. Confirm the language choice before adding the job to the queue.
 4. Wait for download, conversion, transcription, and document generation; verify requested/reported language and Runtime identity in task information.
-5. Review or rename detected speakers in the task details.
-6. Open the generated `full.md` document or reveal it in Finder.
+5. On a v0.5.0 new job, open "查看消费结果" after it reaches a terminal state. Switch between
+   summary, chapters, faithful text, and raw transcript; expand mapped sources or see the explicit limited-source state.
+6. Review or rename detected speakers, then open the single final `full.md` document or reveal it in Finder.
 
 ### Output
 
 Depending on the retention policy, a task may produce structured transcription
-JSON, raw Markdown, refined Markdown, and a final `full.md` document.
+JSON, raw Markdown, refined Markdown, and a final `full.md` document. v0.5.0 new jobs also keep
+`content-current.v1.json` as the single structured content fact and expose only one final `full.md` output.
 
 ### Current limitations
 
@@ -303,6 +314,8 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document.
   combination. The current AI refinement mainly adjusts punctuation,
   obvious typos, and paragraphing, and is not a validated full-transcript
   correction system.
+- Trusted text consumption is terminal-only for new jobs with valid Evidence;
+  legacy jobs keep their compatibility path.
 - No officially signed and notarized DMG is provided yet. Run the script above
   to create an ad-hoc signed `.app` on your own Apple Silicon Mac.
 - Videos requiring login or cookies are not supported.

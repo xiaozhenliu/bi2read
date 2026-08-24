@@ -474,6 +474,7 @@ fn transcribe(args: TranscribeArgs) -> anyhow::Result<ExitCode> {
         args.retention
             .map(Into::into)
             .unwrap_or(context.config.default_retention),
+        context.config.content_setup(),
     ));
     job.source_url = Some(args.input);
 

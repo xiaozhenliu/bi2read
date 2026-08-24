@@ -18,7 +18,10 @@ use slint::{ComponentHandle, Weak};
 use uuid::Uuid;
 
 use bimyscribe::config::Config;
-use bimyscribe::jobs::{Job, StageState};
+use bimyscribe::jobs::{
+    CreatedFrom, Job, RetentionPolicy, RuntimeBackend, RuntimeSource, SourceLanguage, StageState,
+    TranscriptionSelection,
+};
 use bimyscribe::pipeline;
 
 const E2E_WORKING_ROOT: &str = "/tmp/BiMyScribe/e2e-jobs";
@@ -97,7 +100,33 @@ fn run_cli(args: &[String], paths: &E2ePaths, mode: RunMode) -> ExitCode {
         cfg.output_dir.display()
     );
 
-    let mut job = Job::new(id, parsed.bvid.clone(), page);
+    let selection = match cfg.job_transcription_selection(CreatedFrom::Cli, SourceLanguage::Auto) {
+        Ok(selection) => selection,
+        Err(error) if is_dry_run(mode) => {
+            eprintln!("dry-run: using isolated fixture transcription selection: {error}");
+            TranscriptionSelection::new(
+                RuntimeSource::External,
+                cfg.working_dir.join("fixture-runtime-project"),
+                cfg.working_dir.join("fixture-runtime-data"),
+                "contract-v2:e2e-smoke-dry-run".into(),
+                RuntimeBackend::DockerCompose,
+                Some("fixture model".into()),
+                SourceLanguage::Auto,
+                CreatedFrom::Cli,
+            )
+        }
+        Err(error) => {
+            eprintln!("cannot freeze verified Runtime selection: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut job = Job::new_v05_disabled_with_selection(
+        id,
+        parsed.bvid.clone(),
+        page,
+        selection,
+        RetentionPolicy::Recommended,
+    );
     job.source_url = Some(input.clone());
     for s in bimyscribe::jobs::pipeline_stages() {
         job.set_stage_state(s, StageState::Pending);
@@ -221,6 +250,18 @@ fn e2e_config(run_id: Uuid, paths: &E2ePaths) -> Config {
     }
 }
 
+fn is_dry_run(mode: RunMode) -> bool {
+    #[cfg(test)]
+    {
+        mode == RunMode::DryRun
+    }
+    #[cfg(not(test))]
+    {
+        let _ = mode;
+        false
+    }
+}
+
 fn e2e_output_dir(run_id: Uuid, paths: &E2ePaths) -> PathBuf {
     paths.output_root.join(run_id.to_string())
 }
@@ -290,7 +331,8 @@ fn report(
                     "metadata.json",
                     "transcript.raw.json",
                     "transcript.raw.md",
-                    "full.md",
+                    "transcript.readable.md",
+                    "content-current.v1.json",
                 ] {
                     let p = dir.join(name);
                     match std::fs::metadata(&p) {
@@ -308,6 +350,14 @@ fn report(
                         eprintln!("output full.md: {} ({} bytes)", out_full.display(), m.len())
                     }
                     Err(_) => eprintln!("output full.md: MISSING at {}", out_full.display()),
+                }
+                if serde_json::to_value(&*job)
+                    .ok()
+                    .and_then(|value| value.get("content_setup").cloned())
+                    .is_some()
+                    && dir.join("full.md").exists()
+                {
+                    eprintln!("warning: v0.5 work-dir full.md mirror unexpectedly exists");
                 }
             }
             if !keep {
@@ -464,6 +514,16 @@ mod tests {
             1,
             "dry execution must persist its isolated job state"
         );
+        let smoke_job_dir = std::fs::read_dir(&working_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let smoke_state = bimyscribe::jobs::load_job_state(&smoke_job_dir).unwrap();
+        let smoke_json = serde_json::to_value(smoke_state).unwrap();
+        assert!(smoke_json["transcription_selection"].is_object());
+        assert!(smoke_json["content_setup"].is_object());
 
         let id = Uuid::new_v4();
         let job_dir = working_root.join(id.to_string());

@@ -1,9 +1,10 @@
 # BiMyScribe 架构
 
-版本：1.1
-状态：当前稳定架构，持续演进  
-产品基线：v0.3.0  
-更新日期：2026-08-18
+版本：1.2
+状态：当前稳定架构，持续演进
+产品基线：v0.4.1
+当前发布候选：v0.5.0（等待公开发布门禁）
+更新日期：2026-08-24
 
 本文描述当前稳定实现与模块接口。当前优先级见 `roadmap.md`；长期产品需求由内部需求
 基线维护，历史方案不参与架构裁决。
@@ -22,6 +23,12 @@
   通过 native-uv 与 Docker adapters 的同一 `--language auto|zh|en` 语义传递。
 - Runtime normalized 输出先经过 schema、segments、文本和时间范围校验，成功后才写
   `transcript.raw.json`；reported language/model/identity 缺失时保持“未报告”。
+- v0.5 新 Job 由 `content_setup` marker 识别；`ContentResults` 以同一份经过验证的
+  Evidence 生成并校验四项文字结果，持久化唯一 `content-current.v1.json`。
+- v0.5 结果入口只对 Evidence 有效的终态 Job 开放；重生成与 RawOnly 修复只在当前进程内串行，
+  不写持久命令、历史或恢复队列。
+- v0.5 App 与文档都消费结构化 current；Presentation 只有一个最终 `full.md` 出口，legacy Job
+  完全 passthrough，不迁移、不从旧 Markdown 提升内容事实。
 
 ## 执行流
 
@@ -30,11 +37,15 @@ GUI (`desktop`) ─┐
                  ├─> Scheduler ─> Pipeline ─> Bilibili / FFmpeg / FunASR
 CLI (`cli`) ─────┘                      │
                                        ├─> raw transcript Evidence
-                                       ├─> deterministic readable document
-                                       ├─> optional LLM correction
-                                       └─> final Markdown + cleanup
+                                       ├─> ContentResults (v0.5 marker jobs)
+                                       │       ├─> content-current.v1.json
+                                       │       └─> validated result snapshot
+                                       ├─> document Presentation
+                                       │       └─> one final full.md
+                                       └─> cleanup
 
 Job snapshot ─> UI bridge ─> generated Slint view models ─> `ui/**`
+ContentResults current ─> result view / source expansion / regeneration callbacks
 ```
 
 GUI 和 CLI 共享 `Scheduler`、`Pipeline`、`Job` 与产物契约，不能各自发展一条流水线。
@@ -54,7 +65,7 @@ App 在确认框中展示 Runtime 说明和语言选择，确认前不写队列�
 
 `funasr::describe_runtime` 是 Runtime 说明的唯一入口，负责规范化项目路径、读取 v1/v2
 manifest、计算内容 fingerprint、匹配 ready record 并传播可选说明字段；说明不被当作能力
-认证。v1 可以查询但不能创建 v0.4.0 新任务。`run` 只接受冻结 selection，先校验 contract、
+认证。v1 可以查询但不能创建新任务。`run` 只接受冻结 selection，先校验 contract、
 ready 和 identity，再由两个 adapter 传递同一 requested language。normalized 结果经过结构化
 校验后返回 `TranscribeOutcome`，Pipeline 把 Runtime 回报写入 `Job.transcription_result`。
 
@@ -79,27 +90,53 @@ requested/reported language、model 与 Runtime identity。
 | `src/package_check.rs` | `package_check::run` | 包内 Runtime、uv、release manifest、身份和哈希校验 |
 | `src/cli.rs` | `dispatch_requested` | CLI 参数、路径覆盖、Runtime 命令、版本化 envelope 和退出码 |
 | `src/scheduler.rs` | `Scheduler::drain_next` | runnable 选择、取消 registry、任务终态收敛 |
-| `src/pipeline.rs` | `run_job` | 阶段顺序、恢复、产物校验、持久化、清理和增强回退 |
+| `src/pipeline.rs` | `run_job` | 阶段顺序、Evidence 持久化、ContentResults 初始执行、产物校验、清理和终态收敛 |
+| `src/content_results.rs` | `current`、`execute` | Evidence 校验、四项内容派生、来源映射、失败隔离、RawOnly、内存重生成和单文件原子发布 |
 | `src/ui_bridge.rs` | crate 内进度/快照映射 | `JobViewSnapshot` 到 Slint row/detail/stage models 的全部转换 |
 | `src/jobs.rs` | `Job`、`Queue`、snapshot 与 artifact validation | 状态机、原子写入、恢复和能力计算 |
 | `src/bilibili.rs` | parse/fetch/download | 匿名 API、短链解析、DASH audio 选择和 retry |
 | `src/funasr.rs` | `describe_runtime`、`run(TranscribeRequest)` | v1/v2 manifest、fingerprint/readiness、语言 argv、normalized 解析和资源回收 |
 | `src/llm.rs` | `refine_utterances` | 协议 adapter、分批请求、响应校验和逐条回退 |
-| `src/document.rs` | raw/readable/final render | 时间链接、说话人映射和 Markdown 组合 |
+| `src/document.rs` | raw/readable/final render | 基于 ContentSnapshot 的原始稿、faithful/readable 和唯一 `full.md` Presentation |
 | `src/process.rs` | subprocess spawn/run/cancel | 进程组、日志、终止升级和 Docker cleanup |
 | `src/config.rs`、`src/paths.rs` | 配置与平台路径 | 默认值、迁移、单实例锁、release-check 隔离 |
 
 这里的“模块”以接口和职责定义，不以文件大小定义。新的拆分必须通过删除测试：删掉模块后，
 复杂度会重新散落到多个 caller；只转发一次调用的文件不构成有价值的模块。
 
+## v0.5 可信文字消费
+
+`ContentResults` 是 v0.5 的深模块，外部只暴露 `current(job)` 和
+`execute(job, intent, cancel)` 两个入口。模块内部完成 raw Evidence 定位与 schema/SHA 校验、
+上下文快照、faithful/chapters/default summary/highlights 四项派生、mapped/limited 来源状态、
+失败隔离和 `content-current.v1.json` 的整文件原子发布。调用者不读取或解释 raw JSON，不计算
+revision，不拼接 slot，也不把某一项派生结果作为另一项的隐式前置条件。
+
+`current()` 只读并返回 `Legacy`、`RawOnly` 或 `Current`：marker 缺失时是 Legacy；current
+缺失或损坏但 Evidence 有效时是 RawOnly；其余情况返回带 validated Evidence 的 Current。它不从
+Markdown 修复，也不会因普通打开动作写盘。
+
+初始执行由 Pipeline 在 Evidence 完成后调用；结果视图只在终态 Job 展示。终态 v0.5 Job 可从
+既有 Evidence 单项重生成章节、默认摘要或重点，也可对 RawOnly 执行一次 Initial 修复。两者共享
+单进程、单 worker 的内存 busy 门禁；旧 current 在失败时保留，进程退出后不自动续跑，Job 的
+Completed/Failed/Cancelled、stage 和 finished time 不被改写。界面不暴露单项取消、持久队列或
+历史/投影术语。
+
+App 直接消费 `ContentSnapshotV1`；`document` 使用同一 snapshot 重建 `transcript.raw.md`、
+`transcript.readable.md` 和唯一最终 `full.md`。打开/导出前重建失败时不打开旧 `full.md`，结果页
+仍保留可读内容。缺少 marker 的 legacy Job 不生成 current、不迁移、不从展示文件反推结构化内容，
+继续 v0.4.1 的 open/reveal/retry/speaker rename 兼容路径。
+
 ## 转写与 LLM 的事实边界
 
 1. `funasr::run` 返回带 id、时间范围、speaker id 和文本的 utterance。
 2. Pipeline 原子保存原始 JSON，并用 `document` 生成逐片段原始 Markdown。
 3. 未启用 LLM 时，`document::render_readable_body` 只确定性合并相邻同 speaker 片段。
-4. 启用 LLM 时，`llm::refine_utterances` 每 20 条调用一次所选协议 adapter；返回值仍与
-   输入一一对应。请求、解析或校验异常时使用原文并记录非致命 warning。
-5. FinalDocument 组合元数据、时间链接和 readable body；Cleanup 按任务冻结的保留策略执行。
+4. legacy Job 启用 LLM 时，`llm::refine_utterances` 每 20 条调用一次所选协议 adapter；返回值仍
+   与输入一一对应。请求、解析或校验异常时使用原文并记录非致命 warning。v0.5 Job 不走这条
+   旧的逐条派生路径，而由 `ContentResults` 统一裁决 faithful fallback 与三个增强 slot。
+5. `document` 组合元数据、时间链接和结构化结果；v0.5 的 Presentation 只写一个最终 `full.md`，
+   Cleanup 按任务冻结的保留策略执行。
 
 当前 LLM seam 有两个真实 protocol adapter（OpenAI Chat Completions 与 Anthropic Messages），
 因此协议变化位于真实 seam。标题上下文、长文滑窗、术语表、provider 鉴权和质量评测尚未
@@ -110,6 +147,11 @@ requested/reported language、model 与 Runtime identity。
 - metadata、下载、FFmpeg、FunASR、I/O 和最终文档失败是 fatal，任务保留失败阶段供重试。
 - Docker backend 未运行进入可操作等待状态，不 busy-loop。
 - LLM 是 optional enhancement：失败记录 `LlmFallback`，任务继续生成规则阅读稿。
+- v0.5 增强失败只更新对应 slot 的 `last_failure`；faithful AI 失败使用可追溯的规则 fallback，
+  不遮蔽 Evidence 或其他 current。
+- v0.5 current 缺失/损坏但 Evidence 有效时显示 RawOnly 与“修复文字结果”；Evidence 无效时不显示
+  结果入口，要求重新创建任务。
+- 重生成与修复不创建持久 operation、attempt、历史或 projection ledger；关闭 App 后不自动续跑。
 - Screenshots 未实现时阶段明确为 `Skipped`，不能显示为已完成产物。
 - 恢复只跳过“状态完成且产物校验有效”的阶段；保留策略预期删除的产物按明确规则处理。
 
@@ -118,6 +160,7 @@ requested/reported language、model 与 Runtime identity。
 - 新来源或下载行为进入 `bilibili`；不要放进 UI controller。
 - ASR backend/contract 进入 `funasr`；Pipeline 只消费统一 utterance。
 - 文本校正协议进入 `llm` adapter；忠实性和来源映射由其外部接口共同约束。
-- 新派生产物先定义 Evidence 输入、独立失败语义和可重跑身份，再接入 Pipeline。
+- 新派生产物先定义 Evidence 输入、独立失败语义和可重跑身份，再接入 Pipeline；v0.5 派生必须
+  继续收敛在 `ContentResults`，不要在 UI、Pipeline 或 document 中复制规则。
 - Job 状态先在 `jobs` 建模，再通过 `ui_bridge` 展示；Slint 不持久化业务事实。
 - 只有第二个真实 adapter 或测试替身确有必要时才新增 seam；否则把变化留在现有深模块内部。

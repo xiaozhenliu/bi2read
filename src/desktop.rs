@@ -7,6 +7,7 @@ use crate::*;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,10 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::content_results::{
+    ArtifactKindV1, ContentBlockV1, ContentViewV1, EffectivePathV1, FallbackReasonCodeV1, Intent,
+    ReadyGenerationTargetV1, RegenerableKind, SourceStatusV1,
+};
 use crate::jobs::{
     CreatedFrom, Job, JobCreationInput, JobStatus, Queue, SourceLanguage, Stage, StageState,
     TranscriptionSelection,
@@ -27,11 +32,17 @@ use crate::scheduler::{DrainOutcome, Scheduler};
 enum WorkMsg {
     /// Wake the scheduler: drain all runnable jobs until idle or waiting.
     Run,
-    /// Cancel the currently running job. The token is set
-    /// directly by the Controller; this message updates the persisted state.
-    Cancel(Uuid),
     /// Retry a failed job from its failed stage.
     Retry(Uuid),
+    /// Regenerate one terminal v0.5 enhancement from the clicked target
+    /// snapshot. The command exists only in the in-memory worker channel.
+    Regenerate {
+        job_id: Uuid,
+        kind: RegenerableKind,
+        target: ReadyGenerationTargetV1,
+    },
+    /// Rebuild a missing/corrupt v0.5 current from already-valid Evidence.
+    RepairContent(Uuid),
     /// Delete one terminal job: its artifacts first, then its queue record.
     DeleteJob(Uuid),
     /// Delete every terminal job (history clear). Live jobs are untouched.
@@ -39,6 +50,71 @@ enum WorkMsg {
     /// A speaker name was edited; regenerate the markdown documents only.
     SpeakerChanged(Uuid),
     Shutdown,
+}
+
+/// In-memory gate for terminal content operations. It deliberately has no
+/// serde representation and is not part of Queue/Job state: a crashed worker
+/// simply drops the token and the user can issue the operation again.
+#[derive(Default)]
+struct ContentBusy {
+    job_id: Option<Uuid>,
+    token: Option<crate::cancel::CancellationToken>,
+}
+
+struct ContentBusyGuard {
+    busy: Arc<Mutex<ContentBusy>>,
+    job_id: Uuid,
+}
+
+impl Drop for ContentBusyGuard {
+    fn drop(&mut self) {
+        clear_content_operation(&self.busy, self.job_id);
+    }
+}
+
+fn reserve_content_operation(busy: &Arc<Mutex<ContentBusy>>, job_id: Uuid) -> bool {
+    let mut state = busy.lock().unwrap();
+    if state.job_id.is_some() {
+        return false;
+    }
+    state.job_id = Some(job_id);
+    // Create the token at reservation time so Cancel can signal an operation
+    // that is still waiting in the worker channel.
+    state.token = Some(crate::cancel::CancellationToken::new());
+    true
+}
+
+fn start_content_operation(
+    busy: &Arc<Mutex<ContentBusy>>,
+    job_id: Uuid,
+) -> Option<crate::cancel::CancellationToken> {
+    let state = busy.lock().unwrap();
+    if state.job_id != Some(job_id) {
+        return None;
+    }
+    state.token.clone()
+}
+
+fn clear_content_operation(busy: &Arc<Mutex<ContentBusy>>, job_id: Uuid) {
+    let mut state = busy.lock().unwrap();
+    if state.job_id == Some(job_id) {
+        state.job_id = None;
+        state.token = None;
+    }
+}
+
+fn cancel_content_operation(busy: &Arc<Mutex<ContentBusy>>, job_id: Uuid) -> bool {
+    let token = busy
+        .lock()
+        .ok()
+        .and_then(|state| (state.job_id == Some(job_id)).then(|| state.token.clone()))
+        .flatten();
+    if let Some(token) = token {
+        token.cancel();
+        true
+    } else {
+        false
+    }
 }
 
 /// Parse the opt-in visual fixture selector. Empty/boolean values keep the
@@ -49,12 +125,48 @@ fn parse_ui_fixture(value: &str) -> Option<&'static str> {
         "settings" => Some("settings"),
         "running" => Some("running"),
         "failed" => Some("failed"),
+        "queue-scroll" => Some("queue-scroll"),
         "" | "1" | "true" | "completed" => Some("completed"),
+        "result-success" => Some("result-success"),
+        "result-limited" => Some("result-limited"),
+        "result-enhancement-failed" => Some("result-enhancement-failed"),
+        "result-regenerating" => Some("result-regenerating"),
         "confirmation" => Some("confirmation"),
         "delete-confirm" => Some("delete-confirm"),
         "clear-confirm" => Some("clear-confirm"),
         _ => None,
     }
+}
+
+fn queue_scroll_fixture_jobs() -> Vec<Job> {
+    (0..12)
+        .map(|index| {
+            let mut job = Job::new(Uuid::new_v4(), format!("BV1SCROLL{index:02}"), 1);
+            job.title = format!("长队列滚动边框验证任务 {:02}", index + 1);
+            job.status = if index % 4 == 2 {
+                JobStatus::Failed
+            } else {
+                JobStatus::Completed
+            };
+            job.stage = if job.status == JobStatus::Failed {
+                Stage::Transcribe
+            } else {
+                Stage::Completed
+            };
+            job.stage_progress = if job.status == JobStatus::Failed {
+                42
+            } else {
+                100
+            };
+            if job.status == JobStatus::Failed {
+                job.error = Some("隔离 fixture 错误边框".into());
+                job.set_stage_state(job.stage, StageState::Failed);
+            } else {
+                job.set_stage_state(job.stage, StageState::Completed);
+            }
+            job
+        })
+        .collect()
 }
 
 // Keep visual fixtures at a deterministic, visible position. Test tooling may
@@ -97,7 +209,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Some(state) => Some(state),
             None => {
                 log::warn!(
-                    "ignoring unknown BIMYSCRIBE_UI_FIXTURE={value:?}; expected empty, running, failed, completed, settings, confirmation, delete-confirm, or clear-confirm"
+                    "ignoring unknown BIMYSCRIBE_UI_FIXTURE={value:?}; expected empty, running, failed, completed, queue-scroll, settings, confirmation, delete-confirm, or clear-confirm"
                 );
                 None
             }
@@ -105,12 +217,42 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if ui_fixture.is_none() {
         crate::paths::initialize_or_migrate(&app_paths)?;
     }
-    let cfg = if ui_fixture.is_some() {
+    let mut cfg = if ui_fixture.is_some() {
         Config::for_paths(&app_paths)
     } else {
         Config::load()?
     };
-    let queue = if ui_fixture.is_some() {
+    let result_fixture = ui_fixture.is_some_and(|state| state.starts_with("result-"));
+    let fixture_root = result_fixture.then(|| {
+        std::env::temp_dir().join(format!("bimyscribe-result-fixture-{}", Uuid::new_v4()))
+    });
+    if let Some(root) = &fixture_root {
+        cfg.working_dir = root.join("jobs");
+        cfg.output_dir = root.join("output");
+        cfg.runtime_data_dir = root.join("runtime-data");
+        cfg.llm_enabled = true;
+        cfg.llm_connection = Some(crate::llm::LlmConnection {
+            id: "ui-fixture-local".into(),
+            name: "UI fixture local endpoint".into(),
+            api_format: crate::llm::ApiFormat::OpenAiChatCompletions,
+            base_url: "http://127.0.0.1:9".into(),
+            model: "ui-fixture-model".into(),
+        });
+    }
+    let queue = if result_fixture {
+        let root = fixture_root.as_ref().expect("result fixture root");
+        Queue {
+            jobs: vec![result_fixture_callback_job(
+                root,
+                &cfg,
+                ui_fixture.expect("result fixture selector"),
+            )?],
+        }
+    } else if ui_fixture == Some("queue-scroll") {
+        Queue {
+            jobs: queue_scroll_fixture_jobs(),
+        }
+    } else if ui_fixture.is_some() {
         // Visual fixtures must never recover, schedule, or persist the user's
         // production queue while screenshot tooling launches the real binary.
         Queue::default()
@@ -152,6 +294,30 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.set_transcription_confirm_language("zh".into());
             app.set_transcription_confirm_can_create(true);
             app.set_transcription_confirm_visible(true);
+        } else if matches!(
+            state,
+            "result-success"
+                | "result-limited"
+                | "result-enhancement-failed"
+                | "result-regenerating"
+        ) {
+            // Result fixtures still use the production JobDetail and
+            // ContentResults view models.  Only their deterministic input
+            // projection is synthetic; no screenshot-only component or
+            // persisted queue state is created.
+            app.set_ui_verification_fixture("completed".into());
+            let fixture_job = queue.jobs.first().expect("result fixture job");
+            app.set_result(content_results_for_job(
+                fixture_job,
+                (state == "result-regenerating").then_some(ArtifactKindV1::Chapters),
+            ));
+            if state == "result-regenerating" {
+                app.set_action_pending_kind("chapters".into());
+                app.set_action_pending(true);
+                app.set_action_feedback("正在重新生成章节…".into());
+                app.set_action_feedback_error(false);
+            }
+            app.set_result_open(true);
         } else if state == "delete-confirm" || state == "clear-confirm" {
             // History-management confirm fixtures: completed detail behind the
             // dialog so screenshots show the delete affordance and the modal.
@@ -215,6 +381,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // running job in place (behind the mutex).
     let queue = Arc::new(Mutex::new(queue));
     let (tx, rx) = mpsc::channel::<WorkMsg>();
+    let content_busy = Arc::new(Mutex::new(ContentBusy::default()));
 
     // The scheduler owns the cancellation registry and exposes the drain loop.
     let scheduler = Arc::new(Scheduler::new(queue.clone()));
@@ -223,7 +390,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let q = queue.lock().unwrap();
         for job in &q.jobs {
-            jobs_model.push(job_to_row(job, false));
+            jobs_model.push(job_to_row(job, result_fixture));
         }
         app.set_can_clear_history(q.jobs.iter().any(|job| job.status.is_terminal()));
     }
@@ -237,6 +404,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         queue: queue.clone(),
         scheduler: scheduler.clone(),
         tx: tx.clone(),
+        content_busy: content_busy.clone(),
         speaker_timer: Mutex::new(None),
         pending_transcription: RefCell::new(None),
         history_confirmation: RefCell::new(None),
@@ -247,8 +415,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let cfg2 = shared_config.clone();
         let weak2 = weak.clone();
         let sched = scheduler.clone();
+        let content_busy2 = content_busy.clone();
         let _handle: JoinHandle<()> = std::thread::spawn(move || {
-            worker_loop(rx, sched, cfg2, weak2);
+            worker_loop(rx, sched, cfg2, weak2, content_busy2);
         });
     }
 
@@ -369,8 +538,67 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
+        app.on_rebuild_job(move || {
+            c.rebuild_selected();
+        });
+    }
+    {
+        let c = controller.clone();
         app.on_open_md(move || {
             c.open_selected_md();
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        app.on_view_result(move || {
+            let _ = app_weak.upgrade_in_event_loop(|app| {
+                app.set_action_feedback("".into());
+                app.set_action_feedback_error(false);
+                app.set_result_open(true);
+            });
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        app.on_result_back(move || {
+            let _ = app_weak.upgrade_in_event_loop(|app| {
+                app.set_result_open(false);
+            });
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_result_open_raw(move || {
+            c.open_selected_raw();
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_result_repair(move || {
+            c.repair_selected_content();
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_result_regenerate(move |kind| {
+            if let Some(kind) = regenerable_kind_from_action(kind.as_str()) {
+                c.regenerate_selected(kind);
+            }
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        app.on_result_source(move |_url| {
+            let _ = app_weak.upgrade_in_event_loop(|app| {
+                app.set_action_feedback("已展开来源片段".into());
+                app.set_action_feedback_error(false);
+            });
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_result_jump(move |url| {
+            c.open_external_url(url.to_string());
         });
     }
     {
@@ -476,7 +704,253 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tx.send(WorkMsg::Run);
 
     app.run()?;
+    let _ = tx.send(WorkMsg::Shutdown);
+    if let Some(root) = fixture_root {
+        let _ = std::fs::remove_dir_all(root);
+    }
     Ok(())
+}
+
+fn regenerable_kind_from_action(action: &str) -> Option<RegenerableKind> {
+    match action {
+        "summary" => Some(RegenerableKind::DefaultSummary),
+        "highlights" => Some(RegenerableKind::Highlights),
+        "chapters" => Some(RegenerableKind::Chapters),
+        _ => None,
+    }
+}
+
+fn valid_result_source_url(url: &str) -> bool {
+    url.starts_with("https://www.bilibili.com/video/")
+}
+
+fn start_result_fixture_generation_server(selector: &str) -> Result<(u16, JoinHandle<()>), String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let selector = selector.to_string();
+    let expected_requests = if selector == "result-enhancement-failed" {
+        13
+    } else {
+        16
+    };
+    let handle = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut handled = 0;
+        while handled < expected_requests && std::time::Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let (header_end, content_length) = loop {
+                let Ok(read) = stream.read(&mut chunk) else {
+                    break (None, 0);
+                };
+                if read == 0 {
+                    break (None, 0);
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let body_start = header_end + 4;
+                while request.len() < body_start + content_length {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                break (Some(header_end), content_length);
+            };
+
+            let body = header_end
+                .and_then(|header_end| {
+                    let start = header_end + 4;
+                    (request.len() >= start + content_length)
+                        .then(|| &request[start..start + content_length])
+                })
+                .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok());
+            let prompt = body
+                .as_ref()
+                .and_then(|body| body["messages"].as_array())
+                .and_then(|messages| messages.first())
+                .and_then(|message| message["content"].as_str())
+                .unwrap_or_default();
+            let input = prompt
+                .find("input=")
+                .and_then(|offset| {
+                    prompt[offset + "input=".len()..]
+                        .find('{')
+                        .map(|start| offset + "input=".len() + start)
+                })
+                .and_then(|start| serde_json::from_str::<serde_json::Value>(&prompt[start..]).ok());
+            let kind = input
+                .as_ref()
+                .and_then(|input| input["kind"].as_str())
+                .unwrap_or_default();
+            let invalid = selector == "result-enhancement-failed" && kind == "highlights";
+            let response = if invalid {
+                serde_json::json!({"choices": []})
+            } else {
+                let utterances = input
+                    .as_ref()
+                    .and_then(|input| input["utterances"].as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let ids: Vec<String> = utterances
+                    .iter()
+                    .filter_map(|utterance| utterance["id"].as_str().map(str::to_owned))
+                    .collect();
+                let blocks = if selector == "result-limited" && kind == "default_summary" {
+                    serde_json::json!([{
+                        "id": "fixture-limited-summary",
+                        "title": null,
+                        "text": "无法精确关联的摘要",
+                        "source_refs": [],
+                        "source_status": "limited",
+                    }])
+                } else if selector == "result-limited" && kind == "chapters" && utterances.len() > 1
+                {
+                    let first = &utterances[0];
+                    serde_json::json!([
+                        {
+                            "id": "fixture-mapped-chapter",
+                            "title": "可核对章节",
+                            "text": first["text"].as_str().unwrap_or_default(),
+                            "source_refs": [{
+                                "utterance_ids": [first["id"].as_str().unwrap_or_default()],
+                                "start_ms": first["start_ms"].as_u64().unwrap_or(0),
+                                "end_ms": first["end_ms"].as_u64().unwrap_or(0),
+                            }],
+                            "source_status": "mapped",
+                        },
+                        {
+                            "id": "fixture-limited-chapter",
+                            "title": "来源受限章节",
+                            "text": "无法精确关联的章节",
+                            "source_refs": [],
+                            "source_status": "limited",
+                        }
+                    ])
+                } else {
+                    serde_json::Value::Array(
+                        utterances
+                            .iter()
+                            .enumerate()
+                            .map(|(index, utterance)| {
+                                serde_json::json!({
+                                    "id": format!("fixture-block-{index}"),
+                                    "title": (kind == "chapters")
+                                        .then(|| format!("第 {} 段", index + 1)),
+                                    // Keep each result row short and distinct;
+                                    // faithful output remains byte/lexically
+                                    // identical to its one-utterance source.
+                                    "text": utterance["text"].as_str().unwrap_or_default(),
+                                    "source_refs": [{
+                                        "utterance_ids": [utterance["id"].as_str().unwrap_or_default()],
+                                        "start_ms": utterance["start_ms"].as_u64().unwrap_or(0),
+                                        "end_ms": utterance["end_ms"].as_u64().unwrap_or(0),
+                                    }],
+                                    "source_status": "mapped",
+                                })
+                            })
+                            .collect(),
+                    )
+                };
+                let content = serde_json::json!({
+                    "processed_utterance_ids": ids,
+                    "blocks": blocks,
+                })
+                .to_string();
+                serde_json::json!({
+                    "choices": [{"message": {"content": content}}]
+                })
+            };
+            let response = response.to_string();
+            let http = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(), response
+            );
+            let _ = stream.write_all(http.as_bytes());
+            handled += 1;
+        }
+    });
+    Ok((port, handle))
+}
+
+fn result_fixture_callback_job(
+    root: &std::path::Path,
+    cfg: &Config,
+    selector: &str,
+) -> Result<Job, String> {
+    let (port, server) = start_result_fixture_generation_server(selector)?;
+    let mut fixture_cfg = cfg.clone();
+    fixture_cfg.llm_enabled = true;
+    fixture_cfg.llm_connection = Some(crate::llm::LlmConnection {
+        id: "ui-fixture-local".into(),
+        name: "UI fixture local endpoint".into(),
+        api_format: crate::llm::ApiFormat::OpenAiChatCompletions,
+        base_url: format!("http://127.0.0.1:{port}"),
+        model: "ui-fixture-model".into(),
+    });
+    let work_dir = root.join("jobs").join("result-fixture");
+    std::fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
+    let utterances = (0..64)
+        .map(|index| crate::funasr::Utterance {
+            id: format!("u{index:04}"),
+            text: format!("这是隔离结果 fixture 的第 {index} 个原始片段。"),
+            start_ms: index as u64 * 1_000,
+            end_ms: index as u64 * 1_000 + 900,
+            speaker_id: (index % 2) as u32,
+        })
+        .collect::<Vec<_>>();
+    let raw = serde_json::to_vec_pretty(&utterances).map_err(|error| error.to_string())?;
+    jobs::atomic_write(&work_dir.join("transcript.raw.json"), &raw)
+        .map_err(|error| error.to_string())?;
+
+    let mut job = Job::new(Uuid::new_v4(), "BV1UIFIX".into(), 2);
+    job.title = "消费结果生产回调 fixture".into();
+    job.part_title = Some("第二部分".into());
+    job.cid = Some(2_024_082_400);
+    job.duration_ms = Some(64_000);
+    job.work_dir = Some(work_dir);
+    job.status = JobStatus::Completed;
+    job.stage = Stage::Completed;
+    job.stage_progress = 100;
+    for stage in jobs::pipeline_stages() {
+        job.set_stage_state(stage, StageState::Completed);
+    }
+    job.content_setup = Some(fixture_cfg.content_setup());
+    let result = crate::content_results::execute(
+        &job,
+        Intent::Initial,
+        &crate::cancel::CancellationToken::new(),
+    )
+    .map_err(|error| error.to_string());
+    let _ = server.join();
+    result?;
+    Ok(job)
 }
 
 fn choose_directory() -> Option<std::path::PathBuf> {
@@ -511,9 +985,10 @@ fn worker_loop(
     scheduler: Arc<Scheduler>,
     config: Arc<Mutex<Config>>,
     app: Weak<App>,
+    content_busy: Arc<Mutex<ContentBusy>>,
 ) {
     while let Ok(msg) = rx.recv() {
-        if !handle_work_message(msg, &scheduler, &config, &app) {
+        if !handle_work_message(msg, &scheduler, &config, &app, &content_busy) {
             break;
         }
         // Every handled message may have moved a job into (or out of) a
@@ -528,6 +1003,7 @@ fn handle_work_message(
     scheduler: &Arc<Scheduler>,
     config: &Arc<Mutex<Config>>,
     app: &Weak<App>,
+    content_busy: &Arc<Mutex<ContentBusy>>,
 ) -> bool {
     match msg {
         WorkMsg::Run => {
@@ -544,47 +1020,24 @@ fn handle_work_message(
                 }
             }
         }
-        WorkMsg::Cancel(job_id) => {
-            // The token was already set by the Controller (UI thread,
-            // immediate). Here we persist the Cancelling state and let
-            // the drain loop handle the aftermath.
-            let mut cancelled = false;
-            let mut persistence_error = None;
-            let mut q = scheduler.queue.lock().unwrap();
-            if let Some(job) = q.get_mut(job_id) {
-                if job.status == JobStatus::Running {
-                    job.status = JobStatus::Cancelling;
-                    cancelled = true;
-                    if let Err(error) = jobs::save_job_state(job) {
-                        log::warn!("failed to persist cancelling state: {error}");
-                        persistence_error = Some(error.to_string());
-                    }
-                }
-            }
-            if let Err(error) = q.save() {
-                log::warn!("failed to persist cancellation: {error}");
-                persistence_error = Some(error.to_string());
-            }
-            let feedback_error = persistence_error.is_some();
-            let message = if let Some(error) = persistence_error {
-                format!("取消请求已发出，但状态保存失败：{error}")
-            } else if cancelled {
-                "已发出取消请求".to_string()
-            } else {
-                "取消请求已确认".to_string()
-            };
-            let app = app.clone();
-            let _ = app.upgrade_in_event_loop(move |app| {
-                app.set_action_pending(false);
-                app.set_action_feedback(message.into());
-                app.set_action_feedback_error(feedback_error);
-            });
-        }
         WorkMsg::Retry(job_id) => {
             let mut requeued = false;
             let mut persistence_error = None;
             {
                 let mut q = scheduler.queue.lock().unwrap();
+                let retry_allowed = q
+                    .get(job_id)
+                    .map(|job| crate::jobs::JobCapabilities::from_job(job).can_retry)
+                    .unwrap_or(false);
+                if !retry_allowed {
+                    let app = app.clone();
+                    let _ = app.upgrade_in_event_loop(move |app| {
+                        app.set_action_pending(false);
+                        app.set_action_feedback("重试不可用：请使用修复文字结果".into());
+                        app.set_action_feedback_error(true);
+                    });
+                    return true;
+                }
                 if let Some(job) = q.get_mut(job_id) {
                     // Reset the failed stage to Pending and re-queue.
                     job.status = JobStatus::Queued;
@@ -641,6 +1094,16 @@ fn handle_work_message(
                 );
                 app.set_action_feedback_error(false);
             });
+        }
+        WorkMsg::Regenerate {
+            job_id,
+            kind,
+            target,
+        } => {
+            handle_regenerate_content(job_id, kind, target, scheduler, config, app, content_busy);
+        }
+        WorkMsg::RepairContent(job_id) => {
+            handle_repair_content(job_id, scheduler, config, app, content_busy);
         }
         WorkMsg::DeleteJob(job_id) => {
             let (feedback, feedback_error) = {
@@ -739,16 +1202,322 @@ fn handle_work_message(
         WorkMsg::SpeakerChanged(job_id) => {
             // Changing speaker names regenerates documents without
             // transcribing the audio again.
-            let mut q = scheduler.queue.lock().unwrap();
-            if let Some(job) = q.get_mut(job_id) {
-                rebuild_speaker_documents(job);
-                let _ = jobs::save_job_state(job);
+            let cfg = config.lock().unwrap().clone();
+            let is_v05 = scheduler
+                .queue
+                .lock()
+                .ok()
+                .and_then(|q| q.get(job_id).map(|job| job.content_setup.is_some()))
+                .unwrap_or(false);
+            let _content_guard = if is_v05 {
+                if !reserve_content_operation(content_busy, job_id) {
+                    log::info!("skip v0.5 speaker rebuild while content operation is busy");
+                    let app = app.clone();
+                    let _ = app.upgrade_in_event_loop(move |app| {
+                        app.set_speaker_feedback(
+                            "说话人名称已保存；文字结果正在处理，再次打开 Markdown 时会更新文档"
+                                .into(),
+                        );
+                        app.set_speaker_feedback_error(true);
+                    });
+                    return true;
+                }
+                Some(ContentBusyGuard {
+                    busy: content_busy.clone(),
+                    job_id,
+                })
+            } else {
+                None
+            };
+            let feedback = {
+                let mut q = scheduler.queue.lock().unwrap();
+                let feedback = q.get_mut(job_id).and_then(|job| {
+                    let result = rebuild_speaker_documents(job, &cfg);
+                    let feedback = is_v05.then(|| speaker_rebuild_feedback(&result));
+                    if let Err(error) = &result {
+                        log::warn!("speaker Presentation rebuild failed: {error}");
+                    }
+                    let _ = jobs::save_job_state(job);
+                    feedback
+                });
+                let _ = q.save();
+                feedback
+            };
+            if let Some((message, error)) = feedback {
+                refresh_selected_result(app, &scheduler.queue, job_id);
+                let app = app.clone();
+                let _ = app.upgrade_in_event_loop(move |app| {
+                    app.set_speaker_feedback(message.into());
+                    app.set_speaker_feedback_error(error);
+                });
             }
-            let _ = q.save();
         }
         WorkMsg::Shutdown => return false,
     }
     true
+}
+
+fn speaker_rebuild_feedback(result: &Result<(), String>) -> (String, bool) {
+    match result {
+        Ok(()) => ("已保存，文档已更新".into(), false),
+        Err(error) => (
+            format!("说话人名称已保存，但文档更新失败：{error}；再次打开 Markdown 时会重试"),
+            true,
+        ),
+    }
+}
+
+fn content_feedback(app: &Weak<App>, message: String, error: bool) {
+    let _ = app.upgrade_in_event_loop(move |app| {
+        app.set_action_pending(false);
+        app.set_action_pending_kind("".into());
+        app.set_action_feedback(message.into());
+        app.set_action_feedback_error(error);
+    });
+}
+
+fn apply_presentation_locator(job: &mut Job, output_dir: std::path::PathBuf) {
+    // Presentation success may update only the locator. Job terminal state,
+    // stage/error/timestamps and structured current remain untouched.
+    job.final_output_dir = Some(output_dir);
+}
+
+fn presentation_operation(
+    mut job: Job,
+    snapshot: &crate::content_results::ContentSnapshotV1,
+    config: &Arc<Mutex<Config>>,
+    success_message: String,
+    success_is_error: bool,
+) -> (String, bool, Option<std::path::PathBuf>) {
+    let cfg = config.lock().unwrap().clone();
+    let output_dir = match crate::pipeline::ensure_final_output_dir(&mut job, &cfg) {
+        Ok(output_dir) => output_dir,
+        Err(error) => {
+            return (format!("内容已提交，但文档写入失败：{error}"), true, None);
+        }
+    };
+    match crate::document::rebuild_presentation(&job, snapshot) {
+        Ok(()) => (success_message, success_is_error, Some(output_dir)),
+        Err(error) => (
+            format!("{success_message}；文档写入失败，可重新打开重试：{error}"),
+            true,
+            Some(output_dir),
+        ),
+    }
+}
+
+fn regeneration_feedback(slot: &crate::content_results::ArtifactSlotV1) -> (String, bool) {
+    match (slot.current.is_some(), &slot.last_failure) {
+        (true, None) => ("文字结果已更新".into(), false),
+        (true, Some(failure)) => (
+            format!("重生成失败：{}；已保留上一版结果", failure.message),
+            true,
+        ),
+        (false, Some(failure)) => (
+            format!("重生成失败：{}；当前没有可用结果", failure.message),
+            true,
+        ),
+        (false, None) => ("重生成结果状态无效，请重试".into(), true),
+    }
+}
+
+fn persist_job_cancellation(
+    scheduler: &Scheduler,
+    job_id: Uuid,
+) -> Result<crate::jobs::CancellationTransition, String> {
+    persist_job_cancellation_with(
+        scheduler,
+        job_id,
+        |job| jobs::save_job_state(job).map_err(|error| error.to_string()),
+        |queue| queue.save().map_err(|error| error.to_string()),
+    )
+}
+
+fn persist_job_cancellation_with<SaveJob, SaveQueue>(
+    scheduler: &Scheduler,
+    job_id: Uuid,
+    save_job: SaveJob,
+    save_queue: SaveQueue,
+) -> Result<crate::jobs::CancellationTransition, String>
+where
+    SaveJob: Fn(&Job) -> Result<(), String>,
+    SaveQueue: Fn(&Queue) -> Result<(), String>,
+{
+    let mut queue = scheduler
+        .queue
+        .lock()
+        .map_err(|_| "任务队列锁已损坏".to_string())?;
+    let original = queue
+        .get(job_id)
+        .cloned()
+        .ok_or_else(|| "任务不存在".to_string())?;
+    let transition = queue
+        .get_mut(job_id)
+        .expect("cloned Job remains in locked queue")
+        .request_cancellation(chrono::Utc::now());
+    if !matches!(
+        transition,
+        crate::jobs::CancellationTransition::Cooperative
+            | crate::jobs::CancellationTransition::Immediate
+    ) {
+        return Ok(transition);
+    }
+
+    if let Err(error) = save_job(queue.get(job_id).expect("cancelled Job remains in queue")) {
+        *queue
+            .get_mut(job_id)
+            .expect("cancelled Job remains in queue") = original;
+        return Err(error);
+    }
+    if let Err(error) = save_queue(&queue) {
+        *queue
+            .get_mut(job_id)
+            .expect("cancelled Job remains in queue") = original.clone();
+        if let Err(rollback_error) = save_job(&original) {
+            return Err(format!("{error}；回滚任务状态失败：{rollback_error}"));
+        }
+        return Err(error);
+    }
+    Ok(transition)
+}
+
+fn run_regenerate_content_operation(
+    job: &Job,
+    kind: RegenerableKind,
+    target: ReadyGenerationTargetV1,
+    config: &Arc<Mutex<Config>>,
+    token: &crate::cancel::CancellationToken,
+) -> (String, bool, Option<std::path::PathBuf>) {
+    match crate::content_results::execute(job, Intent::Regenerate { kind, target }, token) {
+        Err(crate::content_results::ContentError::Cancelled) => {
+            ("已取消文字结果重生成".into(), true, None)
+        }
+        Err(error) => (format!("重生成失败：{error}"), true, None),
+        Ok(snapshot) => {
+            let (feedback, is_error) =
+                regeneration_feedback(snapshot.current.slots.get(kind.artifact_kind()));
+            presentation_operation(job.clone(), &snapshot, config, feedback, is_error)
+        }
+    }
+}
+
+fn run_repair_content_operation(
+    job: &Job,
+    config: &Arc<Mutex<Config>>,
+    token: &crate::cancel::CancellationToken,
+) -> (String, bool, Option<std::path::PathBuf>) {
+    match crate::content_results::execute(job, Intent::Initial, token) {
+        Err(crate::content_results::ContentError::Cancelled) => {
+            ("已取消文字结果修复".into(), true, None)
+        }
+        Err(error) => (format!("修复失败：{error}"), true, None),
+        Ok(snapshot) => presentation_operation(
+            job.clone(),
+            &snapshot,
+            config,
+            "文字结果已修复".into(),
+            false,
+        ),
+    }
+}
+
+fn handle_regenerate_content(
+    job_id: Uuid,
+    kind: RegenerableKind,
+    target: ReadyGenerationTargetV1,
+    scheduler: &Arc<Scheduler>,
+    config: &Arc<Mutex<Config>>,
+    app: &Weak<App>,
+    content_busy: &Arc<Mutex<ContentBusy>>,
+) {
+    let Some(token) = start_content_operation(content_busy, job_id) else {
+        content_feedback(app, "文字结果正在处理中，请稍候".into(), true);
+        return;
+    };
+    let Some(job) = scheduler
+        .queue
+        .lock()
+        .ok()
+        .and_then(|q| q.get(job_id).cloned())
+    else {
+        clear_content_operation(content_busy, job_id);
+        content_feedback(app, "重生成失败：任务不存在".into(), true);
+        return;
+    };
+    if job.content_setup.is_none() || !job.status.is_terminal() {
+        clear_content_operation(content_busy, job_id);
+        content_feedback(app, "重生成失败：只允许终态 v0.5 任务".into(), true);
+        return;
+    }
+
+    let (message, is_error, final_output_dir) =
+        run_regenerate_content_operation(&job, kind, target, config, &token);
+
+    if final_output_dir.is_some() {
+        let mut queue = scheduler.queue.lock().unwrap();
+        if let Some(stored) = queue.get_mut(job_id) {
+            if let Some(output_dir) = final_output_dir {
+                apply_presentation_locator(stored, output_dir);
+            }
+            let _ = crate::jobs::save_job_state(stored);
+        }
+        let _ = queue.save();
+    }
+    refresh_selected_result(app, &scheduler.queue, job_id);
+    clear_content_operation(content_busy, job_id);
+    content_feedback(app, message, is_error);
+}
+
+fn handle_repair_content(
+    job_id: Uuid,
+    scheduler: &Arc<Scheduler>,
+    config: &Arc<Mutex<Config>>,
+    app: &Weak<App>,
+    content_busy: &Arc<Mutex<ContentBusy>>,
+) {
+    let Some(token) = start_content_operation(content_busy, job_id) else {
+        content_feedback(app, "文字结果正在处理中，请稍候".into(), true);
+        return;
+    };
+    let Some(job) = scheduler
+        .queue
+        .lock()
+        .ok()
+        .and_then(|q| q.get(job_id).cloned())
+    else {
+        clear_content_operation(content_busy, job_id);
+        content_feedback(app, "修复失败：任务不存在".into(), true);
+        return;
+    };
+    let raw_only = matches!(
+        crate::content_results::current(&job),
+        Ok(ContentViewV1::RawOnly { .. })
+    );
+    if job.content_setup.is_none() || !job.status.is_terminal() || !raw_only {
+        clear_content_operation(content_busy, job_id);
+        content_feedback(
+            app,
+            "修复失败：当前任务没有可修复的原始 Evidence".into(),
+            true,
+        );
+        return;
+    }
+
+    let (message, is_error, final_output_dir) = run_repair_content_operation(&job, config, &token);
+
+    if final_output_dir.is_some() {
+        let mut queue = scheduler.queue.lock().unwrap();
+        if let Some(stored) = queue.get_mut(job_id) {
+            if let Some(output_dir) = final_output_dir {
+                apply_presentation_locator(stored, output_dir);
+            }
+            let _ = crate::jobs::save_job_state(stored);
+        }
+        let _ = queue.save();
+    }
+    refresh_selected_result(app, &scheduler.queue, job_id);
+    clear_content_operation(content_busy, job_id);
+    content_feedback(app, message, is_error);
 }
 
 /// Keep the queue-header clear-history availability in sync with the queue.
@@ -816,19 +1585,34 @@ fn apply_queue_rows(
 /// Rebuild all markdown documents after a speaker name change.
 /// Does NOT re-transcribe or call the LLM. Uses the stored `final_output_dir`
 /// if available; otherwise infers from the current config (best-effort).
-fn rebuild_speaker_documents(job: &mut Job) {
+fn rebuild_speaker_documents(job: &mut Job, cfg: &Config) -> Result<(), String> {
     use crate::document;
 
     let Some(dir) = job.work_dir.clone() else {
-        return;
+        return Err("任务没有工作目录".into());
     };
+    if job.content_setup.is_some() {
+        if !job.status.is_terminal() {
+            return Err("v0.5 任务尚未进入终态".into());
+        }
+        let snapshot = match crate::content_results::current(job)
+            .map_err(|error| error.to_string())?
+        {
+            ContentViewV1::Current(snapshot) => snapshot,
+            ContentViewV1::RawOnly { .. } => return Err("当前没有可重建的可信文字结果".into()),
+            ContentViewV1::Legacy => return Err("v0.5 Job unexpectedly resolved as legacy".into()),
+        };
+        crate::pipeline::ensure_final_output_dir(job, cfg).map_err(|error| error.to_string())?;
+        document::rebuild_presentation(job, &snapshot).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
     let raw_json = dir.join("transcript.raw.json");
     if !raw_json.exists() {
-        return;
+        return Err("原始转写尚未生成".into());
     }
     let utts = match pipeline::load_utterances(&raw_json) {
         Ok(u) => u,
-        Err(_) => return,
+        Err(error) => return Err(error.to_string()),
     };
 
     // 1. Rebuild transcript.raw.md from original utterances + new speaker_map.
@@ -857,6 +1641,570 @@ fn rebuild_speaker_documents(job: &mut Job) {
             let _ = jobs::atomic_write(&out_dir.join("full.md"), md.as_bytes());
         }
     }
+    Ok(())
+}
+
+fn empty_content_results() -> ContentResultsData {
+    ContentResultsData {
+        entry_visible: false,
+        mode: "unavailable".into(),
+        title: "".into(),
+        job_id: "".into(),
+        bvid: "".into(),
+        page: 1,
+        video_duration: "—".into(),
+        status_label: "".into(),
+        notice: "".into(),
+        notice_error: false,
+        source_url: "".into(),
+        default_tab: 3,
+        show_summary: false,
+        show_chapters: false,
+        show_faithful: false,
+        show_raw: false,
+        can_repair: false,
+        repair_pending: false,
+        repair_label: "修复文字结果".into(),
+        summary_rows: content_row_model(Vec::new()),
+        chapters_rows: content_row_model(Vec::new()),
+        faithful_rows: content_row_model(Vec::new()),
+        raw_rows: content_row_model(Vec::new()),
+    }
+}
+
+fn content_row_model(rows: Vec<ContentRow>) -> ModelRc<ContentRow> {
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+#[allow(clippy::too_many_arguments)] // Single UI projection constructor; Slint row fields remain explicit.
+fn content_row(
+    id: impl Into<String>,
+    kind: &str,
+    title: impl Into<String>,
+    text: impl Into<String>,
+    declaration: impl Into<String>,
+    status_label: impl Into<String>,
+    status_kind: &str,
+    source_text: impl Into<String>,
+    source_speaker: impl Into<String>,
+    source_range: impl Into<String>,
+    source_url: impl Into<String>,
+    can_source: bool,
+    can_jump: bool,
+    action_kind: &str,
+    action_label: impl Into<String>,
+    action_pending: bool,
+) -> ContentRow {
+    ContentRow {
+        id: id.into().into(),
+        kind: kind.into(),
+        title: title.into().into(),
+        text: text.into().into(),
+        declaration: declaration.into().into(),
+        status_label: status_label.into().into(),
+        status_kind: status_kind.into(),
+        source_text: source_text.into().into(),
+        source_speaker: source_speaker.into().into(),
+        source_range: source_range.into().into(),
+        source_url: source_url.into().into(),
+        can_source,
+        can_jump,
+        action_kind: action_kind.into(),
+        action_label: action_label.into().into(),
+        action_pending,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Section rows deliberately share the flat ContentRow model.
+fn section_row(
+    id: impl Into<String>,
+    title: impl Into<String>,
+    declaration: impl Into<String>,
+    status_label: impl Into<String>,
+    status_kind: &str,
+    text: impl Into<String>,
+    action_kind: &str,
+    action_label: impl Into<String>,
+    action_pending: bool,
+) -> ContentRow {
+    content_row(
+        id,
+        "section",
+        title,
+        text,
+        declaration,
+        status_label,
+        status_kind,
+        "",
+        "",
+        "",
+        "",
+        false,
+        false,
+        action_kind,
+        action_label,
+        action_pending,
+    )
+}
+
+fn result_timestamp(milliseconds: u64) -> String {
+    fmt_elapsed(milliseconds / 1000)
+}
+
+fn block_source_details(
+    job: &Job,
+    snapshot: &crate::content_results::ContentSnapshotV1,
+    block: &ContentBlockV1,
+) -> (String, String, String, String, bool, bool) {
+    if block.source_status != SourceStatusV1::Mapped {
+        return (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            false,
+            false,
+        );
+    }
+    let by_id = snapshot
+        .evidence
+        .utterances
+        .iter()
+        .map(|utterance| (utterance.id.as_str(), utterance))
+        .collect::<HashMap<_, _>>();
+    let mut seen = std::collections::HashSet::new();
+    let mut utterances = Vec::new();
+    for source_ref in &block.source_refs {
+        for id in &source_ref.utterance_ids {
+            if seen.insert(id.as_str()) {
+                if let Some(utterance) = by_id.get(id.as_str()) {
+                    utterances.push(*utterance);
+                }
+            }
+        }
+    }
+    if utterances.is_empty() {
+        return (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            false,
+            false,
+        );
+    }
+    let source_text = utterances
+        .iter()
+        .map(|utterance| utterance.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let speakers = utterances
+        .iter()
+        .map(|utterance| job.speaker_name(utterance.speaker_id))
+        .collect::<Vec<_>>();
+    let mut speakers = speakers;
+    speakers.dedup();
+    let Some(span) = crate::bilibili::source_span(
+        utterances
+            .iter()
+            .map(|utterance| (utterance.start_ms, utterance.end_ms)),
+    ) else {
+        return (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            false,
+            false,
+        );
+    };
+    let range = format!(
+        "{}–{}",
+        result_timestamp(span.start_ms),
+        result_timestamp(span.end_ms)
+    );
+    let url = crate::bilibili::video_url(&job.bvid, job.page, Some(span.start_ms));
+    (source_text, speakers.join("、"), range, url, true, true)
+}
+
+fn record_rows(
+    job: &Job,
+    snapshot: &crate::content_results::ContentSnapshotV1,
+    record: &crate::content_results::DerivationRecordV1,
+    id_prefix: &str,
+) -> Vec<ContentRow> {
+    record
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let (source_text, source_speaker, source_range, source_url, can_source, can_jump) =
+                block_source_details(job, snapshot, block);
+            let (status_label, status_kind) = match block.source_status {
+                SourceStatusV1::Mapped if can_source => ("可核对", "mapped"),
+                SourceStatusV1::Mapped => ("来源受限", "limited"),
+                SourceStatusV1::Limited => ("来源受限", "limited"),
+            };
+            content_row(
+                format!("{id_prefix}-{}-{index}", block.id),
+                "block",
+                block
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("条目 {}", index + 1)),
+                block.text.trim(),
+                "",
+                status_label,
+                status_kind,
+                source_text,
+                source_speaker,
+                source_range,
+                source_url,
+                can_source,
+                can_jump,
+                "",
+                "",
+                false,
+            )
+        })
+        .collect()
+}
+
+fn raw_rows(
+    job: &Job,
+    utterances: &[crate::funasr::Utterance],
+    id_prefix: &str,
+) -> Vec<ContentRow> {
+    utterances
+        .iter()
+        .enumerate()
+        .map(|(index, utterance)| {
+            content_row(
+                format!("{id_prefix}-{}-{index}", utterance.id),
+                "raw",
+                format!(
+                    "{} · {}",
+                    job.speaker_name(utterance.speaker_id),
+                    result_timestamp(utterance.start_ms)
+                ),
+                utterance.text.trim(),
+                "",
+                "可核对",
+                "mapped",
+                utterance.text.trim(),
+                job.speaker_name(utterance.speaker_id),
+                format!(
+                    "{}–{}",
+                    result_timestamp(utterance.start_ms),
+                    result_timestamp(utterance.end_ms)
+                ),
+                crate::bilibili::video_url(&job.bvid, job.page, Some(utterance.start_ms)),
+                true,
+                true,
+                "",
+                "",
+                false,
+            )
+        })
+        .collect()
+}
+
+fn artifact_declaration(
+    kind: ArtifactKindV1,
+    record: Option<&crate::content_results::DerivationRecordV1>,
+) -> &'static str {
+    if kind == ArtifactKindV1::FaithfulText {
+        return match record {
+            None => "忠实整理 · 保留原始稿与核对入口",
+            Some(record) => match record.provenance.effective_path {
+                EffectivePathV1::Rules => "规则整理 · 未使用 AI",
+                EffectivePathV1::RulesFallback => match record
+                    .provenance
+                    .fallback_reason
+                    .as_ref()
+                    .map(|reason| reason.code)
+                {
+                    Some(FallbackReasonCodeV1::TargetUnavailable) => {
+                        "已使用规则整理 · AI 配置不可用"
+                    }
+                    _ => "AI 校正未完成 · 已使用规则整理",
+                },
+                EffectivePathV1::Llm => "忠实整理 · 保留原始稿与核对入口",
+            },
+        };
+    }
+    match kind {
+        ArtifactKindV1::DefaultSummary | ArtifactKindV1::Highlights => {
+            "AI 生成内容 · 请结合来源核对"
+        }
+        ArtifactKindV1::Chapters => "结构化整理",
+        ArtifactKindV1::FaithfulText => unreachable!(),
+    }
+}
+
+fn action_label(
+    kind: ArtifactKindV1,
+    failure: Option<&crate::content_results::DerivationFailureV1>,
+) -> String {
+    let label = match kind {
+        ArtifactKindV1::DefaultSummary => "摘要",
+        ArtifactKindV1::Highlights => "重点",
+        ArtifactKindV1::Chapters => "章节",
+        ArtifactKindV1::FaithfulText => "忠实正文",
+    };
+    if failure.is_some_and(|failure| {
+        failure.code == crate::content_results::FailureCodeV1::TargetUnavailable
+    }) {
+        format!("使用当前 AI 设置重新生成{label}")
+    } else {
+        format!("重新生成{label}")
+    }
+}
+
+fn slot_rows(
+    job: &Job,
+    snapshot: &crate::content_results::ContentSnapshotV1,
+    kind: ArtifactKindV1,
+    title: &str,
+    action_kind: &str,
+    pending_kind: Option<ArtifactKindV1>,
+) -> Vec<ContentRow> {
+    let slot = snapshot.current.slots.get(kind);
+    let record = slot.current.as_ref();
+    let failure = slot.last_failure.as_ref();
+    let (status_label, status_kind, text) = match (record, failure) {
+        (Some(_), Some(failure)) => (
+            "最近失败",
+            "failure",
+            format!("增强未完成；原始稿和忠实正文仍可用。{}", failure.message),
+        ),
+        (Some(record), None) => {
+            let limited = record.validation.record_source_status == SourceStatusV1::Limited
+                || record
+                    .blocks
+                    .iter()
+                    .any(|block| block.source_status == SourceStatusV1::Limited);
+            if limited {
+                ("来源受限", "limited", String::new())
+            } else {
+                ("可用", "mapped", String::new())
+            }
+        }
+        (None, Some(failure)) => (
+            "生成失败",
+            "failure",
+            format!("增强未完成；原始稿和忠实正文仍可用。{}", failure.message),
+        ),
+        (None, None) => (
+            "未生成",
+            "failure",
+            "当前未生成；请使用当前 AI 设置重新生成。".into(),
+        ),
+    };
+    let mut rows = vec![section_row(
+        format!("section-{action_kind}"),
+        title,
+        artifact_declaration(kind, record),
+        status_label,
+        status_kind,
+        text,
+        if kind == ArtifactKindV1::FaithfulText {
+            ""
+        } else {
+            action_kind
+        },
+        if kind == ArtifactKindV1::FaithfulText {
+            String::new()
+        } else {
+            action_label(kind, failure)
+        },
+        pending_kind == Some(kind),
+    )];
+    if let Some(record) = record {
+        rows.extend(record_rows(job, snapshot, record, action_kind));
+    }
+    rows
+}
+
+fn raw_slot_rows(job: &Job, utterances: &[crate::funasr::Utterance]) -> Vec<ContentRow> {
+    let mut rows = vec![section_row(
+        "section-raw",
+        "原始稿",
+        "原始稿 · 未经 LLM 改写",
+        "可用",
+        "mapped",
+        "",
+        "open-raw",
+        "打开原始稿",
+        false,
+    )];
+    rows.extend(raw_rows(job, utterances, "raw"));
+    rows
+}
+
+fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> ContentResultsData {
+    let Some(_setup) = job.content_setup.as_ref() else {
+        return empty_content_results();
+    };
+    if !job.status.is_terminal() {
+        return empty_content_results();
+    }
+    let source_url = crate::bilibili::video_url(&job.bvid, job.page, None);
+    let video_duration = job
+        .duration_ms
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(|milliseconds| fmt_elapsed(milliseconds / 1000))
+        .unwrap_or_else(|| "—".to_string());
+    match crate::content_results::current(job) {
+        Ok(ContentViewV1::Current(snapshot)) => {
+            let enhancements_requested = snapshot.current.setup.enhancements_requested;
+            let faithful = slot_rows(
+                job,
+                &snapshot,
+                ArtifactKindV1::FaithfulText,
+                "忠实正文",
+                "",
+                pending_kind,
+            );
+            let summary = if enhancements_requested {
+                let mut rows = slot_rows(
+                    job,
+                    &snapshot,
+                    ArtifactKindV1::DefaultSummary,
+                    "默认摘要",
+                    "summary",
+                    pending_kind,
+                );
+                rows.extend(slot_rows(
+                    job,
+                    &snapshot,
+                    ArtifactKindV1::Highlights,
+                    "重点",
+                    "highlights",
+                    pending_kind,
+                ));
+                rows
+            } else {
+                Vec::new()
+            };
+            let chapters = if enhancements_requested {
+                slot_rows(
+                    job,
+                    &snapshot,
+                    ArtifactKindV1::Chapters,
+                    "章节",
+                    "chapters",
+                    pending_kind,
+                )
+            } else {
+                Vec::new()
+            };
+            let faithful_has_current = snapshot
+                .current
+                .slots
+                .get(ArtifactKindV1::FaithfulText)
+                .current
+                .is_some();
+            let enhancement_failed = [
+                ArtifactKindV1::DefaultSummary,
+                ArtifactKindV1::Highlights,
+                ArtifactKindV1::Chapters,
+            ]
+            .into_iter()
+            .any(|kind| snapshot.current.slots.get(kind).last_failure.is_some());
+            ContentResultsData {
+                entry_visible: true,
+                mode: "current".into(),
+                title: job.title.clone().into(),
+                job_id: job.id.to_string().into(),
+                bvid: job.bvid.clone().into(),
+                page: job.page as i32,
+                video_duration: video_duration.clone().into(),
+                status_label: job.status.label().into(),
+                notice: if enhancement_failed {
+                    "增强未完成；原始稿和忠实正文仍可用。".into()
+                } else {
+                    "".into()
+                },
+                notice_error: false,
+                source_url: source_url.into(),
+                default_tab: if enhancements_requested
+                    && snapshot
+                        .current
+                        .slots
+                        .get(ArtifactKindV1::DefaultSummary)
+                        .current
+                        .is_some()
+                {
+                    0
+                } else if faithful_has_current {
+                    2
+                } else {
+                    3
+                },
+                show_summary: enhancements_requested,
+                show_chapters: enhancements_requested,
+                show_faithful: faithful_has_current,
+                show_raw: true,
+                can_repair: false,
+                repair_pending: false,
+                repair_label: "修复文字结果".into(),
+                summary_rows: content_row_model(summary),
+                chapters_rows: content_row_model(chapters),
+                faithful_rows: content_row_model(faithful),
+                raw_rows: content_row_model(raw_slot_rows(job, &snapshot.evidence.utterances)),
+            }
+        }
+        Ok(ContentViewV1::RawOnly {
+            evidence,
+            current_issue,
+        }) => ContentResultsData {
+            entry_visible: true,
+            mode: "raw-only".into(),
+            title: job.title.clone().into(),
+            job_id: job.id.to_string().into(),
+            bvid: job.bvid.clone().into(),
+            page: job.page as i32,
+            video_duration: video_duration.into(),
+            status_label: job.status.label().into(),
+            notice: format!(
+                "可信文字结果{}；原始 Evidence 仍可用。",
+                match current_issue {
+                    crate::content_results::CurrentIssueV1::NotGenerated => "尚未生成",
+                    crate::content_results::CurrentIssueV1::Corrupt => "已损坏",
+                }
+            )
+            .into(),
+            notice_error: true,
+            source_url: source_url.into(),
+            default_tab: 3,
+            show_summary: false,
+            show_chapters: false,
+            show_faithful: false,
+            show_raw: true,
+            can_repair: true,
+            repair_pending: false,
+            repair_label: "修复文字结果".into(),
+            summary_rows: content_row_model(Vec::new()),
+            chapters_rows: content_row_model(Vec::new()),
+            faithful_rows: content_row_model(Vec::new()),
+            raw_rows: content_row_model(raw_slot_rows(job, &evidence.utterances)),
+        },
+        Ok(ContentViewV1::Legacy) | Err(_) => empty_content_results(),
+    }
+}
+
+#[cfg(test)]
+fn fixture_content_results(selector: &str) -> ContentResultsData {
+    let id = Uuid::new_v4();
+    let root = std::env::temp_dir().join(format!("bimyscribe-result-fixture-{id}"));
+    let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
+    let job = result_fixture_callback_job(&root, &cfg, selector).expect("result fixture job");
+    let pending_kind = (selector == "result-regenerating").then_some(ArtifactKindV1::Chapters);
+    let result = content_results_for_job(&job, pending_kind);
+    std::fs::remove_dir_all(root).ok();
+    result
 }
 
 /// Find the currently-failed stage, if any.
@@ -878,6 +2226,9 @@ fn show_job_detail(app: &App, job: &Job) {
     let now = chrono::Utc::now();
     let snap = jobs::JobViewSnapshot::from_job(job, now);
     let (elapsed_secs, elapsed_label) = fmt_job_elapsed(job, now);
+    let content_result = content_results_for_job(job, None);
+    let content_entry_visible = content_result.entry_visible;
+    app.set_result(content_result);
 
     // Stages view: from the snapshot's StageSnapshot list (reads persisted
     // StageState rather than inferring it from sequence position.
@@ -949,10 +2300,18 @@ fn show_job_detail(app: &App, job: &Job) {
             .warning
             .as_ref()
             .map(|w| w.label())
+            .or_else(|| {
+                (job.content_setup.is_some()
+                    && job.status.is_terminal()
+                    && !content_entry_visible
+                    && crate::content_results::current(job).is_err())
+                .then_some("原始稿不可用，请重新创建任务。".to_string())
+            })
             .unwrap_or_default()
             .into(),
         can_cancel: caps.can_cancel,
         can_retry: caps.can_retry,
+        can_rebuild: caps.can_rebuild,
         can_open: caps.can_open_document,
         can_reveal: caps.can_reveal,
         can_delete: caps.can_delete,
@@ -977,6 +2336,7 @@ fn show_job_detail(app: &App, job: &Job) {
         requested_language: snap.requested_language.clone().into(),
         reported_language: snap.reported_language.clone().into(),
         reported_model: snap.reported_model.clone().into(),
+        can_view_result: content_entry_visible,
     });
     if document_words == "统计中…" {
         refresh_document_words_async(app.as_weak(), job.clone());
@@ -1000,6 +2360,9 @@ fn clear_job_detail(app: &App) {
         model.set_vec(Vec::new());
     }
     app.set_detail(empty_detail());
+    app.set_result(empty_content_results());
+    app.set_action_pending_kind("".into());
+    app.set_result_open(false);
 }
 
 /// Refresh file-backed task-information metrics after a worker run completes.
@@ -1050,8 +2413,35 @@ fn refresh_selected_detail(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: U
         detail.media_size = fmt_media_size(&job).into();
         detail.document_words = document_words.into();
         app.set_detail(detail);
+        let pending_kind = regenerable_kind_from_action(app.get_action_pending_kind().as_str())
+            .map(RegenerableKind::artifact_kind);
+        app.set_result(content_results_for_job(&job, pending_kind));
         if document_words == "统计中…" {
             refresh_document_words_async(app.as_weak(), job);
+        }
+    });
+}
+
+fn refresh_selected_result(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: Uuid) {
+    let queue = queue.clone();
+    let _ = app.upgrade_in_event_loop(move |app| {
+        let selected = (0..app.get_jobs().row_count()).find_map(|index| {
+            let row = app.get_jobs().row_data(index)?;
+            row.selected
+                .then(|| Uuid::parse_str(row.id.as_ref()).ok())
+                .flatten()
+        });
+        if selected != Some(job_id) {
+            return;
+        }
+        if let Some(job) = queue
+            .lock()
+            .ok()
+            .and_then(|queue| queue.get(job_id).cloned())
+        {
+            let pending_kind = regenerable_kind_from_action(app.get_action_pending_kind().as_str())
+                .map(RegenerableKind::artifact_kind);
+            app.set_result(content_results_for_job(&job, pending_kind));
         }
     });
 }
@@ -1065,6 +2455,7 @@ struct Controller {
     queue: Arc<Mutex<Queue>>,
     scheduler: Arc<Scheduler>,
     tx: Sender<WorkMsg>,
+    content_busy: Arc<Mutex<ContentBusy>>,
     pending_transcription: RefCell<Option<PendingTranscription>>,
     history_confirmation: RefCell<Option<HistoryConfirmation>>,
     /// Debounce timer for speaker name edits.
@@ -1352,12 +2743,17 @@ impl Controller {
             app.set_transcription_confirm_error(format!("无法创建任务：{error}").into());
             return;
         }
+        let (retention, content_setup) = {
+            let config = self.config.lock().unwrap();
+            (config.default_retention, config.content_setup())
+        };
         let mut job = Job::from_creation(JobCreationInput::new(
             Uuid::new_v4(),
             pending.bvid.clone(),
             pending.page,
             selection.clone(),
-            self.config.lock().unwrap().default_retention,
+            retention,
+            content_setup,
         ));
         job.source_url = Some(pending.source_url.clone());
         let persist_result = {
@@ -1410,10 +2806,12 @@ impl Controller {
         let len = self.jobs_model.row_count();
         if let Some(app) = self.app.upgrade() {
             app.set_action_pending(false);
+            app.set_action_pending_kind("".into());
             app.set_action_feedback("".into());
             app.set_action_feedback_error(false);
             app.set_speaker_feedback("".into());
             app.set_speaker_feedback_error(false);
+            app.set_result_open(false);
         }
         for i in 0..len {
             if let Some(mut r) = self.jobs_model.row_data(i) {
@@ -1493,32 +2891,130 @@ impl Controller {
         if let Some(id) = self.selected_job_id() {
             if let Some(app) = self.app.upgrade() {
                 if app.get_action_pending() {
+                    let active_content_job =
+                        self.content_busy.lock().ok().and_then(|state| state.job_id);
+                    if active_content_job.is_some_and(|active_id| {
+                        cancel_content_operation(&self.content_busy, active_id)
+                    }) {
+                        app.set_action_feedback("正在取消文字结果操作…".into());
+                        app.set_action_feedback_error(false);
+                    }
                     return;
                 }
+                app.set_action_pending_kind("".into());
                 app.set_action_pending(true);
                 app.set_action_feedback("正在取消任务…".into());
                 app.set_action_feedback_error(false);
             }
-            // Set the cancellation token directly (immediate, not queued
-            // behind the blocked worker). The pipeline checks it between
-            // stages and during long blocking calls.
+            // Set the token and persisted transition directly, not behind the
+            // blocked worker. This prevents a queued Job from starting before
+            // its cancellation message is eventually handled.
             self.scheduler.cancel_registry.cancel(id);
-            if self.tx.send(WorkMsg::Cancel(id)).is_err() {
-                if let Some(app) = self.app.upgrade() {
-                    app.set_action_pending(false);
-                    app.set_action_feedback("取消失败：后台任务已退出".into());
-                    app.set_action_feedback_error(true);
+            cancel_content_operation(&self.content_busy, id);
+            let result = persist_job_cancellation(&self.scheduler, id);
+            sync_history_capabilities(&self.app, &self.queue);
+            if let Some(app) = self.app.upgrade() {
+                if let Some(job) = self
+                    .queue
+                    .lock()
+                    .ok()
+                    .and_then(|queue| queue.get(id).cloned())
+                {
+                    for index in 0..self.jobs_model.row_count() {
+                        if let Some(row) = self.jobs_model.row_data(index) {
+                            if row.id.as_str() == id.to_string() {
+                                self.jobs_model
+                                    .set_row_data(index, job_to_row(&job, row.selected));
+                                if row.selected {
+                                    show_job_detail(&app, &job);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                app.set_action_pending(false);
+                match result {
+                    Ok(crate::jobs::CancellationTransition::Cooperative) => {
+                        app.set_action_feedback("已发出取消请求".into());
+                        app.set_action_feedback_error(false);
+                    }
+                    Ok(crate::jobs::CancellationTransition::Immediate) => {
+                        app.set_action_feedback("已取消".into());
+                        app.set_action_feedback_error(false);
+                    }
+                    Ok(crate::jobs::CancellationTransition::AlreadyCancelling) => {
+                        app.set_action_feedback("正在取消".into());
+                        app.set_action_feedback_error(false);
+                    }
+                    Ok(crate::jobs::CancellationTransition::Unavailable) => {
+                        app.set_action_feedback("当前任务不可取消".into());
+                        app.set_action_feedback_error(true);
+                    }
+                    Err(error) => {
+                        app.set_action_feedback(
+                            format!("取消状态保存失败，请重试：{error}").into(),
+                        );
+                        app.set_action_feedback_error(true);
+                    }
                 }
             }
         }
     }
 
+    fn rebuild_selected(&self) {
+        let Some(id) = self.selected_job_id() else {
+            return;
+        };
+        let Some(job) = self
+            .queue
+            .lock()
+            .ok()
+            .and_then(|queue| queue.get(id).cloned())
+        else {
+            return;
+        };
+        if !crate::jobs::JobCapabilities::from_job(&job).can_rebuild {
+            if let Some(app) = self.app.upgrade() {
+                app.set_action_feedback("当前任务不需要重建".into());
+                app.set_action_feedback_error(true);
+            }
+            return;
+        }
+        let source_url = job.source_url.unwrap_or_else(|| {
+            let page = if job.page > 1 {
+                format!("?p={}", job.page)
+            } else {
+                String::new()
+            };
+            format!("https://www.bilibili.com/video/{}{page}", job.bvid)
+        });
+        if let Some(app) = self.app.upgrade() {
+            app.set_url(source_url.into());
+            app.set_action_feedback("请确认新 Runtime 与语言设置；原任务保持不变".into());
+            app.set_action_feedback_error(false);
+        }
+        self.prepare_add_job();
+    }
+
     fn retry_selected(&self) {
         if let Some(id) = self.selected_job_id() {
+            let can_retry = self.queue.lock().ok().and_then(|q| {
+                q.get(id)
+                    .map(|job| crate::jobs::JobCapabilities::from_job(job).can_retry)
+            });
+            if can_retry != Some(true) {
+                if let Some(app) = self.app.upgrade() {
+                    app.set_action_feedback("当前任务不可重试；RawOnly 请使用修复文字结果".into());
+                    app.set_action_feedback_error(true);
+                }
+                return;
+            }
             if let Some(app) = self.app.upgrade() {
                 if app.get_action_pending() {
                     return;
                 }
+                app.set_action_pending_kind("".into());
                 app.set_action_pending(true);
                 app.set_action_feedback("正在重新排队…".into());
                 app.set_action_feedback_error(false);
@@ -1539,6 +3035,140 @@ impl Controller {
                     app.set_action_feedback_error(true);
                 }
             }
+        }
+    }
+
+    /// Queue one terminal v0.5 enhancement operation with a target snapshot
+    /// taken at click time. The gate is reserved before sending so a rapid
+    /// double click cannot enqueue a second in-memory command.
+    pub(crate) fn regenerate_selected(&self, kind: RegenerableKind) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if app.get_action_pending() {
+            return;
+        }
+        let Some(id) = self.selected_job_id() else {
+            return;
+        };
+        if self
+            .content_busy
+            .lock()
+            .ok()
+            .is_some_and(|state| state.job_id == Some(id))
+        {
+            app.set_action_feedback("文字结果正在处理中，请稍候".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        let Some(job) = self.queue.lock().unwrap().get(id).cloned() else {
+            return;
+        };
+        if job.content_setup.is_none() || !job.status.is_terminal() {
+            app.set_action_feedback("当前任务尚未进入可重生成的终态".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        if !matches!(
+            crate::content_results::current(&job),
+            Ok(ContentViewV1::Current(_))
+        ) {
+            app.set_action_feedback("当前没有可信文字结果，请先修复文字结果".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        let target = match self.config.lock().unwrap().content_target() {
+            Ok(target) => target,
+            Err(reason) => {
+                app.set_action_feedback(format!("检查 AI 设置：{}", reason.message).into());
+                app.set_action_feedback_error(true);
+                return;
+            }
+        };
+        if !reserve_content_operation(&self.content_busy, id) {
+            app.set_action_feedback("文字结果正在处理中，请稍候".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        app.set_action_pending_kind(
+            match kind {
+                RegenerableKind::DefaultSummary => "summary",
+                RegenerableKind::Highlights => "highlights",
+                RegenerableKind::Chapters => "chapters",
+            }
+            .into(),
+        );
+        app.set_action_pending(true);
+        app.set_action_feedback("正在重新生成文字结果…".into());
+        app.set_action_feedback_error(false);
+        if self
+            .tx
+            .send(WorkMsg::Regenerate {
+                job_id: id,
+                kind,
+                target,
+            })
+            .is_err()
+        {
+            clear_content_operation(&self.content_busy, id);
+            app.set_action_pending(false);
+            app.set_action_feedback("重生成失败：后台任务已退出".into());
+            app.set_action_feedback_error(true);
+        }
+    }
+
+    /// Queue the explicit RawOnly repair path. It never re-enters Scheduler
+    /// and is accepted only when ContentResults confirms valid raw Evidence.
+    pub(crate) fn repair_selected_content(&self) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if app.get_action_pending() {
+            return;
+        }
+        let Some(id) = self.selected_job_id() else {
+            return;
+        };
+        if self
+            .content_busy
+            .lock()
+            .ok()
+            .is_some_and(|state| state.job_id == Some(id))
+        {
+            app.set_action_feedback("文字结果正在处理中，请稍候".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        let Some(job) = self.queue.lock().unwrap().get(id).cloned() else {
+            return;
+        };
+        if job.content_setup.is_none() || !job.status.is_terminal() {
+            app.set_action_feedback("当前任务没有可修复的 v0.5 文字结果".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        if !matches!(
+            crate::content_results::current(&job),
+            Ok(ContentViewV1::RawOnly { .. })
+        ) {
+            app.set_action_feedback("当前文字结果不需要修复".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        if !reserve_content_operation(&self.content_busy, id) {
+            app.set_action_feedback("文字结果正在处理中，请稍候".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        app.set_action_pending_kind("".into());
+        app.set_action_pending(true);
+        app.set_action_feedback("正在修复文字结果…".into());
+        app.set_action_feedback_error(false);
+        if self.tx.send(WorkMsg::RepairContent(id)).is_err() {
+            clear_content_operation(&self.content_busy, id);
+            app.set_action_pending(false);
+            app.set_action_feedback("修复失败：后台任务已退出".into());
+            app.set_action_feedback_error(true);
         }
     }
 
@@ -1618,12 +3248,14 @@ impl Controller {
         }
         let send_result = match confirmation {
             HistoryConfirmation::DeleteJob(id) => {
+                app.set_action_pending_kind("".into());
                 app.set_action_pending(true);
                 app.set_action_feedback("正在删除任务…".into());
                 app.set_action_feedback_error(false);
                 self.tx.send(WorkMsg::DeleteJob(id))
             }
             HistoryConfirmation::ClearHistory => {
+                app.set_action_pending_kind("".into());
                 app.set_action_pending(true);
                 app.set_action_feedback("正在清空历史…".into());
                 app.set_action_feedback_error(false);
@@ -1654,17 +3286,83 @@ impl Controller {
         let Some(id) = self.selected_job_id() else {
             return;
         };
-        let q = self.queue.lock().unwrap();
-        let Some(job) = q.get(id) else { return };
-        let candidates = [
-            job.final_output_dir.as_ref().map(|dir| dir.join("full.md")),
-            job.work_dir.as_ref().map(|dir| dir.join("full.md")),
-        ];
-        let Some(full) = candidates.into_iter().flatten().find(|path| path.exists()) else {
-            app.set_action_feedback("打开失败：Markdown 尚未生成".into());
-            app.set_action_feedback_error(true);
+        let Some(job) = self.queue.lock().unwrap().get(id).cloned() else {
             return;
         };
+        let _content_guard = if job.content_setup.is_some() {
+            if !reserve_content_operation(&self.content_busy, id) {
+                app.set_action_feedback("文字结果正在处理中，请稍候".into());
+                app.set_action_feedback_error(true);
+                return;
+            }
+            Some(ContentBusyGuard {
+                busy: self.content_busy.clone(),
+                job_id: id,
+            })
+        } else {
+            None
+        };
+        if job.content_setup.is_some() && !job.status.is_terminal() {
+            app.set_action_feedback("打开失败：任务尚未进入终态".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        let full = if job.content_setup.is_some() {
+            let snapshot = match crate::content_results::current(&job) {
+                Ok(ContentViewV1::Current(snapshot)) => snapshot,
+                Ok(ContentViewV1::RawOnly { .. }) => {
+                    app.set_action_feedback("打开失败：可信文字结果尚未生成，请先修复".into());
+                    app.set_action_feedback_error(true);
+                    return;
+                }
+                Ok(ContentViewV1::Legacy) => {
+                    app.set_action_feedback("打开失败：任务内容标记无效".into());
+                    app.set_action_feedback_error(true);
+                    return;
+                }
+                Err(error) => {
+                    app.set_action_feedback(format!("打开失败：{error}").into());
+                    app.set_action_feedback_error(true);
+                    return;
+                }
+            };
+            let cfg = self.config.lock().unwrap().clone();
+            let mut rendered_job = job.clone();
+            let output_dir = match crate::pipeline::ensure_final_output_dir(&mut rendered_job, &cfg)
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    app.set_action_feedback(format!("打开失败：{error}").into());
+                    app.set_action_feedback_error(true);
+                    return;
+                }
+            };
+            if let Err(error) = crate::document::rebuild_presentation(&rendered_job, &snapshot) {
+                app.set_action_feedback(format!("打开失败：{error}").into());
+                app.set_action_feedback_error(true);
+                return;
+            }
+            if let Ok(mut q) = self.queue.lock() {
+                if let Some(stored) = q.get_mut(id) {
+                    apply_presentation_locator(stored, output_dir.clone());
+                    let _ = jobs::save_job_state(stored);
+                }
+                let _ = q.save();
+            }
+            output_dir.join("full.md")
+        } else {
+            let candidates = [
+                job.final_output_dir.as_ref().map(|dir| dir.join("full.md")),
+                job.work_dir.as_ref().map(|dir| dir.join("full.md")),
+            ];
+            let Some(full) = candidates.into_iter().flatten().find(|path| path.exists()) else {
+                app.set_action_feedback("打开失败：Markdown 尚未生成".into());
+                app.set_action_feedback_error(true);
+                return;
+            };
+            full
+        };
+        app.set_action_pending_kind("".into());
         app.set_action_pending(true);
         app.set_action_feedback("正在打开 Markdown…".into());
         app.set_action_feedback_error(false);
@@ -1676,6 +3374,121 @@ impl Controller {
             Err(error) => {
                 app.set_action_pending(false);
                 app.set_action_feedback(format!("打开失败：{error}").into());
+                app.set_action_feedback_error(true);
+            }
+        }
+    }
+
+    fn open_selected_raw(&self) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if app.get_action_pending() {
+            return;
+        }
+        let Some(id) = self.selected_job_id() else {
+            return;
+        };
+        let Some(job) = self
+            .queue
+            .lock()
+            .ok()
+            .and_then(|queue| queue.get(id).cloned())
+        else {
+            return;
+        };
+        let _content_guard = if job.content_setup.is_some() {
+            if !reserve_content_operation(&self.content_busy, id) {
+                app.set_action_feedback("文字结果正在处理中，请稍候".into());
+                app.set_action_feedback_error(true);
+                return;
+            }
+            Some(ContentBusyGuard {
+                busy: self.content_busy.clone(),
+                job_id: id,
+            })
+        } else {
+            None
+        };
+
+        let raw_path = if job.content_setup.is_some() {
+            let Some(work_dir) = job.work_dir.as_ref() else {
+                app.set_action_feedback("打开失败：任务目录尚未生成".into());
+                app.set_action_feedback_error(true);
+                return;
+            };
+            let raw = match crate::content_results::current(&job) {
+                Ok(ContentViewV1::Current(snapshot)) => {
+                    crate::document::render_raw_markdown(&job, &snapshot.evidence.utterances)
+                }
+                Ok(ContentViewV1::RawOnly { evidence, .. }) => {
+                    crate::document::render_raw_markdown(&job, &evidence.utterances)
+                }
+                Ok(ContentViewV1::Legacy) => {
+                    app.set_action_feedback("打开失败：任务内容标记无效".into());
+                    app.set_action_feedback_error(true);
+                    return;
+                }
+                Err(error) => {
+                    app.set_action_feedback(format!("打开失败：{error}").into());
+                    app.set_action_feedback_error(true);
+                    return;
+                }
+            };
+            let path = work_dir.join("transcript.raw.md");
+            if let Err(error) = crate::jobs::atomic_write(&path, raw.as_bytes()) {
+                app.set_action_feedback(format!("打开失败：{error}").into());
+                app.set_action_feedback_error(true);
+                return;
+            }
+            path
+        } else {
+            let Some(path) = job
+                .work_dir
+                .as_ref()
+                .map(|directory| directory.join("transcript.raw.md"))
+                .filter(|path| path.is_file())
+            else {
+                app.set_action_feedback("打开失败：原始稿尚未生成".into());
+                app.set_action_feedback_error(true);
+                return;
+            };
+            path
+        };
+
+        app.set_action_pending_kind("".into());
+        app.set_action_pending(true);
+        app.set_action_feedback("正在打开原始稿…".into());
+        app.set_action_feedback_error(false);
+        match std::process::Command::new("open").arg(&raw_path).spawn() {
+            Ok(_) => {
+                app.set_action_pending(false);
+                app.set_action_feedback("已请求打开原始稿".into());
+            }
+            Err(error) => {
+                app.set_action_pending(false);
+                app.set_action_feedback(format!("打开失败：{error}").into());
+                app.set_action_feedback_error(true);
+            }
+        }
+    }
+
+    fn open_external_url(&self, url: String) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if !valid_result_source_url(&url) {
+            app.set_action_feedback("打开失败：来源链接无效".into());
+            app.set_action_feedback_error(true);
+            return;
+        }
+        match std::process::Command::new("open").arg(&url).spawn() {
+            Ok(_) => {
+                app.set_action_feedback("已在浏览器中打开来源".into());
+                app.set_action_feedback_error(false);
+            }
+            Err(error) => {
+                app.set_action_feedback(format!("打开来源失败：{error}").into());
                 app.set_action_feedback_error(true);
             }
         }
@@ -1703,6 +3516,7 @@ impl Controller {
             app.set_action_feedback_error(true);
             return;
         }
+        app.set_action_pending_kind("".into());
         app.set_action_pending(true);
         app.set_action_feedback("正在定位任务目录…".into());
         app.set_action_feedback_error(false);
@@ -1729,6 +3543,36 @@ impl Controller {
         };
         app.set_speaker_feedback("保存中…".into());
         app.set_speaker_feedback_error(false);
+        let job_id = self.selected_job_id();
+        if let Some(job_id) = job_id {
+            let selected_job = self.queue.lock().ok().and_then(|q| q.get(job_id).cloned());
+            let is_v05 = selected_job
+                .as_ref()
+                .is_some_and(|job| job.content_setup.is_some());
+            if is_v05
+                && !selected_job.as_ref().is_some_and(|job| {
+                    matches!(
+                        crate::content_results::current(job),
+                        Ok(ContentViewV1::Current(_))
+                    )
+                })
+            {
+                app.set_speaker_feedback("请先修复文字结果，再编辑说话人".into());
+                app.set_speaker_feedback_error(true);
+                return;
+            }
+            if is_v05
+                && self
+                    .content_busy
+                    .lock()
+                    .ok()
+                    .is_some_and(|state| state.job_id == Some(job_id))
+            {
+                app.set_speaker_feedback("文字结果正在处理中，请稍候".into());
+                app.set_speaker_feedback_error(true);
+                return;
+            }
+        }
         let name_clone = name.clone();
         {
             let len = self.speakers_model.row_count();
@@ -1744,7 +3588,6 @@ impl Controller {
         }
         // Persist into the selected job's speaker_map immediately so the
         // data is never lost, but debounce the document rebuild.
-        let job_id = self.selected_job_id();
         if let Some(job_id) = job_id {
             let persist_result = {
                 let mut q = self.queue.lock().unwrap();
@@ -1929,6 +3772,7 @@ fn empty_detail() -> JobDetailData {
         warning_text: "".into(),
         can_cancel: false,
         can_retry: false,
+        can_rebuild: false,
         can_open: false,
         can_reveal: false,
         can_delete: false,
@@ -1948,6 +3792,7 @@ fn empty_detail() -> JobDetailData {
         requested_language: "未记录".into(),
         reported_language: "未报告".into(),
         reported_model: "未报告".into(),
+        can_view_result: false,
     }
 }
 
@@ -2114,20 +3959,73 @@ fn sync_settings(app: &App, cfg: &Config) {
 #[cfg(test)]
 mod tests {
     use super::{
-        count_document_chars, job_to_row, parse_ui_fixture, parse_ui_fixture_position,
-        parse_ui_fixture_size, reorder_capabilities, JobRow,
+        apply_presentation_locator, cancel_content_operation, clear_content_operation,
+        count_document_chars, fixture_content_results, job_to_row, parse_ui_fixture,
+        parse_ui_fixture_position, parse_ui_fixture_size, persist_job_cancellation_with,
+        queue_scroll_fixture_jobs, regenerable_kind_from_action, regeneration_feedback,
+        reorder_capabilities, reserve_content_operation, result_fixture_callback_job,
+        run_regenerate_content_operation, run_repair_content_operation, speaker_rebuild_feedback,
+        start_content_operation, valid_result_source_url, ContentBusy, JobRow,
     };
-    use crate::jobs::Job;
+    use crate::config::Config;
+    use crate::content_results::{
+        current, ArtifactSlotV1, ContentSetupV1, ContentViewV1, DerivationFailureV1, FailureCodeV1,
+        GenerationApiFormatV1, GenerationParametersV1, GenerationProviderV1,
+        ReadyGenerationTargetV1, RegenerableKind, TargetUnavailableCodeV1, TargetUnavailableV1,
+    };
+    use crate::jobs::{Job, JobCapabilities, JobStatus, Stage, StageState};
+    use crate::scheduler::Scheduler;
     use slint::{Model, VecModel};
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use uuid::Uuid;
+
+    #[test]
+    fn cancellation_persistence_failures_restore_retryable_state() {
+        for queue_save_fails in [false, true] {
+            let mut job = Job::new(Uuid::new_v4(), "BV1persist-cancel".into(), 1);
+            let id = job.id;
+            job.status = JobStatus::NeedsUserAction;
+            job.stage = Stage::NeedsUserAction;
+            let queue = Arc::new(Mutex::new(crate::jobs::Queue { jobs: vec![job] }));
+            let scheduler = Scheduler::new(queue.clone());
+            let job_save_calls = std::cell::Cell::new(0_u8);
+            let result = persist_job_cancellation_with(
+                &scheduler,
+                id,
+                |_| {
+                    job_save_calls.set(job_save_calls.get() + 1);
+                    if queue_save_fails {
+                        Ok(())
+                    } else {
+                        Err("state write failed".into())
+                    }
+                },
+                |_| {
+                    if queue_save_fails {
+                        Err("queue write failed".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(result.is_err());
+            let queue = queue.lock().unwrap();
+            let restored = queue.get(id).unwrap();
+            assert_eq!(restored.status, JobStatus::NeedsUserAction);
+            assert_eq!(restored.stage, Stage::NeedsUserAction);
+            assert!(JobCapabilities::from_job(restored).can_cancel);
+            assert_eq!(job_save_calls.get(), if queue_save_fails { 2 } else { 1 });
+        }
+    }
 
     #[test]
     fn ui_fixture_parser_supports_visual_states_and_legacy_switches() {
         assert_eq!(parse_ui_fixture("empty"), Some("empty"));
         assert_eq!(parse_ui_fixture("settings"), Some("settings"));
         assert_eq!(parse_ui_fixture("running"), Some("running"));
+        assert_eq!(parse_ui_fixture("queue-scroll"), Some("queue-scroll"));
         assert_eq!(parse_ui_fixture("confirmation"), Some("confirmation"));
         assert_eq!(parse_ui_fixture("delete-confirm"), Some("delete-confirm"));
         assert_eq!(parse_ui_fixture("clear-confirm"), Some("clear-confirm"));
@@ -2135,7 +4033,160 @@ mod tests {
         assert_eq!(parse_ui_fixture(" completed "), Some("completed"));
         assert_eq!(parse_ui_fixture("1"), Some("completed"));
         assert_eq!(parse_ui_fixture(""), Some("completed"));
+        assert_eq!(parse_ui_fixture("result-success"), Some("result-success"));
+        assert_eq!(parse_ui_fixture("result-limited"), Some("result-limited"));
+        assert_eq!(
+            parse_ui_fixture("result-enhancement-failed"),
+            Some("result-enhancement-failed")
+        );
+        assert_eq!(
+            parse_ui_fixture("result-regenerating"),
+            Some("result-regenerating")
+        );
         assert_eq!(parse_ui_fixture("unknown"), None);
+    }
+
+    #[test]
+    fn queue_scroll_fixture_has_enough_rows_and_visible_error_borders() {
+        let jobs = queue_scroll_fixture_jobs();
+        assert_eq!(jobs.len(), 12);
+        assert!(jobs.iter().any(|job| job.status == JobStatus::Failed));
+        assert!(jobs.iter().any(|job| job.status == JobStatus::Completed));
+        assert!(jobs.iter().filter(|job| job.error.is_some()).count() >= 3);
+    }
+
+    #[test]
+    fn result_fixtures_use_the_flat_rows_and_expose_limited_without_jump() {
+        let success = fixture_content_results("result-success");
+        assert!(success.entry_visible);
+        assert!(success.show_summary && success.show_chapters && success.show_faithful);
+        assert_eq!(success.bvid, "BV1UIFIX");
+        assert_eq!(success.page, 2);
+        assert_eq!(success.video_duration, "01:04");
+        assert!(success.raw_rows.row_count() > 50);
+        assert!(success
+            .faithful_rows
+            .iter()
+            .any(|row| row.kind == "section"));
+        let mapped_result_rows = success
+            .summary_rows
+            .iter()
+            .chain(success.chapters_rows.iter())
+            .chain(success.faithful_rows.iter())
+            .filter(|row| row.kind == "block" && row.status_kind == "mapped")
+            .collect::<Vec<_>>();
+        assert!(!mapped_result_rows.is_empty());
+        assert!(mapped_result_rows
+            .iter()
+            .all(|row| { row.text.chars().count() <= 80 && row.can_source && row.can_jump }));
+
+        let limited = fixture_content_results("result-limited");
+        let limited_rows = limited
+            .summary_rows
+            .iter()
+            .chain(limited.faithful_rows.iter())
+            .filter(|row| row.status_kind == "limited")
+            .collect::<Vec<_>>();
+        assert!(!limited_rows.is_empty());
+        assert!(limited_rows
+            .iter()
+            .all(|row| !row.can_jump && !row.can_source));
+        let chapter_statuses = limited
+            .chapters_rows
+            .iter()
+            .filter(|row| row.kind == "block")
+            .map(|row| row.status_kind.to_string())
+            .collect::<Vec<_>>();
+        assert!(chapter_statuses.iter().any(|status| status == "mapped"));
+        assert!(chapter_statuses.iter().any(|status| status == "limited"));
+        let mapped_chapter = limited
+            .chapters_rows
+            .iter()
+            .find(|row| row.kind == "block" && row.status_kind == "mapped")
+            .expect("limited chapters keep a mapped source affordance");
+        assert!(mapped_chapter.can_source && mapped_chapter.can_jump);
+
+        let failed = fixture_content_results("result-enhancement-failed");
+        assert_eq!(failed.default_tab, 0);
+        assert!(failed
+            .summary_rows
+            .iter()
+            .any(|row| row.status_kind == "failure"));
+
+        let regenerating = fixture_content_results("result-regenerating");
+        assert!(regenerating
+            .chapters_rows
+            .iter()
+            .filter(|row| row.kind == "section")
+            .any(|row| row.action_pending));
+        assert!(regenerating
+            .summary_rows
+            .iter()
+            .all(|row| !row.action_pending));
+    }
+
+    #[test]
+    fn result_fixture_uses_a_selected_terminal_job_and_closed_callback_inputs() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-result-bridge-{id}"));
+        let cfg = Config {
+            working_dir: root.join("jobs"),
+            output_dir: root.join("output"),
+            llm_enabled: false,
+            ..Config::default()
+        };
+        let job = result_fixture_callback_job(&root, &cfg, "result-success").unwrap();
+        assert!(job.status.is_terminal());
+        assert!(job_to_row(&job, true).selected);
+        assert!(matches!(current(&job).unwrap(), ContentViewV1::Current(_)));
+
+        assert_eq!(
+            regenerable_kind_from_action("summary"),
+            Some(RegenerableKind::DefaultSummary)
+        );
+        assert_eq!(
+            regenerable_kind_from_action("highlights"),
+            Some(RegenerableKind::Highlights)
+        );
+        assert_eq!(
+            regenerable_kind_from_action("chapters"),
+            Some(RegenerableKind::Chapters)
+        );
+        assert_eq!(regenerable_kind_from_action("faithful"), None);
+        assert!(valid_result_source_url(
+            "https://www.bilibili.com/video/BV1UIFIX?p=2&t=3"
+        ));
+        assert!(!valid_result_source_url("https://example.com/BV1UIFIX"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn result_projection_identity_is_stable_for_refresh_and_changes_for_job_switch() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-result-session-{id}"));
+        let cfg = Config {
+            working_dir: root.join("jobs"),
+            output_dir: root.join("output"),
+            llm_enabled: false,
+            ..Config::default()
+        };
+        let job = result_fixture_callback_job(&root, &cfg, "result-success").unwrap();
+        let first = super::content_results_for_job(&job, None);
+        let refreshed = super::content_results_for_job(
+            &job,
+            Some(crate::content_results::ArtifactKindV1::Chapters),
+        );
+        assert!(!first.job_id.is_empty());
+        assert_eq!(first.job_id, refreshed.job_id);
+
+        let other_id = Uuid::new_v4();
+        let other_root =
+            std::env::temp_dir().join(format!("bimyscribe-result-session-other-{other_id}"));
+        let other_job = result_fixture_callback_job(&other_root, &cfg, "result-success").unwrap();
+        let switched = super::content_results_for_job(&other_job, None);
+        assert_ne!(first.job_id, switched.job_id);
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(other_root).ok();
     }
 
     #[test]
@@ -2151,6 +4202,222 @@ mod tests {
         assert_eq!(parse_ui_fixture_size(Some("1180x760")), (1180, 760));
         assert_eq!(parse_ui_fixture_size(Some("800x500")), (1180, 760));
         assert_eq!(parse_ui_fixture_size(Some("invalid")), (1180, 760));
+    }
+
+    #[test]
+    fn content_busy_gate_rejects_same_job_and_preserves_pre_start_cancel() {
+        let busy = Arc::new(Mutex::new(ContentBusy::default()));
+        let job_id = Uuid::new_v4();
+        assert!(start_content_operation(&busy, job_id).is_none());
+        assert!(reserve_content_operation(&busy, job_id));
+        assert!(!reserve_content_operation(&busy, job_id));
+        assert!(!reserve_content_operation(&busy, Uuid::new_v4()));
+        assert!(!cancel_content_operation(&busy, Uuid::new_v4()));
+        assert!(cancel_content_operation(&busy, job_id));
+        assert!(start_content_operation(&busy, job_id)
+            .unwrap()
+            .is_cancelled());
+        clear_content_operation(&busy, job_id);
+        assert!(start_content_operation(&busy, job_id).is_none());
+        assert!(reserve_content_operation(&busy, Uuid::new_v4()));
+    }
+
+    #[test]
+    fn speaker_rebuild_feedback_keeps_saved_name_and_reports_document_failure() {
+        assert_eq!(
+            speaker_rebuild_feedback(&Ok(())),
+            ("已保存，文档已更新".into(), false)
+        );
+        assert_eq!(
+            speaker_rebuild_feedback(&Err("磁盘已满".into())),
+            (
+                "说话人名称已保存，但文档更新失败：磁盘已满；再次打开 Markdown 时会重试".into(),
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn regeneration_feedback_does_not_report_committed_failure_as_success() {
+        assert_eq!(
+            regeneration_feedback(&ArtifactSlotV1::default()),
+            ("重生成结果状态无效，请重试".into(), true)
+        );
+        let failed = ArtifactSlotV1 {
+            current: None,
+            last_failure: Some(DerivationFailureV1 {
+                code: FailureCodeV1::GenerationFailed,
+                message: "本地 AI 暂时不可用".into(),
+                retryable: true,
+                occurred_at: chrono::Utc::now(),
+            }),
+        };
+        assert_eq!(
+            regeneration_feedback(&failed),
+            (
+                "重生成失败：本地 AI 暂时不可用；当前没有可用结果".into(),
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn production_content_operations_preserve_terminal_job_and_never_run_upstream() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-content-worker-{id}"));
+        let work = root.join("work");
+        let output = root.join("output");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let raw = r#"[{"id":"u1","text":"原始证据 42","start_ms":0,"end_ms":1000,"speaker_id":0}]"#;
+        std::fs::write(work.join("transcript.raw.json"), raw).unwrap();
+
+        let mut job = Job::new(id, "BV1worker".into(), 1);
+        job.title = "worker 生产路径".into();
+        job.content_setup = Some(ContentSetupV1::unavailable(TargetUnavailableV1 {
+            code: TargetUnavailableCodeV1::ConnectionMissing,
+            message: "未配置本地 AI".into(),
+            invalid_field: Some("llm_connection".into()),
+        }));
+        job.work_dir = Some(work.clone());
+        job.cid = Some(7);
+        job.duration_ms = Some(1000);
+        job.status = JobStatus::Completed;
+        job.stage = Stage::Completed;
+        job.stage_progress = 100;
+        job.finished_at = Some(chrono::Utc::now());
+        job.error = Some("保留终态字段".into());
+        job.set_stage_state(Stage::Completed, StageState::Completed);
+        let terminal_before = (
+            job.status,
+            job.stage,
+            job.stage_progress,
+            job.finished_at,
+            job.error.clone(),
+            job.stages.clone(),
+        );
+        let raw_before = std::fs::read(work.join("transcript.raw.json")).unwrap();
+        let cfg = Config {
+            working_dir: root.join("working"),
+            output_dir: output,
+            ..Config::default()
+        };
+        let cfg = Arc::new(Mutex::new(cfg));
+
+        let cancelled = crate::cancel::CancellationToken::new();
+        cancelled.cancel();
+        let (message, is_error, locator) = run_repair_content_operation(&job, &cfg, &cancelled);
+        assert_eq!(message, "已取消文字结果修复");
+        assert!(is_error);
+        assert!(locator.is_none());
+        assert!(matches!(
+            current(&job).unwrap(),
+            ContentViewV1::RawOnly { .. }
+        ));
+
+        let (message, is_error, locator) =
+            run_repair_content_operation(&job, &cfg, &crate::cancel::CancellationToken::new());
+        assert_eq!(message, "文字结果已修复");
+        assert!(!is_error);
+        assert!(locator.is_some());
+        assert!(matches!(current(&job).unwrap(), ContentViewV1::Current(_)));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let target = ReadyGenerationTargetV1 {
+            provider: GenerationProviderV1::OpenAiCompatible,
+            api_format: GenerationApiFormatV1::OpenAiChatCompletions,
+            endpoint: format!("http://127.0.0.1:{port}"),
+            model: "offline-fixture".into(),
+            parameters: GenerationParametersV1::openai_default(),
+        };
+        let (message, is_error, locator) = run_regenerate_content_operation(
+            &job,
+            RegenerableKind::DefaultSummary,
+            target,
+            &cfg,
+            &crate::cancel::CancellationToken::new(),
+        );
+        assert!(message.contains("重生成失败"));
+        assert!(is_error);
+        assert!(locator.is_some());
+        let snapshot = match current(&job).unwrap() {
+            ContentViewV1::Current(snapshot) => snapshot,
+            other => panic!("expected Current after repair, got {other:?}"),
+        };
+        assert_eq!(
+            snapshot
+                .current
+                .slots
+                .default_summary
+                .last_failure
+                .as_ref()
+                .unwrap()
+                .code,
+            FailureCodeV1::GenerationFailed
+        );
+
+        assert_eq!(
+            (
+                job.status,
+                job.stage,
+                job.stage_progress,
+                job.finished_at,
+                job.error.clone(),
+                job.stages.clone(),
+            ),
+            terminal_before
+        );
+        assert_eq!(
+            std::fs::read(work.join("transcript.raw.json")).unwrap(),
+            raw_before
+        );
+        for path in [
+            work.join("metadata.json"),
+            work.join("source.audio"),
+            work.join("normalized.wav"),
+            work.join("funasr"),
+        ] {
+            assert!(
+                !path.exists(),
+                "content operation ran upstream: {}",
+                path.display()
+            );
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn presentation_locator_merge_preserves_terminal_job_and_raw_evidence() {
+        for status in [
+            JobStatus::Completed,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+        ] {
+            let id = Uuid::new_v4();
+            let root = std::env::temp_dir().join(format!("bimyscribe-locator-{id}"));
+            std::fs::create_dir_all(&root).unwrap();
+            let raw_path = root.join("transcript.raw.json");
+            std::fs::write(&raw_path, br#"[{"id":"u1","text":"raw"}]"#).unwrap();
+            let raw_before = std::fs::read(&raw_path).unwrap();
+            let mut job = Job::new(id, "BV1locator".into(), 1);
+            job.work_dir = Some(root.clone());
+            job.status = status;
+            job.stage = Stage::FinalDocument;
+            job.finished_at = Some(chrono::Utc::now());
+            job.error = Some("preserve me".into());
+            job.set_stage_state(Stage::FinalDocument, StageState::Failed);
+            let before = job.clone();
+            apply_presentation_locator(&mut job, root.join("final"));
+            assert_eq!(job.status, before.status);
+            assert_eq!(job.stage, before.stage);
+            assert_eq!(job.finished_at, before.finished_at);
+            assert_eq!(job.error, before.error);
+            assert_eq!(job.stages, before.stages);
+            assert_eq!(std::fs::read(&raw_path).unwrap(), raw_before);
+            std::fs::remove_dir_all(root).ok();
+        }
     }
 
     #[test]

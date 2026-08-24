@@ -2,7 +2,7 @@ import { Palette, ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { StageStyle } from "stage-style.slint";
 import { StageView, SpeakerEntry } from "types.slint";
-import { JobRow, JobDetailData, SettingsView } from "view-model.slint";
+import { JobRow, JobDetailData, SettingsView, ContentResultsData } from "view-model.slint";
 import { AddBar } from "components/add-bar.slint";
 import { JobRowView } from "components/job-row.slint";
 import { JobDetail } from "components/job-detail.slint";
@@ -45,6 +45,7 @@ export component App inherits Window {
     in property <bool> add-busy: false;
     in property <string> action-feedback: "";
     in property <bool> action-pending: false;
+    in property <string> action-pending-kind: "";
     in property <bool> action-feedback-error: false;
     in property <string> speaker-feedback: "";
     in property <bool> speaker-feedback-error: false;
@@ -62,7 +63,7 @@ export component App inherits Window {
         status-name: "",
         total-progress: 0, elapsed-secs: 0, error-text: "", has-error: false,
         warning-text: "",
-        can-cancel: false, can-retry: false, can-open: false, can-reveal: false,
+        can-cancel: false, can-retry: false, can-rebuild: false, can-open: false, can-reveal: false,
         can-delete: false,
         can-edit-speakers: false,
         screenshots-enabled: false, retention-label: "推荐",
@@ -73,6 +74,33 @@ export component App inherits Window {
         requested-language: "未记录",
         reported-language: "未报告",
         reported-model: "未报告",
+        can-view-result: false,
+    };
+    in-out property <bool> result-open: false;
+    in property <ContentResultsData> result: {
+        entry-visible: false,
+        mode: "unavailable",
+        title: "",
+        job-id: "",
+        bvid: "",
+        page: 1,
+        video-duration: "—",
+        status-label: "",
+        notice: "",
+        notice-error: false,
+        source-url: "",
+        default-tab: 3,
+        show-summary: false,
+        show-chapters: false,
+        show-faithful: false,
+        show-raw: false,
+        can-repair: false,
+        repair-pending: false,
+        repair-label: "修复文字结果",
+        summary-rows: [],
+        chapters-rows: [],
+        faithful-rows: [],
+        raw-rows: [],
     };
     in property <[StageView]> stages: [];
     in property <[SpeakerEntry]> speakers: [];
@@ -136,7 +164,15 @@ export component App inherits Window {
     callback move-down;                  // acts on the selected job
     callback cancel-job;
     callback retry-job;
+    callback rebuild-job;
     callback open-md;
+    callback view-result;
+    callback result-back;
+    callback result-open-raw;
+    callback result-repair;
+    callback result-regenerate(string);
+    callback result-source(string);
+    callback result-jump(string);
     callback reveal-in-finder;
     callback delete-job;
     callback clear-history;
@@ -262,6 +298,10 @@ export component App inherits Window {
                         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
                         for job[i] in root.display-jobs : JobRowView {
+                            // macOS draws the as-needed scrollbar over the ListView
+                            // viewport. Keep a stable gutter so the thumb never
+                            // covers the card's rounded/error/focus border.
+                            width: parent.width - Theme.space-sm;
                             title: job.title;
                             bvid: job.bvid;
                             page: job.page;
@@ -311,6 +351,7 @@ export component App inherits Window {
                     speakers: root.speakers;
                     can-cancel: root.detail.can-cancel;
                     can-retry: root.detail.can-retry;
+                    can-rebuild: root.detail.can-rebuild;
                     can-open: root.detail.can-open;
                     can-reveal: root.detail.can-reveal;
                     can-delete: root.detail.can-delete;
@@ -330,8 +371,12 @@ export component App inherits Window {
                     requested-language: root.detail.requested-language;
                     reported-language: root.detail.reported-language;
                     reported-model: root.detail.reported-model;
+                    can-view-result: root.detail.can-view-result;
+                    result-open: root.result-open;
+                    result: root.result;
                     action-feedback: root.action-feedback;
                     action-pending: root.action-pending;
+                    action-pending-kind: root.action-pending-kind;
                     action-feedback-error: root.action-feedback-error;
                     speaker-feedback: root.speaker-feedback;
                     speaker-feedback-error: root.speaker-feedback-error;
@@ -342,7 +387,15 @@ export component App inherits Window {
 
                     cancel-clicked => { root.cancel-job(); }
                     retry-clicked => { root.retry-job(); }
+                    rebuild-clicked => { root.rebuild-job(); }
                     open-md-clicked => { root.open-md(); }
+                    view-result-clicked => { root.view-result(); }
+                    result-back-clicked => { root.result-back(); }
+                    result-open-raw-clicked => { root.result-open-raw(); }
+                    result-repair-clicked => { root.result-repair(); }
+                    result-regenerate-clicked(kind) => { root.result-regenerate(kind); }
+                    result-source-clicked(url) => { root.result-source(url); }
+                    result-jump-clicked(url) => { root.result-jump(url); }
                     reveal-clicked => { root.reveal-in-finder(); }
                     delete-clicked => { root.delete-job(); }
                     toggle-screenshots(v) => { root.toggle-screenshots(v); }

@@ -1,0 +1,516 @@
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { ContentResultsData, ContentRow } from "../view-model.slint";
+import { SecondaryButton, PrimaryButton } from "button.slint";
+import { IconButton } from "icon-button.slint";
+
+// A deliberately small tab primitive.  The result view keeps the selected
+// tab and source expansion in memory only; content and operation state still
+// come from the Rust projection of ContentResults::current.
+component ResultTab inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked;
+    callback navigate(int);
+
+    changed selected => {
+        if root.selected { root.focus(); }
+    }
+
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.focus(); root.clicked(); }
+    forward-focus: focus-scope;
+    border-radius: Theme.radius-sm;
+    background: root.selected ? Theme.surface : transparent;
+    border-color: root.selected ? Theme.border : transparent;
+    border-width: root.selected ? 1px : 0px;
+    horizontal-stretch: 1;
+
+    Text {
+        text: root.text;
+        color: root.selected ? Theme.text-primary : Theme.text-secondary;
+        font-size: Theme.font-body;
+        font-weight: root.selected ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.focus(); root.clicked(); }
+    }
+
+    focus-scope := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.clicked();
+                return accept;
+            }
+            if event.text == Key.LeftArrow {
+                root.navigate(-1);
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.navigate(1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    if root.has-focus : Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-radius: Theme.radius-sm + 2px;
+        border-color: Theme.focus-ring;
+        border-width: 2px;
+    }
+}
+
+component ContentResultRow inherits Rectangle {
+    in property <ContentRow> item;
+    in property <bool> expanded: false;
+    in property <bool> operation-pending: false;
+    in property <string> operation-target-kind: "";
+    callback source-clicked(string);
+    callback jump-clicked(string);
+    callback action-clicked(string);
+
+    // The row itself is the only place where source details appear.  There is
+    // no nested ScrollView/ListView, so a long source remains part of the same
+    // virtual row model and follows the center pane's one scroll position.
+    // Off-layout measurement nodes keep the variable row height stable even
+    // while their visible counterparts are conditionally instantiated.
+    measure-body := Text {
+        text: root.item.declaration.is-empty ? root.item.text
+            : root.item.declaration + (root.item.text.is-empty ? "" : "\n" + root.item.text);
+        width: parent.width - Theme.space-lg;
+        wrap: word-wrap;
+        visible: false;
+    }
+    measure-source := Text {
+        text: root.item.source-text;
+        width: parent.width - Theme.space-xl;
+        wrap: word-wrap;
+        visible: false;
+    }
+    height: root.item.kind == "section"
+        ? max(74px, measure-body.preferred-height + 54px)
+        : max(78px, measure-body.preferred-height + (root.expanded ? measure-source.preferred-height + 112px : 48px));
+    background: root.item.kind == "section" ? Theme.surface-muted : Theme.surface;
+    border-color: Theme.separator;
+    border-width: 0px;
+
+    if root.item.kind == "section" : VerticalLayout {
+        padding-left: Theme.space-md;
+        padding-right: Theme.space-md;
+        padding-top: Theme.space-sm;
+        padding-bottom: Theme.space-sm;
+        spacing: Theme.space-xs;
+
+        HorizontalLayout {
+            spacing: Theme.space-xs;
+            Text {
+                text: root.item.title;
+                color: Theme.text-primary;
+                font-size: Theme.font-section;
+                font-weight: 600;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            if !root.item.status-label.is-empty : Text {
+                text: root.item.status-label;
+                color: root.item.status-kind == "failure" ? Theme.danger-text
+                    : root.item.status-kind == "pending" ? Theme.accent-text
+                    : root.item.status-kind == "limited" ? Theme.warning-text
+                    : Theme.success-text;
+                font-size: Theme.font-caption;
+                vertical-alignment: center;
+            }
+            if !root.item.action-kind.is-empty : SecondaryButton {
+                text: root.item.action-pending
+                    || (root.operation-pending && root.item.action-kind == root.operation-target-kind)
+                    ? "处理中…" : root.item.action-label;
+                disabled: root.item.action-pending || root.operation-pending;
+                clicked => { root.action-clicked(root.item.action-kind); }
+            }
+        }
+        section-text := Text {
+            text: root.item.declaration.is-empty ? root.item.text : root.item.declaration;
+            color: Theme.text-secondary;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            height: self.preferred-height;
+            accessible-role: text;
+            accessible-label: root.item.title + "，" + self.text;
+        }
+        if !root.item.text.is-empty && !root.item.declaration.is-empty : Text {
+            text: root.item.text;
+            color: root.item.status-kind == "failure" ? Theme.danger-text : Theme.text-secondary;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            height: self.preferred-height;
+        }
+    }
+
+    if root.item.kind != "section" : VerticalLayout {
+        padding-left: Theme.space-md;
+        padding-right: Theme.space-md;
+        padding-top: Theme.space-sm;
+        padding-bottom: Theme.space-sm;
+        spacing: Theme.space-xs;
+
+        HorizontalLayout {
+            spacing: Theme.space-xs;
+            Text {
+                text: root.item.title;
+                color: Theme.text-primary;
+                font-size: Theme.font-body;
+                font-weight: root.item.kind == "raw" ? 600 : 400;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if !root.item.status-label.is-empty : Text {
+                text: root.item.status-label;
+                color: root.item.status-kind == "limited" ? Theme.warning-text
+                    : root.item.status-kind == "failure" ? Theme.danger-text
+                    : Theme.success-text;
+                font-size: Theme.font-caption;
+                vertical-alignment: center;
+            }
+        }
+
+        body-text := Text {
+            text: root.item.text;
+            color: Theme.text-primary;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            height: self.preferred-height;
+            accessible-role: text;
+            accessible-label: root.item.title + "，" + self.text;
+        }
+
+        if root.item.status-kind == "limited" : Text {
+            text: "暂时无法关联到原始片段，因此不能精确跳转。";
+            color: Theme.warning-text;
+            font-size: Theme.font-body;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            height: self.preferred-height;
+        }
+
+        if root.item.can-source : HorizontalLayout {
+            height: Theme.control-height-compact;
+            spacing: Theme.space-xs;
+            SecondaryButton {
+                text: root.expanded ? "收起来源" : "查看来源";
+                clicked => { root.source-clicked(root.item.source-url); }
+            }
+            if root.item.can-jump : SecondaryButton {
+                text: "跳回视频 ↗";
+                clicked => { root.jump-clicked(root.item.source-url); }
+            }
+        }
+
+        if root.expanded && root.item.can-source : Rectangle {
+            background: Theme.surface-muted;
+            border-radius: Theme.radius-sm;
+            border-color: Theme.border;
+            border-width: 1px;
+            height: max(74px, source-text.preferred-height + 48px);
+
+            VerticalLayout {
+                padding: Theme.space-sm;
+                spacing: Theme.space-xxs;
+                Text {
+                    text: "原始片段" + (root.item.source-speaker.is-empty ? "" : " · " + root.item.source-speaker)
+                        + (root.item.source-range.is-empty ? "" : " · " + root.item.source-range);
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                source-text := Text {
+                    text: root.item.source-text;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    height: self.preferred-height;
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: parent.width;
+        background: Theme.separator;
+    }
+}
+
+export component ContentResults inherits Rectangle {
+    in property <ContentResultsData> data;
+    in property <bool> operation-pending: false;
+    in property <string> operation-target-kind: "";
+    in property <string> operation-feedback;
+    in property <bool> operation-feedback-error: false;
+    in-out property <int> selected-tab: root.data.default-tab;
+    // Expansion is presentation-only and reset when the active tab changes;
+    // it is never serialized or sent to ContentResults.
+    in-out property <int> expanded-row: -1;
+    // This is a view-session-only identity. A same-Job projection refresh
+    // (including regeneration completion/failure) keeps the user's tab;
+    // a newly mounted view or a different Job adopts the new default tab.
+    property <string> presented-job-id: "";
+
+    // Rust replaces the complete projection when a result is reopened or an
+    // operation finishes. Compare Job identity before applying its default.
+    changed data => {
+        if root.presented-job-id != root.data.job-id {
+            root.selected-tab = root.data.default-tab;
+            root.expanded-row = -1;
+            root.presented-job-id = root.data.job-id;
+        }
+    }
+
+    callback back-clicked;
+    callback open-raw-clicked;
+    callback repair-clicked;
+    callback regenerate-clicked(string);
+    callback source-clicked(string);
+    callback jump-clicked(string);
+
+    property <[ContentRow]> active-rows: root.selected-tab == 0 ? root.data.summary-rows
+        : root.selected-tab == 1 ? root.data.chapters-rows
+        : root.selected-tab == 2 ? root.data.faithful-rows
+        : root.data.raw-rows;
+
+    background: Theme.surface;
+    accessible-role: main;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 88px;
+            background: Theme.surface;
+            VerticalLayout {
+                padding-left: Theme.space-md;
+                padding-right: Theme.space-md;
+                padding-top: Theme.space-sm;
+                padding-bottom: Theme.space-xs;
+                spacing: Theme.space-xs;
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    IconButton {
+                        icon: @image-url("../icons/chevron-left.svg");
+                        label: "返回任务详情";
+                        size: Theme.control-height-compact;
+                        clicked => { root.back-clicked(); }
+                    }
+                    Text {
+                        text: "消费结果";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-title;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.data.status-label;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    Text {
+                        text: root.data.title;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-body;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    if !root.data.bvid.is-empty : Text {
+                        text: root.data.bvid + " · P" + root.data.page;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-caption;
+                        horizontal-stretch: 0;
+                        vertical-alignment: center;
+                        accessible-role: text;
+                        accessible-label: "视频标识 " + self.text;
+                    }
+                    if !root.data.video-duration.is-empty : Text {
+                        text: "时长 " + root.data.video-duration;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-caption;
+                        horizontal-stretch: 0;
+                        vertical-alignment: center;
+                        accessible-role: text;
+                    }
+                    if !root.data.source-url.is-empty : SecondaryButton {
+                        text: "打开原视频 ↗";
+                        clicked => { root.jump-clicked(root.data.source-url); }
+                    }
+                }
+            }
+        }
+
+        if !root.data.notice.is-empty : Rectangle {
+            height: max(48px, notice-text.preferred-height + Theme.space-sm + Theme.space-sm);
+            background: root.data.notice-error ? Theme.danger-surface : Theme.warning-surface;
+            border-color: root.data.notice-error ? Theme.danger-border : Theme.warning-border;
+            border-width: 1px;
+            HorizontalLayout {
+                padding-left: Theme.space-md;
+                padding-right: Theme.space-md;
+                padding-top: Theme.space-sm;
+                padding-bottom: Theme.space-sm;
+                spacing: Theme.space-sm;
+                notice-text := Text {
+                    text: root.data.notice;
+                    color: root.data.notice-error ? Theme.danger-text : Theme.warning-text;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    accessible-role: text;
+                    accessible-live-region: polite;
+                }
+                if root.data.can-repair : PrimaryButton {
+                    text: root.data.repair-pending || root.operation-pending ? "正在修复文字结果…" : root.data.repair-label;
+                    disabled: root.data.repair-pending || root.operation-pending;
+                    clicked => { root.repair-clicked(); }
+                }
+            }
+        }
+
+        if root.operation-pending || !root.operation-feedback.is-empty : Rectangle {
+            height: max(44px, operation-text.preferred-height + Theme.space-sm + Theme.space-sm);
+            background: root.operation-feedback-error ? Theme.danger-surface : Theme.surface-muted;
+            border-color: root.operation-feedback-error ? Theme.danger-border : Theme.border;
+            border-width: 1px;
+            operation-text := Text {
+                text: root.operation-pending
+                    ? "正在处理文字结果；已保留当前内容。"
+                    : root.operation-feedback;
+                color: root.operation-feedback-error ? Theme.danger-text : Theme.accent-text;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+                x: Theme.space-md;
+                y: Theme.space-sm;
+                width: parent.width - Theme.space-lg;
+                height: self.preferred-height;
+                accessible-role: text;
+                accessible-live-region: polite;
+            }
+        }
+
+        Rectangle {
+            height: 40px;
+            background: Theme.segment-track;
+            border-radius: Theme.radius-sm;
+            accessible-role: tab-list;
+            accessible-label: "消费结果类型";
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+                if root.data.show-summary : ResultTab {
+                    text: "摘要";
+                    selected: root.selected-tab == 0;
+                    clicked => { root.selected-tab = 0; root.expanded-row = -1; }
+                    navigate(delta) => {
+                        if delta < 0 { root.selected-tab = root.data.show-raw ? 3 : 0; }
+                        else if root.data.show-chapters { root.selected-tab = 1; }
+                        else if root.data.show-faithful { root.selected-tab = 2; }
+                        else if root.data.show-raw { root.selected-tab = 3; }
+                        root.expanded-row = -1;
+                    }
+                }
+                if root.data.show-chapters : ResultTab {
+                    text: "章节";
+                    selected: root.selected-tab == 1;
+                    clicked => { root.selected-tab = 1; root.expanded-row = -1; }
+                    navigate(delta) => {
+                        if delta < 0 && root.data.show-summary { root.selected-tab = 0; }
+                        else if delta > 0 && root.data.show-faithful { root.selected-tab = 2; }
+                        else if delta > 0 && root.data.show-raw { root.selected-tab = 3; }
+                        root.expanded-row = -1;
+                    }
+                }
+                if root.data.show-faithful : ResultTab {
+                    text: "忠实正文";
+                    selected: root.selected-tab == 2;
+                    clicked => { root.selected-tab = 2; root.expanded-row = -1; }
+                    navigate(delta) => {
+                        if delta < 0 && root.data.show-chapters { root.selected-tab = 1; }
+                        else if delta < 0 && root.data.show-summary { root.selected-tab = 0; }
+                        else if delta > 0 && root.data.show-raw { root.selected-tab = 3; }
+                        root.expanded-row = -1;
+                    }
+                }
+                if root.data.show-raw : ResultTab {
+                    text: "原始稿";
+                    selected: root.selected-tab == 3;
+                    clicked => { root.selected-tab = 3; root.expanded-row = -1; }
+                    navigate(delta) => {
+                        if delta > 0 && root.data.show-summary { root.selected-tab = 0; }
+                        else if delta < 0 && root.data.show-faithful { root.selected-tab = 2; }
+                        else if delta < 0 && root.data.show-chapters { root.selected-tab = 1; }
+                        else if delta < 0 && root.data.show-summary { root.selected-tab = 0; }
+                        root.expanded-row = -1;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            accessible-role: tab-panel;
+            accessible-label: root.selected-tab == 0 ? "摘要内容"
+                : root.selected-tab == 1 ? "章节内容"
+                : root.selected-tab == 2 ? "忠实正文内容"
+                : "原始稿内容";
+
+            ListView {
+                vertical-stretch: 1;
+                vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                for row[index] in root.active-rows : ContentResultRow {
+                    item: row;
+                    expanded: root.expanded-row == index;
+                    operation-pending: root.operation-pending;
+                    operation-target-kind: root.operation-target-kind;
+                    source-clicked(url) => {
+                        root.expanded-row = root.expanded-row == index ? -1 : index;
+                        root.source-clicked(url);
+                    }
+                    jump-clicked(url) => { root.jump-clicked(url); }
+                    action-clicked(kind) => {
+                        if kind == "open-raw" {
+                            root.open-raw-clicked();
+                        } else {
+                            root.regenerate-clicked(kind);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
