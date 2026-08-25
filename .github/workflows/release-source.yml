@@ -1,0 +1,149 @@
+name: release-source
+
+on:
+  push:
+    branches: [main]
+    paths: [publication-manifest.json]
+
+concurrency:
+  group: source-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-14
+    outputs:
+      private_revision: ${{ steps.identity.outputs.private_revision }}
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Check out published source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Read publication identity
+        id: identity
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("publication-manifest.json"))["app_version"])')
+          private_revision=$(python3 -c 'import json; print(json.load(open("publication-manifest.json"))["private_revision"])')
+          requested=$(python3 -c 'import json; print(str(json.load(open("publication-manifest.json"))["release_requested"]).lower())')
+          test "$requested" = true
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=v%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'private_revision=%s\n' "$private_revision" >> "$GITHUB_OUTPUT"
+
+      - name: Verify public snapshot
+        run: python3 scripts/check-public-snapshot.py verify --root .
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check all Rust targets
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test
+
+  publish:
+    needs: validate
+    runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRIVATE_REVISION: ${{ needs.validate.outputs.private_revision }}
+      TAG: ${{ needs.validate.outputs.tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Check out exact public revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Create or verify annotated tag
+        run: |
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          if git rev-parse "$TAG^{}" >/dev/null 2>&1; then
+            actual=$(git rev-parse "$TAG^{}")
+            test "$actual" = "$GITHUB_SHA"
+          else
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git tag -a "$TAG" "$GITHUB_SHA" -m "BiMyScribe $TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Create or verify source-only Release
+        run: |
+          notes="docs/releases/$TAG.md"
+          test -f "$notes"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body,assets,isDraft,isPrerelease,tagName > /tmp/release.json
+            python3 - "$notes" /tmp/release.json "$TAG" <<'PY'
+          import json, sys
+          notes_path, release_path, tag = sys.argv[1:]
+          with open(notes_path, encoding="utf-8") as handle:
+              notes = handle.read()
+          with open(release_path, encoding="utf-8") as handle:
+              release = json.load(handle)
+          assert release["tagName"] == tag
+          assert not release["isDraft"] and not release["isPrerelease"]
+          assert release["body"] == notes
+          assert release["assets"] == []
+          PY
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "BiMyScribe $TAG" --notes-file "$notes"
+          fi
+
+      - name: Verify anonymous published source
+        run: |
+          published_root=$(mktemp -d "$RUNNER_TEMP/bimyscribe-published.XXXXXX")
+          mkdir -p "$published_root/source"
+          for attempt in $(seq 1 12); do
+            if curl --fail --location --silent --show-error \
+              --output "$published_root/source.tar.gz" \
+              "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$TAG.tar.gz"; then
+              break
+            fi
+            test "$attempt" -lt 12
+            sleep 5
+          done
+          tar -xzf "$published_root/source.tar.gz" --strip-components=1 -C "$published_root/source"
+          python3 scripts/check-public-snapshot.py verify \
+            --root "$published_root/source" \
+            --expected-private-revision "$PRIVATE_REVISION"
+          remote_revision=$(git ls-remote origin "refs/tags/$TAG^{}" | awk 'NR==1 {print $1}')
+          test "$remote_revision" = "$GITHUB_SHA"
+          asset_count=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          test "$asset_count" = 0
+          PUBLIC_REVISION="$GITHUB_SHA" python3 - <<'PY' > published.json
+          import json, os
+          data = {
+              "app_version": os.environ["VERSION"],
+              "private_revision": os.environ["PRIVATE_REVISION"],
+              "public_revision": os.environ["PUBLIC_REVISION"],
+              "status": "passed",
+              "tag": os.environ["TAG"],
+          }
+          print(json.dumps(data, sort_keys=True))
+          PY
+          {
+            printf '## Published %s\n\n' "$TAG"
+            printf -- '- Private revision: `%s`\n' "$PRIVATE_REVISION"
+            printf -- '- Public revision: `%s`\n' "$GITHUB_SHA"
+            printf -- '- Anonymous source verification: passed\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload published evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: published-${{ env.TAG }}
+          path: published.json
+          if-no-files-found: error
+          retention-days: 90
+

@@ -1,0 +1,43 @@
+name: public-snapshot
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-snapshot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  public-snapshot:
+    name: public-snapshot
+    runs-on: macos-14
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Verify private revision trailer
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          expected=$(python3 -c 'import json; print(json.load(open("publication-manifest.json"))["private_revision"])')
+          actual=$(git log -1 --format='%(trailers:key=Private-Revision,valueonly)' "$HEAD_SHA")
+          test "$actual" = "$expected"
+
+      - name: Verify public snapshot
+        run: python3 scripts/check-public-snapshot.py verify --root .
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check all Rust targets
+        run: cargo check --all-targets
+
+      - name: Test
+        run: cargo test
+
