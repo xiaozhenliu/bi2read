@@ -1,9 +1,9 @@
 # BiMyScribe 架构
 
-版本：1.2
+版本：1.3
 状态：当前稳定架构，持续演进
-产品基线：v0.5.1
-更新日期：2026-08-24
+产品基线：v0.6.0
+更新日期：2026-08-25
 
 本文描述当前稳定实现与模块接口。当前优先级见 `roadmap.md`；长期产品需求由内部需求
 基线维护，历史方案不参与架构裁决。
@@ -23,10 +23,10 @@
 - Runtime normalized 输出先经过 schema、segments、文本和时间范围校验，成功后才写
   `transcript.raw.json`；reported language/model/identity 缺失时保持“未报告”。
 - v0.5 新 Job 由 `content_setup` marker 识别；`ContentResults` 以同一份经过验证的
-  Evidence 生成并校验四项文字结果，持久化唯一 `content-current.v1.json`。
+  Evidence 生成并校验各项文字结果，持久化唯一 `content-current.v1.json`（Schema v2）。
 - v0.5 结果入口只对 Evidence 有效的终态 Job 开放；重生成与 RawOnly 修复只在当前进程内串行，
   不写持久命令、历史或恢复队列。
-- v0.5 App 与文档都消费结构化 current；Presentation 只有一个最终 `full.md` 出口，legacy Job
+- v0.5/v0.6 App 与文档都消费结构化 current；Presentation 只有一个最终 `full.md` 出口，legacy Job
   完全 passthrough，不迁移、不从旧 Markdown 提升内容事实。
 
 ## 执行流
@@ -36,15 +36,15 @@ GUI (`desktop`) ─┐
                  ├─> Scheduler ─> Pipeline ─> Bilibili / FFmpeg / FunASR
 CLI (`cli`) ─────┘                      │
                                        ├─> raw transcript Evidence
-                                       ├─> ContentResults (v0.5 marker jobs)
-                                       │       ├─> content-current.v1.json
+                                       ├─> ContentResults (v0.5+ marker jobs)
+                                       │       ├─> content-current.v1.json (Schema v2)
                                        │       └─> validated result snapshot
                                        ├─> document Presentation
                                        │       └─> one final full.md
                                        └─> cleanup
 
 Job snapshot ─> UI bridge ─> generated Slint view models ─> `ui/**`
-ContentResults current ─> result view / source expansion / regeneration callbacks
+ContentResults current ─> result view / source expansion / regeneration / search / reading time
 ```
 
 GUI 和 CLI 共享 `Scheduler`、`Pipeline`、`Job` 与产物契约，不能各自发展一条流水线。
@@ -90,26 +90,31 @@ requested/reported language、model 与 Runtime identity。
 | `src/cli.rs` | `dispatch_requested` | CLI 参数、路径覆盖、Runtime 命令、版本化 envelope 和退出码 |
 | `src/scheduler.rs` | `Scheduler::drain_next` | runnable 选择、取消 registry、任务终态收敛 |
 | `src/pipeline.rs` | `run_job` | 阶段顺序、Evidence 持久化、ContentResults 初始执行、产物校验、清理和终态收敛 |
-| `src/content_results.rs` | `current`、`execute` | Evidence 校验、四项内容派生、来源映射、失败隔离、RawOnly、内存重生成和单文件原子发布 |
+| `src/content_results.rs` | `current`、`execute`、`test_connection`、`search` | Evidence 校验、三档摘要、忠实正文、章节、重点、来源映射、失败隔离、单视频搜索与 Schema v2 发布 |
+| `src/reading_time.rs` | `estimate_reading_time`、`measure_body` | 中/英/混排字数规模测量、版本化 profile（v1）与原片节省时长计算 |
 | `src/ui_bridge.rs` | crate 内进度/快照映射 | `JobViewSnapshot` 到 Slint row/detail/stage models 的全部转换 |
 | `src/jobs.rs` | `Job`、`Queue`、snapshot 与 artifact validation | 状态机、原子写入、恢复和能力计算 |
 | `src/bilibili.rs` | parse/fetch/download | 匿名 API、短链解析、DASH audio 选择和 retry |
 | `src/funasr.rs` | `describe_runtime`、`run(TranscribeRequest)` | v1/v2 manifest、fingerprint/readiness、语言 argv、normalized 解析和资源回收 |
 | `src/llm.rs` | `refine_utterances` | 协议 adapter、分批请求、响应校验和逐条回退 |
-| `src/document.rs` | raw/readable/final render | 基于 ContentSnapshot 的原始稿、faithful/readable 和唯一 `full.md` Presentation |
+| `src/document.rs` | raw/readable/final render | 基于 ContentSnapshot 的原始稿、faithful/readable 和按档位导出的唯一 `full.md` Presentation |
 | `src/process.rs` | subprocess spawn/run/cancel | 进程组、日志、终止升级和 Docker cleanup |
 | `src/config.rs`、`src/paths.rs` | 配置与平台路径 | 默认值、迁移、单实例锁、release-check 隔离 |
 
 这里的“模块”以接口和职责定义，不以文件大小定义。新的拆分必须通过删除测试：删掉模块后，
 复杂度会重新散落到多个 caller；只转发一次调用的文件不构成有价值的模块。
 
-## v0.5 可信文字消费
+## v0.5/v0.6 可信文字消费与智能精选
 
-`ContentResults` 是 v0.5 的深模块，外部只暴露 `current(job)` 和
-`execute(job, intent, cancel)` 两个入口。模块内部完成 raw Evidence 定位与 schema/SHA 校验、
-上下文快照、faithful/chapters/default summary/highlights 四项派生、mapped/limited 来源状态、
-失败隔离和 `content-current.v1.json` 的整文件原子发布。调用者不读取或解释 raw JSON，不计算
-revision，不拼接 slot，也不把某一项派生结果作为另一项的隐式前置条件。
+`ContentResults` 是文字消费核心深模块，外部暴露 `current(job)`、
+`execute(job, intent, cancel)`、`test_connection(target)` 以及查询解析纯函数。模块内部完成
+raw Evidence 定位与 schema/SHA 校验、上下文快照、faithful/chapters/short summary/standard summary/long summary/highlights
+各项派生、mapped/limited 来源状态、失败隔离与 `content-current.v1.json`（Schema v2）整文件原子发布。
+
+- **三档摘要（v0.6）**：short（≤200 字）、standard（300–500 字）、long（800–1500 字）拥有独立契约；未生成档位回退 FaithfulText；导出严格按选定档位输出。
+- **连接探测（v0.6）**：10 秒超时映射五类结构化故障；Slint 与 controller 间使用单调递增 `probe_token` 实现严格的草稿变动失效。
+- **单视频搜索（v0.6）**：覆盖忠实正文与原始稿双层匹配，支持 `mm:ss` 时间点（±30 秒）、时间范围和说话人过滤。
+- **阅读时间（v0.6）**：由 `src/reading_time.rs` 纯函数计算，中/英/混排字数规模经版本化 profile（v1）输出一致的阅读时间与节省时长。
 
 `current()` 只读并返回 `Legacy`、`RawOnly` 或 `Current`：marker 缺失时是 Legacy；current
 缺失或损坏但 Evidence 有效时是 RawOnly；其余情况返回带 validated Evidence 的 Current。它不从

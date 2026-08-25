@@ -53,6 +53,9 @@ export component App inherits Window {
     in property <bool> settings-saving: false;
     in property <string> settings-error-field: "";
     in property <string> settings-error-message: "";
+    in-out property <int> settings-page: 0;
+    in-out property <string> connection-test-state: "idle";
+    in-out property <string> connection-test-message: "";
     in property <int> inspector-toggle-focus-generation: 0;
     in property <int> inspector-tab-focus-generation: 0;
     in property <[JobRow]> jobs: [];
@@ -152,6 +155,7 @@ export component App inherits Window {
     // visual QA may temporarily enable it without mutating persisted jobs.
     in property <bool> ui-verification-empty: false;
     in property <int> ui-verification-inspector-page: 0;
+    in-out property <int> summary-tier: 1;
     property <[JobRow]> display-jobs: root.ui-verification-empty ? [] : root.jobs;
 
     // ---- Public callbacks (handled in Rust) ----
@@ -173,6 +177,9 @@ export component App inherits Window {
     callback result-regenerate(string);
     callback result-source(string);
     callback result-jump(string);
+    callback summary-tier-selected(int);
+    callback result-search(string);
+    callback result-search-clear;
     callback reveal-in-finder;
     callback delete-job;
     callback clear-history;
@@ -182,7 +189,9 @@ export component App inherits Window {
     callback speaker-name-edited(int, string);
     callback save-settings(SettingsView);
     callback install-runtime(SettingsView);
+    callback test-connection(SettingsView);
     callback cancel-settings;
+    callback settings-draft-changed;
     callback transcription-confirm-language-changed(string);
     callback transcription-confirm-runtime-changed(int);
     callback transcription-confirmed;
@@ -371,6 +380,9 @@ export component App inherits Window {
                     requested-language: root.detail.requested-language;
                     reported-language: root.detail.reported-language;
                     reported-model: root.detail.reported-model;
+                    reading-estimate: root.detail.reading-estimate;
+                    reading-saved: root.detail.reading-saved;
+                    reading-profile: root.detail.reading-profile;
                     can-view-result: root.detail.can-view-result;
                     result-open: root.result-open;
                     result: root.result;
@@ -382,6 +394,7 @@ export component App inherits Window {
                     speaker-feedback-error: root.speaker-feedback-error;
                     verification-fixture: root.ui-verification-fixture;
                     verification-inspector-page: root.ui-verification-inspector-page;
+                    summary-tier <=> root.summary-tier;
                     inspector-toggle-focus-generation: root.inspector-toggle-focus-generation;
                     inspector-tab-focus-generation: root.inspector-tab-focus-generation;
 
@@ -389,6 +402,7 @@ export component App inherits Window {
                     retry-clicked => { root.retry-job(); }
                     rebuild-clicked => { root.rebuild-job(); }
                     open-md-clicked => { root.open-md(); }
+                    reveal-clicked => { root.reveal-in-finder(); }
                     view-result-clicked => { root.view-result(); }
                     result-back-clicked => { root.result-back(); }
                     result-open-raw-clicked => { root.result-open-raw(); }
@@ -396,7 +410,10 @@ export component App inherits Window {
                     result-regenerate-clicked(kind) => { root.result-regenerate(kind); }
                     result-source-clicked(url) => { root.result-source(url); }
                     result-jump-clicked(url) => { root.result-jump(url); }
-                    reveal-clicked => { root.reveal-in-finder(); }
+                    summary-tier-clicked(tier) => { root.summary-tier-selected(tier); }
+                    search-changed(query) => { root.result-search(query); }
+                    search-submitted(query) => { root.result-search(query); }
+                    search-cleared() => { root.result-search-clear(); }
                     delete-clicked => { root.delete-job(); }
                     toggle-screenshots(v) => { root.toggle-screenshots(v); }
                     speaker-name-edited(id, name) => { root.speaker-name-edited(id, name); }
@@ -411,14 +428,19 @@ export component App inherits Window {
     // Modal settings overlay on top of everything.
     SettingsModal {
         shown <=> root.settings-visible;
+        selected-page <=> root.settings-page;
         settings: root.settings;
         save-feedback: root.settings-feedback;
         saving: root.settings-saving;
         error-field: root.settings-error-field;
         error-message: root.settings-error-message;
+        connection-test-state <=> root.connection-test-state;
+        connection-test-message <=> root.connection-test-message;
         save(s) => { root.save-settings(s); }
         install-runtime(s) => { root.install-runtime(s); }
+        test-connection(s) => { root.test-connection(s); }
         cancel => { root.cancel-settings(); }
+        draft-changed => { root.settings-draft-changed(); }
         choose-directory(kind) => { root.choose-directory(kind) }
         default-directory(kind) => { root.default-directory(kind) }
     }

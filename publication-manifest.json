@@ -1,0 +1,589 @@
+{
+  "app_version": "0.6.0",
+  "files": [
+    {
+      "executable": false,
+      "path": "CHANGELOG.md",
+      "sha256": "28c395a6c77bf45b8d18fd1d7492eb11f3d0729555242ce20efddec97eb5febb",
+      "size": 8673
+    },
+    {
+      "executable": false,
+      "path": "Cargo.lock",
+      "sha256": "2529d71c1153c6bd4400b80acebf42bc13b8b0a19695d1762b499321b92ad2e3",
+      "size": 163887
+    },
+    {
+      "executable": false,
+      "path": "Cargo.toml",
+      "sha256": "99205961d7696a8b9d5e28871925c03be6e3a010652d47672292879242fc1f9e",
+      "size": 1041
+    },
+    {
+      "executable": false,
+      "path": "LICENSE",
+      "sha256": "6705dc971a845f38b31082bf6d4ad7f06e0e46c1cbef25c7a13c0bc21d95b7a3",
+      "size": 1059
+    },
+    {
+      "executable": false,
+      "path": "README.md",
+      "sha256": "1233e44933f6bca286d9705ab4a5b2837e3a13ef3d2efba0d7d131b4c36305d2",
+      "size": 14890
+    },
+    {
+      "executable": false,
+      "path": "RELEASE_NOTES.md",
+      "sha256": "1880d90b1c0e5c70a2340be5dabde8b612e30f1a18b9b02ea936db1c85aef736",
+      "size": 5575
+    },
+    {
+      "executable": false,
+      "path": "build.rs",
+      "sha256": "06c059f00bc5afd24b4e2c5d277b5ff875ebd8c734f233cc681f443248815fb7",
+      "size": 240
+    },
+    {
+      "executable": false,
+      "path": "docs/adr/0001-v0.4-runtime-language-selection.md",
+      "sha256": "9435070c2355916cac9710c684a5e80f22fb2f1c1b926a337547b3cb9ecebc62",
+      "size": 8504
+    },
+    {
+      "executable": false,
+      "path": "docs/adr/0002-v0.5-trusted-content-derivation.md",
+      "sha256": "6597bf44a88d4b09b673d9bb5cda2c7f20031d318f2dc060a2854756777c3647",
+      "size": 22429
+    },
+    {
+      "executable": false,
+      "path": "docs/architecture.md",
+      "sha256": "8d091af5c1a66fb9948c01d994af6b98d40c40a168cab42a52d478dfc8cfda3b",
+      "size": 12697
+    },
+    {
+      "executable": false,
+      "path": "docs/design/bimyscribe-design-spec.md",
+      "sha256": "9509a9f2a2d132326c37f93cbafc6f83874501444043d05f55e1150cb06d7ec1",
+      "size": 27725
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.2.2.md",
+      "sha256": "5611d629077ca907772026e9b02f374dc0a91aad6a137261776efdcd5083bb20",
+      "size": 2750
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.3.0.md",
+      "sha256": "90bb64c2290f472cebaa0f091bd02f174c68ef517c433c1f1425452b060d5a1c",
+      "size": 3866
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.4.0.md",
+      "sha256": "19b5d9554c4e3846890b38a5eea2699f0b17481ac47e8fede096283988ee2c58",
+      "size": 4449
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.4.1.md",
+      "sha256": "5ad0a1b4eda4ca7e370265b260e90a2af981a8706bc726e992de3c653faeac60",
+      "size": 3804
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.5.0.md",
+      "sha256": "0d1ce53d8aba84fab76d142794ecc4e4e8eb57265a49bf18161af79427bdce91",
+      "size": 4882
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.5.1.md",
+      "sha256": "3fa3770c9261f481fca54072d834a7b6f527ac3a8f97c3705b47e5ed837deac6",
+      "size": 3321
+    },
+    {
+      "executable": false,
+      "path": "docs/releases/v0.6.0.md",
+      "sha256": "1880d90b1c0e5c70a2340be5dabde8b612e30f1a18b9b02ea936db1c85aef736",
+      "size": 5575
+    },
+    {
+      "executable": false,
+      "path": "docs/roadmap.md",
+      "sha256": "9e1628ba3278d1b3d65b1d4177c32d1ff4e1bd3fd4a9c3dea13eefd9c3853ac8",
+      "size": 11508
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/Info.plist.in",
+      "sha256": "3e9fb1d7ffa1b0a7a73b6d9ccb313a16f7bd0a1342babcd641068e62bb93c185",
+      "size": 982
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/THIRD_PARTY_NOTICES.md",
+      "sha256": "6d76ef09c03106e51def2c19e9fc633ffb06e82e52cdd847d292fa6b5f77baf5",
+      "size": 436
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/assets/AppIcon-v1-transparent.png",
+      "sha256": "cd8d251c535fcc906a087fbd42ffef2f2905ff0b78397573935fdf8d27696f87",
+      "size": 1625188
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/assets/AppIcon-v1.png",
+      "sha256": "b3cfa5eba6196f59a6b11084e6d55e8fd626605d53d3187532af0a96ae884f72",
+      "size": 1455794
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/assets/AppIcon.icns",
+      "sha256": "d0edf8c81dd08b32682fee6dba509ff155aff0f20868d9db4b7f75ea57174cd3",
+      "size": 2266325
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/entitlements.plist",
+      "sha256": "97704a8960b4facceef54397a08fb5d0a456247c3627359215aa2a27df22656c",
+      "size": 181
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/licenses/UV-LICENSE-APACHE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "size": 11357
+    },
+    {
+      "executable": false,
+      "path": "packaging/macos/licenses/UV-LICENSE-MIT",
+      "sha256": "860e3d7a86b84e6a7012c7a635fc64df475cebc6cce34dfeb73a5982ec58176c",
+      "size": 1077
+    },
+    {
+      "executable": false,
+      "path": "packaging/public-paths.txt",
+      "sha256": "a19abd600d8b76c14795077002715968612489dbb68f274d65fa51e1beed42a5",
+      "size": 756
+    },
+    {
+      "executable": false,
+      "path": "packaging/release-baseline.toml",
+      "sha256": "27953e061d12f002dc4ff862fd914ecf5dd174a98f5f0c741e6834907bc7351d",
+      "size": 395
+    },
+    {
+      "executable": false,
+      "path": "packaging/release.toml",
+      "sha256": "d21d21c738df9a8e240d2773587560c2c3d9e2b26d9db6c34480f43110b76ae9",
+      "size": 605
+    },
+    {
+      "executable": false,
+      "path": "rust-toolchain.toml",
+      "sha256": "b75adb23d2a10ff0bfdbc436fa4e5e74347ec25eebfaa729a4344f01b59dccfe",
+      "size": 29
+    },
+    {
+      "executable": true,
+      "path": "scripts/build-macos-icon.sh",
+      "sha256": "3978eda1b269c78dcc95a7580a48383d50b9fa0eae3867e010ff5a0716029f67",
+      "size": 1744
+    },
+    {
+      "executable": true,
+      "path": "scripts/build-macos-local.sh",
+      "sha256": "54854f76299f3e511e07ecf3f5f452843d66dfbf01d489748eb6f145bcb6c67c",
+      "size": 3748
+    },
+    {
+      "executable": true,
+      "path": "scripts/check-public-snapshot.py",
+      "sha256": "6222f9675af4e8608cc31c954824bae5b25ae7bc153baa0645b4259bb4a45287",
+      "size": 12293
+    },
+    {
+      "executable": true,
+      "path": "scripts/check-release-e2e.sh",
+      "sha256": "bd76b479e11d3372b4e3ab0af21a653bd14c40deb41b896399da7598972a20b7",
+      "size": 7259
+    },
+    {
+      "executable": true,
+      "path": "scripts/check-release.sh",
+      "sha256": "ef29feb3ecf85259a866a83d7e8ab0bc9467fdf8d6c90644ce3ec150087d63c4",
+      "size": 57020
+    },
+    {
+      "executable": true,
+      "path": "scripts/finalize-release-manifest.sh",
+      "sha256": "1c0cd81df718b3e3a3e81a10f63e70d1a43809883d85edcce7e436e1b58919da",
+      "size": 2243
+    },
+    {
+      "executable": true,
+      "path": "scripts/install-macos-docker-local.sh",
+      "sha256": "69b708c43af7bb368bd8680a602174813fabf99d135f1987874f96a45110aaf1",
+      "size": 8613
+    },
+    {
+      "executable": true,
+      "path": "scripts/package-macos-app.sh",
+      "sha256": "681340c696046616d8a74a0e55da5a96c91501297884a9384bac95b7ff9f4e9a",
+      "size": 8383
+    },
+    {
+      "executable": true,
+      "path": "scripts/record-signing-evidence.sh",
+      "sha256": "223848d2193bf430778815484d37fbe80c0b1541abf172eb8f4ff95fce60c3bb",
+      "size": 2639
+    },
+    {
+      "executable": false,
+      "path": "src/bilibili.rs",
+      "sha256": "5f70d03c3ab8aa888a1eec7b87cb1075c288be839faa4ff9250627ec841d3639",
+      "size": 24900
+    },
+    {
+      "executable": false,
+      "path": "src/bin/e2e_smoke.rs",
+      "sha256": "7faddbac9d75fb4ee8782393eee80eaa8988eaa899328139ad38fcfe4983efe7",
+      "size": 19736
+    },
+    {
+      "executable": false,
+      "path": "src/cancel.rs",
+      "sha256": "59ef1a2fc7d913d2c369fb72365a98372fcb49dd7b3e7ae0450bfd83ab364fcf",
+      "size": 4841
+    },
+    {
+      "executable": false,
+      "path": "src/cli.rs",
+      "sha256": "75b5dee13a2d3f452d4e92a06c2365bf97f197af8ee25566e45ef4d1640eb86d",
+      "size": 28352
+    },
+    {
+      "executable": false,
+      "path": "src/config.rs",
+      "sha256": "fb76f71d447143a75800fc648d647fe86fc1822e2b54b46a90d3ebe91000992a",
+      "size": 23883
+    },
+    {
+      "executable": false,
+      "path": "src/content_results.rs",
+      "sha256": "8ee202b22bfb09755b5b1afef48af693685b6705ee37e0de142a27f9bb27c6e6",
+      "size": 218224
+    },
+    {
+      "executable": false,
+      "path": "src/desktop.rs",
+      "sha256": "f093af32de3806a1d35918ab81b5b95fda60772549c1f762e8c83e1c30edec19",
+      "size": 209511
+    },
+    {
+      "executable": false,
+      "path": "src/document.rs",
+      "sha256": "2cba00498372d6f80725967a134217634df37900160937d487b41980ceb25f9f",
+      "size": 46753
+    },
+    {
+      "executable": false,
+      "path": "src/funasr.rs",
+      "sha256": "188b83592c52d2cb1c25682c8dd46ced2bfecb19aa584d85e40b585d008ad006",
+      "size": 57213
+    },
+    {
+      "executable": false,
+      "path": "src/jobs.rs",
+      "sha256": "61a63a40eeb2ec36a43099590ea3d49b9dc4a8c6c94b7989474555f3b2418a12",
+      "size": 100075
+    },
+    {
+      "executable": false,
+      "path": "src/lib.rs",
+      "sha256": "3a401a3be05c2a70f0a39321c439dd5028c24fe2b74e392b24ebd2228f32c19c",
+      "size": 463
+    },
+    {
+      "executable": false,
+      "path": "src/llm.rs",
+      "sha256": "640cd09ada119c86d05de5282485a2321c1d978162ea68cc6da66c6f3577d545",
+      "size": 16018
+    },
+    {
+      "executable": false,
+      "path": "src/main.rs",
+      "sha256": "4439e25085db83b7231419c76350037f585e341550cdcf046ba6f44ac2f9dee6",
+      "size": 640
+    },
+    {
+      "executable": false,
+      "path": "src/package_check.rs",
+      "sha256": "1be59abe78c77f12448e26b3f914989abb2a016fd871c5dd3ebb52a62652b142",
+      "size": 3614
+    },
+    {
+      "executable": false,
+      "path": "src/paths.rs",
+      "sha256": "d5bfdbb9615b6a43de4b0448ce83e0434a6bc3857c3602daaf6896a17aeddc59",
+      "size": 18165
+    },
+    {
+      "executable": false,
+      "path": "src/pipeline.rs",
+      "sha256": "b17c7c920b71d60b09324c4711439f9d4a52b0dd1a8fcb14b60e56d455b20e99",
+      "size": 42119
+    },
+    {
+      "executable": false,
+      "path": "src/process.rs",
+      "sha256": "d9919aaa08b10ded73509045076f18122f2a541ad823de35f81f7f8e37d040d5",
+      "size": 10159
+    },
+    {
+      "executable": false,
+      "path": "src/reading_time.rs",
+      "sha256": "98aa8d9e325de03373798d76362ea8622b8671e5ee1164358a7aa040749925e8",
+      "size": 8949
+    },
+    {
+      "executable": false,
+      "path": "src/scheduler.rs",
+      "sha256": "1b927bb34ea5801277fbd6f459164e893f7ade7c6c96cc69deebc1cb85c7562b",
+      "size": 22425
+    },
+    {
+      "executable": false,
+      "path": "src/ui_bridge.rs",
+      "sha256": "b0a1d42e2a2b2465850b68d61ff1d8b14c92e02ff958407c03dffedcc1571f25",
+      "size": 7998
+    },
+    {
+      "executable": false,
+      "path": "tests/cli_contract.rs",
+      "sha256": "e3a2c2d298bf5daff4766dff1c8c3ebc1c116ab809f0119ad8632d8d6a3347f3",
+      "size": 5691
+    },
+    {
+      "executable": false,
+      "path": "tests/fixtures/audio/sample.wav",
+      "sha256": "979e1f46099ff1b4e3b61848d7fa86cf6189b39bf1a978afbc83da5c87f19d12",
+      "size": 32078
+    },
+    {
+      "executable": false,
+      "path": "tests/fixtures/transcript.en.json",
+      "sha256": "23b09e18c47a3812a7d6bae0d12430ed8d66f1b41b6724472f7773c4ea598c1c",
+      "size": 626
+    },
+    {
+      "executable": false,
+      "path": "tests/fixtures/transcript.zh.json",
+      "sha256": "9e648d4194d099481cca891f14f9d4ececd161221dbd10fd4b357f66554c9f4c",
+      "size": 604
+    },
+    {
+      "executable": false,
+      "path": "tests/pipeline_e2e.rs",
+      "sha256": "9f54dfeebfcac35b09c864ca4a1f05defb9de54a7357ddce731b79ff307ff4b9",
+      "size": 36095
+    },
+    {
+      "executable": false,
+      "path": "ui/app.slint",
+      "sha256": "864ed2a8dea82b47e7cc9f3c01e9790a8fb52568e982eff1501b9d2444de427d",
+      "size": 23262
+    },
+    {
+      "executable": false,
+      "path": "ui/components/add-bar.slint",
+      "sha256": "1eb36651cef4793e71b5af6683b37b899e891056626d0a7a11d533000e8e79d5",
+      "size": 6228
+    },
+    {
+      "executable": false,
+      "path": "ui/components/badge.slint",
+      "sha256": "fcea98de45b74df4252ac598b7f51c26070abd06a3fc3b238e4df38bbba4ea8c",
+      "size": 4074
+    },
+    {
+      "executable": false,
+      "path": "ui/components/button.slint",
+      "sha256": "52a5b4f1653c34ed4c126654b4846e0407e7218ff23ef063b1e3c5715dae38ba",
+      "size": 5117
+    },
+    {
+      "executable": false,
+      "path": "ui/components/confirm-modal.slint",
+      "sha256": "3f61e7ffb788adbc16bfedb6837d975b93823793470363506ec9a6e99a42ffde",
+      "size": 3827
+    },
+    {
+      "executable": false,
+      "path": "ui/components/content-results.slint",
+      "sha256": "ad790e5b72270b206b45833a0b93d482baf302f6fd72c2b27001093a2157816e",
+      "size": 27622
+    },
+    {
+      "executable": false,
+      "path": "ui/components/icon-button.slint",
+      "sha256": "d4e5f472028c748d0192410c1a569eddf43d4abf0896e31e11cc83d766d74d17",
+      "size": 3384
+    },
+    {
+      "executable": false,
+      "path": "ui/components/job-detail.slint",
+      "sha256": "8d240e9afa2778fa60eeae630ad6d56fdf4259cead3252e3159421fdd37f3759",
+      "size": 56266
+    },
+    {
+      "executable": false,
+      "path": "ui/components/job-row.slint",
+      "sha256": "24cd77817e92277757834e2fdab9accf003219388704486189b45822b9099e67",
+      "size": 7812
+    },
+    {
+      "executable": false,
+      "path": "ui/components/progress.slint",
+      "sha256": "e74289189ace504adacef30e1f80b9f677900bbf7ab6ebba2070783460ebb18d",
+      "size": 2199
+    },
+    {
+      "executable": false,
+      "path": "ui/components/settings.slint",
+      "sha256": "d8ee45d2a7ba587f89d7d0607c9237658982b902949bbd7c5d573e75d4ee8031",
+      "size": 45358
+    },
+    {
+      "executable": false,
+      "path": "ui/components/switch.slint",
+      "sha256": "24d7a51845f1566afc3af82cf909af2ec2c1423bae4e7e48b83ff6c659fb210c",
+      "size": 2535
+    },
+    {
+      "executable": false,
+      "path": "ui/components/text-field.slint",
+      "sha256": "5826048e7112707127150f552bcb730dc078e1f0bfa65b730ae79e3b6bc75b30",
+      "size": 8902
+    },
+    {
+      "executable": false,
+      "path": "ui/components/transcription-confirm.slint",
+      "sha256": "55fc542cd1fadf7f2e47d27152cf1ce95083725e39ea5628c0370258103ebc3e",
+      "size": 14038
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/check-circle.svg",
+      "sha256": "9613b7f2f16a3208c0dddc1a942ac12e1a91e019c806c3b573d5c8aa2bb4882a",
+      "size": 278
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/chevron-down.svg",
+      "sha256": "3f90cebee1224258e4d69a2e70a3cccb7ccf0d38a7276b2b32f1c40daf6b9280",
+      "size": 191
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/chevron-left.svg",
+      "sha256": "95a6c06d76eb3aafc7a94ba93fe1ca9234cb9271d8c5df024d394a9f1dd281b1",
+      "size": 192
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/chevron-right.svg",
+      "sha256": "da37f12a869861fde1bb37e3f7214e1a5b56fddcaf9c212bc6da297c35ac684a",
+      "size": 191
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/chevron-up.svg",
+      "sha256": "24bd3f56478ba71f7b30551636607a77854f4953ea792596c49021e961a55023",
+      "size": 192
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/circle.svg",
+      "sha256": "a0d6f636c2c5fcfdc4ba8101c0e367612e2fde0fa6e3a3ff3dc8bd0488986083",
+      "size": 148
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/dot-circle.svg",
+      "sha256": "13260721f4e046e084be37f56dd17d8a54008b55ddb34c50be3a67e561dc825c",
+      "size": 199
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/gear.svg",
+      "sha256": "32e61a8fda1f10afc2480f2a3dcee48540f714601e55cd90c4a6f59a7d730524",
+      "size": 775
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/link.svg",
+      "sha256": "9aadb86bcabc0acc8ad845563fa97eb1adcbff731d1158540dc15923e4810ff4",
+      "size": 310
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/logo.svg",
+      "sha256": "e4419216a1b6b946c8b58d33a6953752e58f975a6220919ce7fa91d5612f005a",
+      "size": 468
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/minus-circle.svg",
+      "sha256": "7dbc3a1bc09f4e173e0cb1c4597152666632e59346568394ad021ca49324ac6d",
+      "size": 194
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/trash.svg",
+      "sha256": "58626b5193cedbab7b7bd384f6654c01daff52ca586ef3d43d97006a43f7641d",
+      "size": 342
+    },
+    {
+      "executable": false,
+      "path": "ui/icons/warning.svg",
+      "sha256": "2423f81612c1527b5cd427a3c5f132e13c30c2b4035b13fe1b220507f6dccda9",
+      "size": 255
+    },
+    {
+      "executable": false,
+      "path": "ui/stage-style.slint",
+      "sha256": "4a84aa3c8772743942e4853d2c60103e82ca18773254d9e0c423285f285f8218",
+      "size": 7071
+    },
+    {
+      "executable": false,
+      "path": "ui/theme.slint",
+      "sha256": "77da06a9a66d6c127bcda2b2b033e84e675ae878a44c5c856c99a4ec8376ee32",
+      "size": 5491
+    },
+    {
+      "executable": false,
+      "path": "ui/types.slint",
+      "sha256": "0c666eca6a5c928db9f66f4437d892caa074f18abf2921ad7e1803ce8357681a",
+      "size": 768
+    },
+    {
+      "executable": false,
+      "path": "ui/view-model.slint",
+      "sha256": "4306fbb02dabde27a396a607d9670a89a6021ff61b1c610a7068134e6b1c5547",
+      "size": 7283
+    }
+  ],
+  "private_revision": "311cce801ea702a56ddd7f9f38fff9dc9983164d",
+  "public_path_policy_sha256": "a19abd600d8b76c14795077002715968612489dbb68f274d65fa51e1beed42a5",
+  "publicignore_sha256": "1193e2bef69b720860f37d86d4669deab9b9ea3bf2425855bfcdac3770b96fb0",
+  "release_config_sha256": "d21d21c738df9a8e240d2773587560c2c3d9e2b26d9db6c34480f43110b76ae9",
+  "release_requested": true,
+  "runtime_revision": "18da5ce07d2b52b5c225fa1b45458b05eacc8989",
+  "runtime_tag": "v2.0.0",
+  "schema_version": 1
+}
