@@ -17,5 +17,6 @@ pub mod package_check;
 pub mod paths;
 pub mod pipeline;
 pub mod process;
+pub mod reading_time;
 pub mod scheduler;
 mod ui_bridge;

@@ -3,6 +3,7 @@ import { Theme } from "../theme.slint";
 import { ContentResultsData, ContentRow } from "../view-model.slint";
 import { SecondaryButton, PrimaryButton } from "button.slint";
 import { IconButton } from "icon-button.slint";
+import { AppTextField } from "text-field.slint";
 
 // A deliberately small tab primitive.  The result view keeps the selected
 // tab and source expansion in memory only; content and operation state still
@@ -110,6 +111,13 @@ component ContentResultRow inherits Rectangle {
     border-color: Theme.separator;
     border-width: 0px;
 
+    if root.item.kind != "section" && root.item.can-jump : TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.jump-clicked(root.item.source-url); }
+    }
+
     if root.item.kind == "section" : VerticalLayout {
         padding-left: Theme.space-md;
         padding-right: Theme.space-md;
@@ -143,6 +151,14 @@ component ContentResultRow inherits Rectangle {
                 disabled: root.item.action-pending || root.operation-pending;
                 clicked => { root.action-clicked(root.item.action-kind); }
             }
+        }
+        if !root.item.action-caption.is-empty : Text {
+            text: root.item.action-caption;
+            color: Theme.text-muted;
+            font-size: Theme.font-caption;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            height: self.preferred-height;
         }
         section-text := Text {
             text: root.item.declaration.is-empty ? root.item.text : root.item.declaration;
@@ -263,13 +279,38 @@ component ContentResultRow inherits Rectangle {
     }
 }
 
-export component ContentResults inherits Rectangle {
+export component ContentResults inherits FocusScope {
     in property <ContentResultsData> data;
     in property <bool> operation-pending: false;
     in property <string> operation-target-kind: "";
     in property <string> operation-feedback;
     in property <bool> operation-feedback-error: false;
+    in property <int> search-focus-generation: 0;
+    in-out property <string> search-text: "";
     in-out property <int> selected-tab: root.data.default-tab;
+    property <bool> search-timer-running: false;
+    property <bool> show-explainer: false;
+
+    changed search-focus-generation => {
+        search-field.focus();
+    }
+
+    key-pressed(event) => {
+        if event.modifiers.meta && event.text == "f" {
+            search-field.focus();
+            return accept;
+        }
+        return reject;
+    }
+
+    search-timer := Timer {
+        interval: 300ms;
+        running: search-timer-running;
+        triggered => {
+            search-timer-running = false;
+            root.search-changed(root.search-text);
+        }
+    }
     // Expansion is presentation-only and reset when the active tab changes;
     // it is never serialized or sent to ContentResults.
     in-out property <int> expanded-row: -1;
@@ -294,20 +335,28 @@ export component ContentResults inherits Rectangle {
     callback regenerate-clicked(string);
     callback source-clicked(string);
     callback jump-clicked(string);
+    callback summary-tier-clicked(int);
+    callback search-changed(string);
+    callback search-submitted(string);
+    callback search-cleared();
+    callback search-result-clicked(string);
 
-    property <[ContentRow]> active-rows: root.selected-tab == 0 ? root.data.summary-rows
+    property <[ContentRow]> active-rows: root.data.search-active ? root.data.search-rows
+        : root.selected-tab == 0 ? root.data.summary-rows
         : root.selected-tab == 1 ? root.data.chapters-rows
         : root.selected-tab == 2 ? root.data.faithful-rows
         : root.data.raw-rows;
 
-    background: Theme.surface;
     accessible-role: main;
 
-    VerticalLayout {
-        spacing: 0px;
+    Rectangle {
+        background: Theme.surface;
+
+        VerticalLayout {
+            spacing: 0px;
 
         Rectangle {
-            height: 88px;
+            height: 132px;
             background: Theme.surface;
             VerticalLayout {
                 padding-left: Theme.space-md;
@@ -347,27 +396,96 @@ export component ContentResults inherits Rectangle {
                         horizontal-stretch: 1;
                         overflow: elide;
                     }
-                    if !root.data.bvid.is-empty : Text {
-                        text: root.data.bvid + " · P" + root.data.page;
-                        color: Theme.text-muted;
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    Text {
+                        text: root.data.reading-caption;
+                        color: Theme.text-secondary;
                         font-size: Theme.font-caption;
-                        horizontal-stretch: 0;
                         vertical-alignment: center;
-                        accessible-role: text;
-                        accessible-label: "视频标识 " + self.text;
+                        accessible-label: root.data.reading-caption;
+                        visible: !root.data.reading-caption.is-empty;
                     }
-                    if !root.data.video-duration.is-empty : Text {
-                        text: "时长 " + root.data.video-duration;
-                        color: Theme.text-muted;
-                        font-size: Theme.font-caption;
-                        horizontal-stretch: 0;
-                        vertical-alignment: center;
-                        accessible-role: text;
+                    if root.data.show-reading-explainer : TouchArea {
+                        width: explainer-label.preferred-width + Theme.space-xs;
+                        height: 20px;
+                        mouse-cursor: pointer;
+                        clicked => { root.show-explainer = !root.show-explainer; }
+                        explainer-label := Text {
+                            text: root.show-explainer ? "收起说明" : "如何计算";
+                            color: Theme.accent;
+                            font-size: Theme.font-caption;
+                            vertical-alignment: center;
+                        }
                     }
-                    if !root.data.source-url.is-empty : SecondaryButton {
-                        text: "打开原视频 ↗";
-                        clicked => { root.jump-clicked(root.data.source-url); }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.show-explainer && root.data.show-reading-explainer : Text {
+                    text: root.data.reading-explainer;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    height: self.preferred-height;
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-xs;
+                    Rectangle { horizontal-stretch: 1; }
+                    search-field := AppTextField {
+                        accessible-label: "搜索当前视频内容";
+                        placeholder-text: "搜索当前视频内容";
+                        text: root.search-text;
+                        compact: true;
+                        horizontal-stretch: 1;
+                        edited(text) => {
+                            root.search-text = text;
+                            root.search-timer-running = false;
+                            root.search-timer-running = true;
+                        }
+                        accepted(text) => {
+                            root.search-timer-running = false;
+                            root.search-submitted(text);
+                        }
+                        key-pressed(event) => {
+                            if event.text == Key.Escape {
+                                root.search-text = "";
+                                root.search-cleared();
+                                root.focus();
+                                return accept;
+                            }
+                            return reject;
+                        }
                     }
+                    if !root.search-text.is-empty : SecondaryButton {
+                        text: "清除";
+                        clicked => {
+                            root.search-text = "";
+                            root.search-cleared();
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.data.show-model-notice : Rectangle {
+            height: max(44px, model-notice-text.preferred-height + Theme.space-sm + Theme.space-sm);
+            background: Theme.surface-muted;
+            border-color: Theme.border;
+            border-width: 1px;
+            HorizontalLayout {
+                padding-left: Theme.space-md;
+                padding-right: Theme.space-md;
+                padding-top: Theme.space-sm;
+                padding-bottom: Theme.space-sm;
+                model-notice-text := Text {
+                    text: root.data.model-notice;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-body;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    accessible-live-region: polite;
                 }
             }
         }
@@ -419,6 +537,42 @@ export component ContentResults inherits Rectangle {
                 height: self.preferred-height;
                 accessible-role: text;
                 accessible-live-region: polite;
+            }
+        }
+
+        if root.data.show-summary : Rectangle {
+            height: 36px;
+            background: Theme.segment-track;
+            border-radius: Theme.radius-sm;
+            accessible-role: tab-list;
+            accessible-label: "摘要档位";
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+                ResultTab {
+                    text: "短摘要";
+                    selected: root.data.summary-tier == 0;
+                    clicked => { root.summary-tier-clicked(0); }
+                    navigate(delta) => {
+                        if delta < 0 { root.summary-tier-clicked(2); } else { root.summary-tier-clicked(1); }
+                    }
+                }
+                ResultTab {
+                    text: "标准摘要";
+                    selected: root.data.summary-tier == 1;
+                    clicked => { root.summary-tier-clicked(1); }
+                    navigate(delta) => {
+                        if delta < 0 { root.summary-tier-clicked(0); } else { root.summary-tier-clicked(2); }
+                    }
+                }
+                ResultTab {
+                    text: "长摘要";
+                    selected: root.data.summary-tier == 2;
+                    clicked => { root.summary-tier-clicked(2); }
+                    navigate(delta) => {
+                        if delta < 0 { root.summary-tier-clicked(1); } else { root.summary-tier-clicked(0); }
+                    }
+                }
             }
         }
 
@@ -513,4 +667,5 @@ export component ContentResults inherits Rectangle {
             }
         }
     }
+}
 }

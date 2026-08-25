@@ -317,6 +317,9 @@ export component JobDetail inherits Rectangle {
     in property <string> requested-language;
     in property <string> reported-language;
     in property <string> reported-model;
+    in property <string> reading-estimate;
+    in property <string> reading-saved;
+    in property <string> reading-profile;
     in property <bool> can-view-result: false;
     in property <bool> result-open: false;
     in property <ContentResultsData> result;
@@ -328,6 +331,7 @@ export component JobDetail inherits Rectangle {
     in property <bool> speaker-feedback-error: false;
     in property <string> verification-fixture: "";
     in property <int> verification-inspector-page: 0;
+    in-out property <int> summary-tier: 1;
 
     property <bool> fixture-enabled: !root.verification-fixture.is-empty;
     property <bool> fixture-running: root.verification-fixture == "running";
@@ -409,6 +413,11 @@ export component JobDetail inherits Rectangle {
         ? (root.fixture-completed ? "未报告" : "未报告") : root.reported-language;
     property <string> display-reported-model: root.fixture-enabled
         ? "未报告" : root.reported-model;
+    property <string> display-reading-estimate: root.fixture-enabled
+        ? "约 4 分钟" : root.reading-estimate;
+    property <string> display-reading-saved: root.fixture-enabled
+        ? "约 43 分钟" : root.reading-saved;
+    property <string> display-reading-profile: root.fixture-enabled ? "" : root.reading-profile;
     property <bool> display-has-actions: root.display-can-cancel || root.display-can-retry
         || root.display-can-rebuild || root.display-can-open || root.display-can-reveal
         || root.display-can-delete;
@@ -468,6 +477,10 @@ export component JobDetail inherits Rectangle {
     callback result-regenerate-clicked(string);
     callback result-source-clicked(string);
     callback result-jump-clicked(string);
+    callback summary-tier-clicked(int);
+    callback search-changed(string);
+    callback search-submitted(string);
+    callback search-cleared();
     callback reveal-clicked();
     callback delete-clicked();
     callback toggle-screenshots(bool);
@@ -799,6 +812,11 @@ export component JobDetail inherits Rectangle {
                 regenerate-clicked(kind) => { root.result-regenerate-clicked(kind); }
                 source-clicked(url) => { root.result-source-clicked(url); }
                 jump-clicked(url) => { root.result-jump-clicked(url); }
+                summary-tier-clicked(tier) => { root.summary-tier-clicked(tier); }
+                search-changed(query) => { root.search-changed(query); }
+                search-submitted(query) => { root.search-submitted(query); }
+                search-cleared() => { root.search-cleared(); }
+                search-result-clicked(url) => { root.result-jump-clicked(url); }
             }
         }
 
@@ -1098,6 +1116,14 @@ export component JobDetail inherits Rectangle {
                                 OptionRow {
                                     label: "视频时长";
                                     value: root.display-video-duration;
+                                }
+                                OptionRow {
+                                    label: "预计阅读";
+                                    value: root.display-reading-estimate;
+                                }
+                                OptionRow {
+                                    label: "预计节省";
+                                    value: root.display-reading-saved;
                                 }
                                 OptionRow {
                                     label: "媒体占用";

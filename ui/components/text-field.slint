@@ -50,6 +50,7 @@ export component AppTextField inherits Rectangle {
 
     callback accepted(string);
     callback edited(string);
+    callback key-pressed(KeyEvent) -> EventResult;
 
     public function set-selection-offsets(start: int, end: int) {
         text-input.set-selection-offsets(start, end);
@@ -198,6 +199,10 @@ export component AppTextField inherits Rectangle {
 
                     edited => {
                         root.edited(self.text);
+                    }
+
+                    key-pressed(event) => {
+                        root.key-pressed(event)
                     }
                 }
             }
