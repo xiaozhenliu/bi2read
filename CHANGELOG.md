@@ -13,6 +13,24 @@ This file keeps short per-version summaries; see `docs/releases/` for details.
 
 - None.
 
+## 0.6.0 - 2026-08-25
+
+### 中文
+
+- 新增 AI 连接测试（F1）：支持在设置中测试本地 OpenAI/Anthropic 兼容端点，10 秒超时映射，结构化诊断地址错误、模型不可用、协议不匹配、服务不可达或超时，并具备草稿状态隔离。
+- 新增模型更换提示与重生成（F2）：当设置中的模型变更时在文字结果提示模型更换，支持针对各文字档位从既有 Evidence 重新生成并记录生成模型。
+- 新增短/标准/长三档摘要与 Schema v2（F3）：支持在界面中切换短、标准、长三档摘要深度；三档具备独立长度与来源状态契约；未生成档位呈现平滑空状态与针对性生成按钮；选中档位未生成时直接回退忠实正文，`full.md` 严格按选定档位导出。
+- 新增单视频文字搜索（F4）：支持在消费结果中搜索忠实正文与原始转写，支持时间点/时间范围与说话人过滤并实现精确跳转高亮。
+- 新增版本化阅读时间估算（F5）：基于纯中、纯英及中英混排正文字数规模，提供版本化阅读时间与视频时长节省估算，并在界面中提供“如何计算”展开式依据说明。
+
+### English
+
+- Added AI Connection Test (F1): test local OpenAI/Anthropic-compatible endpoints in Settings with 10s deadline, classifying into InvalidAddress, ModelUnavailable, ProtocolMismatch, Unreachable, or Timeout.
+- Added Model Changed Notice & Regeneration (F2): notify when configured model differs from latest generation record, supporting targeted slot regeneration without re-running ASR.
+- Added Three-tier Summary & Schema v2 (F3): support Short, Standard, and Long summary tiers with independent length/source contracts, clean idle state for ungenerated tiers, direct fallback to faithful body text, and consistent tier export in full.md.
+- Added Single-job Text Search (F4): filter across faithful text and raw transcripts with time range, timestamp jumping, and speaker filtering.
+- Added Versioned Reading Time Estimation (F5): compute reading time and video time saved across Chinese, English, and mixed scripts with collapsible explainer accordion.
+
 ## 0.5.1 - 2026-08-24
 
 ### 中文

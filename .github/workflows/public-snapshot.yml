@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   public-snapshot:
+    if: github.repository == 'xiaozhenliu/bimyscribe'
     name: public-snapshot
     runs-on: macos-14
     steps:
@@ -32,6 +33,9 @@ jobs:
       - name: Verify public snapshot
         run: python3 scripts/check-public-snapshot.py verify --root .
 
+      - name: Install Rust formatting component
+        run: rustup component add rustfmt
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -40,4 +44,3 @@ jobs:
 
       - name: Test
         run: cargo test
-

@@ -1,0 +1,33 @@
+# Exact files and recursive directory prefixes eligible for the public snapshot.
+# A trailing slash means every tracked file below that directory is eligible.
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+build.rs
+README.md
+LICENSE
+CHANGELOG.md
+RELEASE_NOTES.md
+src/
+ui/
+tests/
+docs/roadmap.md
+docs/architecture.md
+docs/adr/
+docs/design/bimyscribe-design-spec.md
+docs/releases/
+.github/workflows/public-snapshot.yml
+.github/workflows/release-source.yml
+packaging/public-paths.txt
+packaging/release-baseline.toml
+packaging/release.toml
+packaging/macos/
+scripts/build-macos-icon.sh
+scripts/build-macos-local.sh
+scripts/check-public-snapshot.py
+scripts/check-release-e2e.sh
+scripts/check-release.sh
+scripts/finalize-release-manifest.sh
+scripts/install-macos-docker-local.sh
+scripts/package-macos-app.sh
+scripts/record-signing-evidence.sh

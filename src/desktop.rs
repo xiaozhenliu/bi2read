@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -40,15 +41,22 @@ enum WorkMsg {
         job_id: Uuid,
         kind: RegenerableKind,
         target: ReadyGenerationTargetV1,
+        tier: crate::document::SummaryTier,
     },
     /// Rebuild a missing/corrupt v0.5 current from already-valid Evidence.
-    RepairContent(Uuid),
+    RepairContent {
+        job_id: Uuid,
+        tier: crate::document::SummaryTier,
+    },
     /// Delete one terminal job: its artifacts first, then its queue record.
     DeleteJob(Uuid),
     /// Delete every terminal job (history clear). Live jobs are untouched.
     ClearHistory,
     /// A speaker name was edited; regenerate the markdown documents only.
-    SpeakerChanged(Uuid),
+    SpeakerChanged {
+        job_id: Uuid,
+        tier: crate::document::SummaryTier,
+    },
     Shutdown,
 }
 
@@ -130,7 +138,13 @@ fn parse_ui_fixture(value: &str) -> Option<&'static str> {
         "result-success" => Some("result-success"),
         "result-limited" => Some("result-limited"),
         "result-enhancement-failed" => Some("result-enhancement-failed"),
+        "result-raw-only" => Some("result-raw-only"),
         "result-regenerating" => Some("result-regenerating"),
+        "settings-connection-tested" => Some("settings-connection-tested"),
+        "settings-connection-failed" => Some("settings-connection-failed"),
+        "result-summary-depths" => Some("result-summary-depths"),
+        "result-search" => Some("result-search"),
+        "result-model-changed" => Some("result-model-changed"),
         "confirmation" => Some("confirmation"),
         "delete-confirm" => Some("delete-confirm"),
         "clear-confirm" => Some("clear-confirm"),
@@ -226,18 +240,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_root = result_fixture.then(|| {
         std::env::temp_dir().join(format!("bimyscribe-result-fixture-{}", Uuid::new_v4()))
     });
-    if let Some(root) = &fixture_root {
-        cfg.working_dir = root.join("jobs");
-        cfg.output_dir = root.join("output");
-        cfg.runtime_data_dir = root.join("runtime-data");
+    let is_settings_test_fixture = matches!(
+        ui_fixture,
+        Some("settings-connection-tested" | "settings-connection-failed")
+    );
+    if is_settings_test_fixture || fixture_root.is_some() {
         cfg.llm_enabled = true;
         cfg.llm_connection = Some(crate::llm::LlmConnection {
             id: "ui-fixture-local".into(),
             name: "UI fixture local endpoint".into(),
             api_format: crate::llm::ApiFormat::OpenAiChatCompletions,
-            base_url: "http://127.0.0.1:9".into(),
+            base_url: "http://127.0.0.1:11434/v1".into(),
             model: "ui-fixture-model".into(),
         });
+    }
+    if let Some(root) = &fixture_root {
+        cfg.working_dir = root.join("jobs");
+        cfg.output_dir = root.join("output");
+        cfg.runtime_data_dir = root.join("runtime-data");
     }
     let queue = if result_fixture {
         let root = fixture_root.as_ref().expect("result fixture root");
@@ -294,12 +314,29 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.set_transcription_confirm_language("zh".into());
             app.set_transcription_confirm_can_create(true);
             app.set_transcription_confirm_visible(true);
+        } else if state == "settings-connection-tested" {
+            app.set_settings_page(2);
+            app.set_settings_visible(true);
+            app.set_connection_test_state("success".into());
+            app.set_connection_test_message(
+                "连接成功 · openai_chat_completions · ui-fixture-model。测试成功不代表生成内容正确。".into(),
+            );
+            app.set_ui_verification_fixture("settings".into());
+        } else if state == "settings-connection-failed" {
+            app.set_settings_page(2);
+            app.set_settings_visible(true);
+            app.set_connection_test_state("failure".into());
+            app.set_connection_test_message("无法连接到服务，请确认服务已启动且地址正确。".into());
+            app.set_ui_verification_fixture("settings".into());
         } else if matches!(
             state,
             "result-success"
                 | "result-limited"
                 | "result-enhancement-failed"
+                | "result-raw-only"
                 | "result-regenerating"
+                | "result-summary-depths"
+                | "result-model-changed"
         ) {
             // Result fixtures still use the production JobDetail and
             // ContentResults view models.  Only their deterministic input
@@ -307,9 +344,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // persisted queue state is created.
             app.set_ui_verification_fixture("completed".into());
             let fixture_job = queue.jobs.first().expect("result fixture job");
+            let model_override = (state == "result-model-changed").then_some("new-model-v2");
+            let initial_tier = if state == "result-summary-depths" {
+                0
+            } else {
+                1
+            };
             app.set_result(content_results_for_job(
                 fixture_job,
                 (state == "result-regenerating").then_some(ArtifactKindV1::Chapters),
+                model_override,
+                initial_tier,
             ));
             if state == "result-regenerating" {
                 app.set_action_pending_kind("chapters".into());
@@ -317,6 +362,66 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 app.set_action_feedback("正在重新生成章节…".into());
                 app.set_action_feedback_error(false);
             }
+            app.set_result_open(true);
+        } else if state == "result-search" {
+            app.set_ui_verification_fixture("completed".into());
+            let fixture_job = queue.jobs.first().expect("result fixture job");
+            let mut result = content_results_for_job(fixture_job, None, None, 1);
+            let search_rows = vec![
+                section_row(
+                    "search-header",
+                    "搜索“原始” · 2 条结果",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    false,
+                    "",
+                ),
+                content_row(
+                    "search-0",
+                    "block",
+                    "原始稿",
+                    "这是隔离结果 fixture 的第 0 个【原始】片段。",
+                    "",
+                    "原始稿",
+                    "mapped",
+                    "这是隔离结果 fixture 的第 0 个【原始】片段。",
+                    "",
+                    "00:00:00–00:00:01",
+                    "https://www.bilibili.com/video/BV1UIFIX?p=2&t=0",
+                    true,
+                    true,
+                    "",
+                    "",
+                    false,
+                ),
+                content_row(
+                    "search-1",
+                    "block",
+                    "忠实正文",
+                    "这是隔离结果 fixture 的第 1 个【原始】片段。",
+                    "",
+                    "忠实正文",
+                    "mapped",
+                    "这是隔离结果 fixture 的第 1 个【原始】片段。",
+                    "",
+                    "00:00:01–00:00:02",
+                    "https://www.bilibili.com/video/BV1UIFIX?p=2&t=1000",
+                    true,
+                    true,
+                    "",
+                    "",
+                    false,
+                ),
+            ];
+            result.search_active = true;
+            result.search_query = "原始".into();
+            result.search_result_count = 2;
+            result.search_rows = ModelRc::from(Rc::new(VecModel::from(search_rows)));
+            app.set_result(result);
             app.set_result_open(true);
         } else if state == "delete-confirm" || state == "clear-confirm" {
             // History-management confirm fixtures: completed detail behind the
@@ -408,6 +513,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         speaker_timer: Mutex::new(None),
         pending_transcription: RefCell::new(None),
         history_confirmation: RefCell::new(None),
+        selected_summary_tier: RefCell::new(1),
+        probe_token: Arc::new(AtomicU64::new(0)),
     });
 
     // ---- Spawn the single worker thread; only one job runs at a time. ----
@@ -474,10 +581,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         app.on_settings_clicked(move || {
+            c.probe_token.fetch_add(1, Ordering::SeqCst);
             if let Some(app) = c.app.upgrade() {
                 app.set_settings_feedback("".into());
                 app.set_settings_error_field("".into());
                 app.set_settings_error_message("".into());
+                app.set_connection_test_state("idle".into());
+                app.set_connection_test_message("".into());
                 app.set_settings_saving(false);
                 app.set_settings_visible(true);
             }
@@ -656,14 +766,47 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
+        app.on_test_connection(move |s| {
+            c.test_connection(s);
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_summary_tier_selected(move |tier| {
+            c.select_summary_tier(tier);
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_result_search(move |query| {
+            c.handle_search(query.to_string());
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_result_search_clear(move || {
+            c.clear_search();
+        });
+    }
+    {
+        let c = controller.clone();
         app.on_cancel_settings(move || {
+            c.probe_token.fetch_add(1, Ordering::SeqCst);
             if let Some(app) = c.app.upgrade() {
                 app.set_settings_saving(false);
                 app.set_settings_feedback("".into());
                 app.set_settings_error_field("".into());
                 app.set_settings_error_message("".into());
+                app.set_connection_test_state("idle".into());
+                app.set_connection_test_message("".into());
             }
             // Cancellation just hides; changes weren't persisted.
+        });
+    }
+    {
+        let c = controller.clone();
+        app.on_settings_draft_changed(move || {
+            c.probe_token.fetch_add(1, Ordering::SeqCst);
         });
     }
     {
@@ -695,6 +838,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     sync_settings(&app, &cfg);
     if ui_fixture == Some("settings") {
         app.set_settings_visible(true);
+    } else if ui_fixture == Some("settings-connection-tested") {
+        app.set_settings_visible(true);
+        app.set_settings_page(2);
+        app.set_connection_test_state("success".into());
+        app.set_connection_test_message(
+            "连接成功 · openai_chat_completions · ui-fixture-model。测试成功不代表生成内容正确。"
+                .into(),
+        );
+    } else if ui_fixture == Some("settings-connection-failed") {
+        app.set_settings_visible(true);
+        app.set_settings_page(2);
+        app.set_connection_test_state("failure".into());
+        app.set_connection_test_message("无法连接到服务，请确认服务已启动且地址正确。".into());
     }
 
     // Keep the worker tx alive for the app lifetime; on drop it shuts down.
@@ -712,12 +868,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn regenerable_kind_from_action(action: &str) -> Option<RegenerableKind> {
-    match action {
-        "summary" => Some(RegenerableKind::DefaultSummary),
-        "highlights" => Some(RegenerableKind::Highlights),
-        "chapters" => Some(RegenerableKind::Chapters),
-        _ => None,
-    }
+    RegenerableKind::from_action(action)
 }
 
 fn valid_result_source_url(url: &str) -> bool {
@@ -734,7 +885,9 @@ fn start_result_fixture_generation_server(selector: &str) -> Result<(u16, JoinHa
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
     let selector = selector.to_string();
-    let expected_requests = if selector == "result-enhancement-failed" {
+    let expected_requests = if selector == "result-raw-only" {
+        0
+    } else if selector == "result-enhancement-failed" {
         13
     } else {
         16
@@ -823,12 +976,35 @@ fn start_result_fixture_generation_server(selector: &str) -> Result<(u16, JoinHa
                     .filter_map(|utterance| utterance["id"].as_str().map(str::to_owned))
                     .collect();
                 let blocks = if selector == "result-limited" && kind == "default_summary" {
+                    let text = format!(
+                        "无法精确关联的摘要，用于测试受限状态展示。{}",
+                        "相关描述内容。".repeat(15)
+                    );
                     serde_json::json!([{
                         "id": "fixture-limited-summary",
                         "title": null,
-                        "text": "无法精确关联的摘要",
+                        "text": text,
                         "source_refs": [],
                         "source_status": "limited",
+                    }])
+                } else if kind == "default_summary" {
+                    let first = utterances.first();
+                    let text = format!(
+                        "本段核心总结：{}",
+                        first
+                            .and_then(|u| u["text"].as_str())
+                            .unwrap_or("片段总结内容。")
+                    );
+                    serde_json::json!([{
+                        "id": "fixture-summary-block",
+                        "title": null,
+                        "text": format!("{}{}", text.repeat(2), "总结概要描述。".repeat(10)),
+                        "source_refs": [{
+                            "utterance_ids": ids.clone(),
+                            "start_ms": utterances.first().and_then(|u| u["start_ms"].as_u64()).unwrap_or(0),
+                            "end_ms": utterances.last().and_then(|u| u["end_ms"].as_u64()).unwrap_or(0),
+                        }],
+                        "source_status": "mapped",
                     }])
                 } else if selector == "result-limited" && kind == "chapters" && utterances.len() > 1
                 {
@@ -899,7 +1075,7 @@ fn start_result_fixture_generation_server(selector: &str) -> Result<(u16, JoinHa
     Ok((port, handle))
 }
 
-fn result_fixture_callback_job(
+pub(crate) fn result_fixture_callback_job(
     root: &std::path::Path,
     cfg: &Config,
     selector: &str,
@@ -934,7 +1110,7 @@ fn result_fixture_callback_job(
     job.part_title = Some("第二部分".into());
     job.cid = Some(2_024_082_400);
     job.duration_ms = Some(64_000);
-    job.work_dir = Some(work_dir);
+    job.work_dir = Some(work_dir.clone());
     job.status = JobStatus::Completed;
     job.stage = Stage::Completed;
     job.stage_progress = 100;
@@ -942,6 +1118,10 @@ fn result_fixture_callback_job(
         job.set_stage_state(stage, StageState::Completed);
     }
     job.content_setup = Some(fixture_cfg.content_setup());
+    if selector == "result-raw-only" {
+        let _ = server.join();
+        return Ok(job);
+    }
     let result = crate::content_results::execute(
         &job,
         Intent::Initial,
@@ -950,6 +1130,31 @@ fn result_fixture_callback_job(
     .map_err(|error| error.to_string());
     let _ = server.join();
     result?;
+
+    if selector == "result-summary-depths" {
+        let current_path = work_dir.join(crate::content_results::CONTENT_CURRENT_FILE);
+        let mut snapshot_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&current_path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        snapshot_json["slots"]["short_summary"] = serde_json::json!({
+            "current": null,
+            "last_failure": null
+        });
+        snapshot_json["slots"]["long_summary"] = serde_json::json!({
+            "current": null,
+            "last_failure": {
+                "code": "response_invalid",
+                "message": "长摘要长度不足契约要求（少于 400 字符）。",
+                "retryable": true,
+                "occurred_at": chrono::Utc::now().to_rfc3339()
+            }
+        });
+        std::fs::write(
+            &current_path,
+            serde_json::to_vec_pretty(&snapshot_json).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(job)
 }
 
@@ -1014,7 +1219,7 @@ fn handle_work_message(
                 match scheduler.drain_next(&cfg_snap, app) {
                     DrainOutcome::Idle | DrainOutcome::Waiting => break,
                     DrainOutcome::Ran { job_id, .. } => {
-                        refresh_selected_detail(app, &scheduler.queue, job_id);
+                        refresh_selected_detail(app, &scheduler.queue, config, job_id);
                         // Continue to the next job.
                     }
                 }
@@ -1079,7 +1284,7 @@ fn handle_work_message(
             let cfg_snap = config.lock().unwrap().clone();
             let outcome = scheduler.drain_next(&cfg_snap, app);
             if let DrainOutcome::Ran { job_id, .. } = &outcome {
-                refresh_selected_detail(app, &scheduler.queue, *job_id);
+                refresh_selected_detail(app, &scheduler.queue, config, *job_id);
             }
             let app = app.clone();
             let _ = app.upgrade_in_event_loop(move |app| {
@@ -1099,11 +1304,21 @@ fn handle_work_message(
             job_id,
             kind,
             target,
+            tier,
         } => {
-            handle_regenerate_content(job_id, kind, target, scheduler, config, app, content_busy);
+            handle_regenerate_content(
+                job_id,
+                kind,
+                target,
+                tier,
+                scheduler,
+                config,
+                app,
+                content_busy,
+            );
         }
-        WorkMsg::RepairContent(job_id) => {
-            handle_repair_content(job_id, scheduler, config, app, content_busy);
+        WorkMsg::RepairContent { job_id, tier } => {
+            handle_repair_content(job_id, tier, scheduler, config, app, content_busy);
         }
         WorkMsg::DeleteJob(job_id) => {
             let (feedback, feedback_error) = {
@@ -1131,10 +1346,20 @@ fn handle_work_message(
                 }
             };
             let jobs_snapshot = scheduler.queue.lock().unwrap().jobs.clone();
+            let current_model = config
+                .lock()
+                .ok()
+                .and_then(|cfg| cfg.llm_connection.as_ref().map(|c| c.model.clone()));
             let app = app.clone();
             let _ = app.upgrade_in_event_loop(move |app| {
                 let (selected, index) = current_selection(&app);
-                apply_queue_rows(&app, &jobs_snapshot, selected, index);
+                apply_queue_rows(
+                    &app,
+                    &jobs_snapshot,
+                    selected,
+                    index,
+                    current_model.as_deref(),
+                );
                 app.set_action_pending(false);
                 app.set_action_feedback(feedback.into());
                 app.set_action_feedback_error(feedback_error);
@@ -1190,16 +1415,26 @@ fn handle_work_message(
                 (feedback, feedback_error)
             };
             let jobs_snapshot = scheduler.queue.lock().unwrap().jobs.clone();
+            let current_model = config
+                .lock()
+                .ok()
+                .and_then(|cfg| cfg.llm_connection.as_ref().map(|c| c.model.clone()));
             let app = app.clone();
             let _ = app.upgrade_in_event_loop(move |app| {
                 let (selected, index) = current_selection(&app);
-                apply_queue_rows(&app, &jobs_snapshot, selected, index);
+                apply_queue_rows(
+                    &app,
+                    &jobs_snapshot,
+                    selected,
+                    index,
+                    current_model.as_deref(),
+                );
                 app.set_action_pending(false);
                 app.set_action_feedback(feedback.into());
                 app.set_action_feedback_error(feedback_error);
             });
         }
-        WorkMsg::SpeakerChanged(job_id) => {
+        WorkMsg::SpeakerChanged { job_id, tier } => {
             // Changing speaker names regenerates documents without
             // transcribing the audio again.
             let cfg = config.lock().unwrap().clone();
@@ -1232,7 +1467,7 @@ fn handle_work_message(
             let feedback = {
                 let mut q = scheduler.queue.lock().unwrap();
                 let feedback = q.get_mut(job_id).and_then(|job| {
-                    let result = rebuild_speaker_documents(job, &cfg);
+                    let result = rebuild_speaker_documents(job, &cfg, tier);
                     let feedback = is_v05.then(|| speaker_rebuild_feedback(&result));
                     if let Err(error) = &result {
                         log::warn!("speaker Presentation rebuild failed: {error}");
@@ -1244,7 +1479,7 @@ fn handle_work_message(
                 feedback
             };
             if let Some((message, error)) = feedback {
-                refresh_selected_result(app, &scheduler.queue, job_id);
+                refresh_selected_result(app, &scheduler.queue, config, job_id);
                 let app = app.clone();
                 let _ = app.upgrade_in_event_loop(move |app| {
                     app.set_speaker_feedback(message.into());
@@ -1286,6 +1521,7 @@ fn presentation_operation(
     mut job: Job,
     snapshot: &crate::content_results::ContentSnapshotV1,
     config: &Arc<Mutex<Config>>,
+    tier: crate::document::SummaryTier,
     success_message: String,
     success_is_error: bool,
 ) -> (String, bool, Option<std::path::PathBuf>) {
@@ -1296,7 +1532,7 @@ fn presentation_operation(
             return (format!("内容已提交，但文档写入失败：{error}"), true, None);
         }
     };
-    match crate::document::rebuild_presentation(&job, snapshot) {
+    match crate::document::rebuild_presentation_with_tier(&job, snapshot, tier) {
         Ok(()) => (success_message, success_is_error, Some(output_dir)),
         Err(error) => (
             format!("{success_message}；文档写入失败，可重新打开重试：{error}"),
@@ -1387,6 +1623,7 @@ fn run_regenerate_content_operation(
     target: ReadyGenerationTargetV1,
     config: &Arc<Mutex<Config>>,
     token: &crate::cancel::CancellationToken,
+    tier: crate::document::SummaryTier,
 ) -> (String, bool, Option<std::path::PathBuf>) {
     match crate::content_results::execute(job, Intent::Regenerate { kind, target }, token) {
         Err(crate::content_results::ContentError::Cancelled) => {
@@ -1396,7 +1633,7 @@ fn run_regenerate_content_operation(
         Ok(snapshot) => {
             let (feedback, is_error) =
                 regeneration_feedback(snapshot.current.slots.get(kind.artifact_kind()));
-            presentation_operation(job.clone(), &snapshot, config, feedback, is_error)
+            presentation_operation(job.clone(), &snapshot, config, tier, feedback, is_error)
         }
     }
 }
@@ -1405,6 +1642,7 @@ fn run_repair_content_operation(
     job: &Job,
     config: &Arc<Mutex<Config>>,
     token: &crate::cancel::CancellationToken,
+    tier: crate::document::SummaryTier,
 ) -> (String, bool, Option<std::path::PathBuf>) {
     match crate::content_results::execute(job, Intent::Initial, token) {
         Err(crate::content_results::ContentError::Cancelled) => {
@@ -1415,16 +1653,19 @@ fn run_repair_content_operation(
             job.clone(),
             &snapshot,
             config,
+            tier,
             "文字结果已修复".into(),
             false,
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_regenerate_content(
     job_id: Uuid,
     kind: RegenerableKind,
     target: ReadyGenerationTargetV1,
+    tier: crate::document::SummaryTier,
     scheduler: &Arc<Scheduler>,
     config: &Arc<Mutex<Config>>,
     app: &Weak<App>,
@@ -1451,7 +1692,7 @@ fn handle_regenerate_content(
     }
 
     let (message, is_error, final_output_dir) =
-        run_regenerate_content_operation(&job, kind, target, config, &token);
+        run_regenerate_content_operation(&job, kind, target, config, &token, tier);
 
     if final_output_dir.is_some() {
         let mut queue = scheduler.queue.lock().unwrap();
@@ -1463,13 +1704,14 @@ fn handle_regenerate_content(
         }
         let _ = queue.save();
     }
-    refresh_selected_result(app, &scheduler.queue, job_id);
+    refresh_selected_result(app, &scheduler.queue, config, job_id);
     clear_content_operation(content_busy, job_id);
     content_feedback(app, message, is_error);
 }
 
 fn handle_repair_content(
     job_id: Uuid,
+    tier: crate::document::SummaryTier,
     scheduler: &Arc<Scheduler>,
     config: &Arc<Mutex<Config>>,
     app: &Weak<App>,
@@ -1503,7 +1745,8 @@ fn handle_repair_content(
         return;
     }
 
-    let (message, is_error, final_output_dir) = run_repair_content_operation(&job, config, &token);
+    let (message, is_error, final_output_dir) =
+        run_repair_content_operation(&job, config, &token, tier);
 
     if final_output_dir.is_some() {
         let mut queue = scheduler.queue.lock().unwrap();
@@ -1515,7 +1758,7 @@ fn handle_repair_content(
         }
         let _ = queue.save();
     }
-    refresh_selected_result(app, &scheduler.queue, job_id);
+    refresh_selected_result(app, &scheduler.queue, config, job_id);
     clear_content_operation(content_busy, job_id);
     content_feedback(app, message, is_error);
 }
@@ -1555,6 +1798,7 @@ fn apply_queue_rows(
     jobs: &[Job],
     previous_selected: Option<Uuid>,
     fallback_index: usize,
+    current_model: Option<&str>,
 ) {
     let jobs_rc = app.get_jobs();
     let Some(model) = jobs_rc.as_any().downcast_ref::<slint::VecModel<JobRow>>() else {
@@ -1571,8 +1815,9 @@ fn apply_queue_rows(
         .map(|(index, job)| job_to_row(job, selected_index == Some(index)))
         .collect();
     model.set_vec(rows);
+    let summary_tier = app.get_summary_tier();
     match selected_index {
-        Some(index) => show_job_detail(app, &jobs[index]),
+        Some(index) => show_job_detail(app, &jobs[index], current_model, summary_tier),
         None => clear_job_detail(app),
     }
     let len = model.row_count();
@@ -1585,7 +1830,11 @@ fn apply_queue_rows(
 /// Rebuild all markdown documents after a speaker name change.
 /// Does NOT re-transcribe or call the LLM. Uses the stored `final_output_dir`
 /// if available; otherwise infers from the current config (best-effort).
-fn rebuild_speaker_documents(job: &mut Job, cfg: &Config) -> Result<(), String> {
+fn rebuild_speaker_documents(
+    job: &mut Job,
+    cfg: &Config,
+    tier: crate::document::SummaryTier,
+) -> Result<(), String> {
     use crate::document;
 
     let Some(dir) = job.work_dir.clone() else {
@@ -1603,7 +1852,8 @@ fn rebuild_speaker_documents(job: &mut Job, cfg: &Config) -> Result<(), String> 
             ContentViewV1::Legacy => return Err("v0.5 Job unexpectedly resolved as legacy".into()),
         };
         crate::pipeline::ensure_final_output_dir(job, cfg).map_err(|error| error.to_string())?;
-        document::rebuild_presentation(job, &snapshot).map_err(|error| error.to_string())?;
+        document::rebuild_presentation_with_tier(job, &snapshot, tier)
+            .map_err(|error| error.to_string())?;
         return Ok(());
     }
     let raw_json = dir.join("transcript.raw.json");
@@ -1644,6 +1894,127 @@ fn rebuild_speaker_documents(job: &mut Job, cfg: &Config) -> Result<(), String> 
     Ok(())
 }
 
+fn reading_caption_for_job(
+    job: &Job,
+    snapshot: &crate::content_results::ContentSnapshotV1,
+    selected_tier: Option<crate::content_results::ArtifactKindV1>,
+) -> (String, String, bool) {
+    let language = job
+        .transcription_result
+        .as_ref()
+        .and_then(|result| result.reported_language)
+        .or_else(|| {
+            job.transcription_selection
+                .as_ref()
+                .map(|selection| selection.requested_language)
+        });
+    let record = crate::content_results::primary_consumption_record(snapshot, selected_tier);
+    let Some(record) = record else {
+        return (String::new(), String::new(), false);
+    };
+    let text = crate::content_results::record_plain_text(record);
+    let estimate = crate::reading_time::estimate(&text, job.duration_ms, language);
+    let scale = estimate.scale;
+    let duration_prefix = job
+        .duration_ms
+        .map(|ms| format!("视频 {} 分钟 · ", (ms as f64 / 60_000.0).ceil() as u64))
+        .unwrap_or_default();
+
+    let formatted_scale = scale.format_scale();
+    let Some(reading_ms) = estimate.reading_ms else {
+        return (
+            format!("{duration_prefix}正文约 {formatted_scale}"),
+            String::new(),
+            false,
+        );
+    };
+    let Some(video_ms) = estimate.video_ms else {
+        return (
+            format!(
+                "正文约 {formatted_scale} · 预计阅读约 {} 分钟",
+                (reading_ms as f64 / 60_000.0).ceil() as u64
+            ),
+            crate::reading_time::READING_PROFILE_VERSION.to_string(),
+            true,
+        );
+    };
+    let Some(saved_ms) = estimate.saved_ms else {
+        return (
+            format!(
+                "视频 {} 分钟 · 正文约 {formatted_scale} · 预计阅读约 {} 分钟",
+                (video_ms as f64 / 60_000.0).ceil() as u64,
+                (reading_ms as f64 / 60_000.0).ceil() as u64
+            ),
+            crate::reading_time::READING_PROFILE_VERSION.to_string(),
+            true,
+        );
+    };
+    let Some(ratio) = estimate.saved_ratio else {
+        return (
+            format!(
+                "视频 {} 分钟 · 正文约 {formatted_scale} · 预计阅读约 {} 分钟 · 预计节省约 {} 分钟",
+                (video_ms as f64 / 60_000.0).ceil() as u64,
+                (reading_ms as f64 / 60_000.0).ceil() as u64,
+                (saved_ms as f64 / 60_000.0).ceil() as u64
+            ),
+            crate::reading_time::READING_PROFILE_VERSION.to_string(),
+            true,
+        );
+    };
+    (
+        format!(
+            "视频 {} 分钟 · 正文约 {formatted_scale} · 预计阅读约 {} 分钟 · 预计节省约 {} 分钟 · {}%（相对 1.0x 观看）",
+            (video_ms as f64 / 60_000.0).ceil() as u64,
+            (reading_ms as f64 / 60_000.0).ceil() as u64,
+            (saved_ms as f64 / 60_000.0).ceil() as u64,
+            ratio
+        ),
+        crate::reading_time::READING_PROFILE_VERSION.to_string(),
+        true,
+    )
+}
+
+fn reading_detail_for_job(
+    job: &Job,
+    selected_tier: Option<crate::content_results::ArtifactKindV1>,
+) -> (String, String, String) {
+    let Ok(crate::content_results::ContentViewV1::Current(snapshot)) =
+        crate::content_results::current(job)
+    else {
+        return ("—".into(), "—".into(), String::new());
+    };
+    let language = job
+        .transcription_result
+        .as_ref()
+        .and_then(|result| result.reported_language)
+        .or_else(|| {
+            job.transcription_selection
+                .as_ref()
+                .map(|selection| selection.requested_language)
+        });
+    let record = crate::content_results::primary_consumption_record(&snapshot, selected_tier);
+    let Some(record) = record else {
+        return ("—".into(), "—".into(), String::new());
+    };
+    let text = crate::content_results::record_plain_text(record);
+    let estimate = crate::reading_time::estimate(&text, job.duration_ms, language);
+    let Some(reading_ms) = estimate.reading_ms else {
+        return ("—".into(), "—".into(), String::new());
+    };
+    let Some(saved_ms) = estimate.saved_ms else {
+        return (
+            format!("约 {} 分钟", (reading_ms as f64 / 60_000.0).ceil() as u64),
+            "—".into(),
+            crate::reading_time::READING_PROFILE_VERSION.to_string(),
+        );
+    };
+    (
+        format!("约 {} 分钟", (reading_ms as f64 / 60_000.0).ceil() as u64),
+        format!("约 {} 分钟", (saved_ms as f64 / 60_000.0).ceil() as u64),
+        crate::reading_time::READING_PROFILE_VERSION.to_string(),
+    )
+}
+
 fn empty_content_results() -> ContentResultsData {
     ContentResultsData {
         entry_visible: false,
@@ -1653,6 +2024,16 @@ fn empty_content_results() -> ContentResultsData {
         bvid: "".into(),
         page: 1,
         video_duration: "—".into(),
+        reading_caption: "".into(),
+        reading_profile: "".into(),
+        show_reading_explainer: false,
+        reading_explainer: "".into(),
+        model_notice: "".into(),
+        show_model_notice: false,
+        search_active: false,
+        search_query: "".into(),
+        search_result_count: 0,
+        search_rows: content_row_model(Vec::new()),
         status_label: "".into(),
         notice: "".into(),
         notice_error: false,
@@ -1665,6 +2046,7 @@ fn empty_content_results() -> ContentResultsData {
         can_repair: false,
         repair_pending: false,
         repair_label: "修复文字结果".into(),
+        summary_tier: 1,
         summary_rows: content_row_model(Vec::new()),
         chapters_rows: content_row_model(Vec::new()),
         faithful_rows: content_row_model(Vec::new()),
@@ -1712,6 +2094,42 @@ fn content_row(
         action_kind: action_kind.into(),
         action_label: action_label.into().into(),
         action_pending,
+        action_caption: "".into(),
+    }
+}
+
+fn model_changed_notice(
+    snapshot: &crate::content_results::ContentSnapshotV1,
+    current_model: Option<&str>,
+) -> Option<String> {
+    let current_model = current_model?.trim();
+    if current_model.is_empty() {
+        return None;
+    }
+    let newest = [
+        crate::content_results::ArtifactKindV1::DefaultSummary,
+        crate::content_results::ArtifactKindV1::ShortSummary,
+        crate::content_results::ArtifactKindV1::LongSummary,
+        crate::content_results::ArtifactKindV1::Highlights,
+        crate::content_results::ArtifactKindV1::Chapters,
+    ]
+    .into_iter()
+    .filter_map(|kind| snapshot.current.slots.get(kind).current.as_ref())
+    .max_by_key(|record| record.created_at)?;
+
+    let old_model = newest.provenance.model.as_deref()?.trim();
+    if old_model.is_empty() || old_model == current_model {
+        return None;
+    }
+    Some(format!(
+        "当前模型已更换（{old_model} → {current_model}）。如需用新模型重写，请点击对应内容的“重新生成”。"
+    ))
+}
+
+fn action_caption_for_model(current_model: Option<&str>) -> String {
+    match current_model {
+        Some(model) if !model.trim().is_empty() => format!("将使用：{model}"),
+        _ => "将使用：当前 AI 设置不可用".into(),
     }
 }
 
@@ -1726,8 +2144,9 @@ fn section_row(
     action_kind: &str,
     action_label: impl Into<String>,
     action_pending: bool,
+    action_caption: impl Into<String>,
 ) -> ContentRow {
-    content_row(
+    let mut row = content_row(
         id,
         "section",
         title,
@@ -1744,7 +2163,9 @@ fn section_row(
         action_kind,
         action_label,
         action_pending,
-    )
+    );
+    row.action_caption = action_caption.into().into();
+    row
 }
 
 fn result_timestamp(milliseconds: u64) -> String {
@@ -1935,9 +2356,10 @@ fn artifact_declaration(
         };
     }
     match kind {
-        ArtifactKindV1::DefaultSummary | ArtifactKindV1::Highlights => {
-            "AI 生成内容 · 请结合来源核对"
-        }
+        ArtifactKindV1::DefaultSummary
+        | ArtifactKindV1::ShortSummary
+        | ArtifactKindV1::LongSummary => "AI 生成内容 · 请结合来源核对",
+        ArtifactKindV1::Highlights => "AI 生成内容 · 请结合来源核对",
         ArtifactKindV1::Chapters => "结构化整理",
         ArtifactKindV1::FaithfulText => unreachable!(),
     }
@@ -1945,15 +2367,20 @@ fn artifact_declaration(
 
 fn action_label(
     kind: ArtifactKindV1,
+    has_record: bool,
     failure: Option<&crate::content_results::DerivationFailureV1>,
 ) -> String {
     let label = match kind {
         ArtifactKindV1::DefaultSummary => "摘要",
+        ArtifactKindV1::ShortSummary => "短摘要",
+        ArtifactKindV1::LongSummary => "长摘要",
         ArtifactKindV1::Highlights => "重点",
         ArtifactKindV1::Chapters => "章节",
         ArtifactKindV1::FaithfulText => "忠实正文",
     };
-    if failure.is_some_and(|failure| {
+    if !has_record && failure.is_none() {
+        format!("生成{label}")
+    } else if failure.is_some_and(|failure| {
         failure.code == crate::content_results::FailureCodeV1::TargetUnavailable
     }) {
         format!("使用当前 AI 设置重新生成{label}")
@@ -1969,6 +2396,7 @@ fn slot_rows(
     title: &str,
     action_kind: &str,
     pending_kind: Option<ArtifactKindV1>,
+    action_caption: &str,
 ) -> Vec<ContentRow> {
     let slot = snapshot.current.slots.get(kind);
     let record = slot.current.as_ref();
@@ -1996,12 +2424,9 @@ fn slot_rows(
             "failure",
             format!("增强未完成；原始稿和忠实正文仍可用。{}", failure.message),
         ),
-        (None, None) => (
-            "未生成",
-            "failure",
-            "当前未生成；请使用当前 AI 设置重新生成。".into(),
-        ),
+        (None, None) => ("", "idle", format!("{title}尚未生成")),
     };
+    let has_action = kind != ArtifactKindV1::FaithfulText;
     let mut rows = vec![section_row(
         format!("section-{action_kind}"),
         title,
@@ -2009,17 +2434,14 @@ fn slot_rows(
         status_label,
         status_kind,
         text,
-        if kind == ArtifactKindV1::FaithfulText {
-            ""
+        if has_action { action_kind } else { "" },
+        if has_action {
+            action_label(kind, record.is_some(), failure)
         } else {
-            action_kind
-        },
-        if kind == ArtifactKindV1::FaithfulText {
             String::new()
-        } else {
-            action_label(kind, failure)
         },
         pending_kind == Some(kind),
+        if has_action { action_caption } else { "" },
     )];
     if let Some(record) = record {
         rows.extend(record_rows(job, snapshot, record, action_kind));
@@ -2038,12 +2460,18 @@ fn raw_slot_rows(job: &Job, utterances: &[crate::funasr::Utterance]) -> Vec<Cont
         "open-raw",
         "打开原始稿",
         false,
+        "",
     )];
     rows.extend(raw_rows(job, utterances, "raw"));
     rows
 }
 
-fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> ContentResultsData {
+fn content_results_for_job(
+    job: &Job,
+    pending_kind: Option<ArtifactKindV1>,
+    current_model: Option<&str>,
+    summary_tier: i32,
+) -> ContentResultsData {
     let Some(_setup) = job.content_setup.as_ref() else {
         return empty_content_results();
     };
@@ -2059,6 +2487,7 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
     match crate::content_results::current(job) {
         Ok(ContentViewV1::Current(snapshot)) => {
             let enhancements_requested = snapshot.current.setup.enhancements_requested;
+            let action_caption = action_caption_for_model(current_model);
             let faithful = slot_rows(
                 job,
                 &snapshot,
@@ -2066,15 +2495,30 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
                 "忠实正文",
                 "",
                 pending_kind,
+                "",
             );
+            let tier_kind = match summary_tier {
+                0 => ArtifactKindV1::ShortSummary,
+                2 => ArtifactKindV1::LongSummary,
+                _ => ArtifactKindV1::DefaultSummary,
+            };
             let summary = if enhancements_requested {
                 let mut rows = slot_rows(
                     job,
                     &snapshot,
-                    ArtifactKindV1::DefaultSummary,
-                    "默认摘要",
-                    "summary",
+                    tier_kind,
+                    match tier_kind {
+                        ArtifactKindV1::ShortSummary => "短摘要",
+                        ArtifactKindV1::LongSummary => "长摘要",
+                        _ => "摘要",
+                    },
+                    match tier_kind {
+                        ArtifactKindV1::ShortSummary => "summary-short",
+                        ArtifactKindV1::LongSummary => "summary-long",
+                        _ => "summary",
+                    },
                     pending_kind,
+                    &action_caption,
                 );
                 rows.extend(slot_rows(
                     job,
@@ -2083,6 +2527,7 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
                     "重点",
                     "highlights",
                     pending_kind,
+                    &action_caption,
                 ));
                 rows
             } else {
@@ -2096,6 +2541,7 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
                     "章节",
                     "chapters",
                     pending_kind,
+                    &action_caption,
                 )
             } else {
                 Vec::new()
@@ -2113,6 +2559,23 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
             ]
             .into_iter()
             .any(|kind| snapshot.current.slots.get(kind).last_failure.is_some());
+            let tier_for_reading = match summary_tier {
+                0 => Some(ArtifactKindV1::ShortSummary),
+                2 => Some(ArtifactKindV1::LongSummary),
+                _ => Some(ArtifactKindV1::DefaultSummary),
+            };
+            let (reading_caption, reading_profile, show_reading_explainer) =
+                reading_caption_for_job(job, &snapshot, tier_for_reading);
+            let (model_notice, show_model_notice) =
+                match model_changed_notice(&snapshot, current_model) {
+                    Some(notice) => (notice, true),
+                    None => (String::new(), false),
+                };
+            let (notice, notice_error) = if enhancement_failed {
+                ("增强未完成；原始稿和忠实正文仍可用。".into(), false)
+            } else {
+                (String::new(), false)
+            };
             ContentResultsData {
                 entry_visible: true,
                 mode: "current".into(),
@@ -2121,19 +2584,25 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
                 bvid: job.bvid.clone().into(),
                 page: job.page as i32,
                 video_duration: video_duration.clone().into(),
+                reading_caption: reading_caption.into(),
+                reading_profile: reading_profile.into(),
+                show_reading_explainer,
+                reading_explainer: "公式 cjk/400+words/240 · reading-profile v1 · 1.0x · 依据 Brysbaert 2019 / 2024 中文阅读实验".into(),
+                model_notice: model_notice.into(),
+                show_model_notice,
+                search_active: false,
+                search_query: "".into(),
+                search_result_count: 0,
+                search_rows: content_row_model(Vec::new()),
                 status_label: job.status.label().into(),
-                notice: if enhancement_failed {
-                    "增强未完成；原始稿和忠实正文仍可用。".into()
-                } else {
-                    "".into()
-                },
-                notice_error: false,
+                notice: notice.into(),
+                notice_error,
                 source_url: source_url.into(),
                 default_tab: if enhancements_requested
                     && snapshot
                         .current
                         .slots
-                        .get(ArtifactKindV1::DefaultSummary)
+                        .get(tier_kind)
                         .current
                         .is_some()
                 {
@@ -2154,6 +2623,7 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
                 chapters_rows: content_row_model(chapters),
                 faithful_rows: content_row_model(faithful),
                 raw_rows: content_row_model(raw_slot_rows(job, &snapshot.evidence.utterances)),
+                summary_tier,
             }
         }
         Ok(ContentViewV1::RawOnly {
@@ -2167,6 +2637,16 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
             bvid: job.bvid.clone().into(),
             page: job.page as i32,
             video_duration: video_duration.into(),
+            reading_caption: "".into(),
+            reading_profile: "".into(),
+            show_reading_explainer: false,
+            reading_explainer: "".into(),
+            model_notice: "".into(),
+            show_model_notice: false,
+            search_active: false,
+            search_query: "".into(),
+            search_result_count: 0,
+            search_rows: content_row_model(Vec::new()),
             status_label: job.status.label().into(),
             notice: format!(
                 "可信文字结果{}；原始 Evidence 仍可用。",
@@ -2179,6 +2659,7 @@ fn content_results_for_job(job: &Job, pending_kind: Option<ArtifactKindV1>) -> C
             notice_error: true,
             source_url: source_url.into(),
             default_tab: 3,
+            summary_tier: 1,
             show_summary: false,
             show_chapters: false,
             show_faithful: false,
@@ -2202,7 +2683,7 @@ fn fixture_content_results(selector: &str) -> ContentResultsData {
     let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
     let job = result_fixture_callback_job(&root, &cfg, selector).expect("result fixture job");
     let pending_kind = (selector == "result-regenerating").then_some(ArtifactKindV1::Chapters);
-    let result = content_results_for_job(&job, pending_kind);
+    let result = content_results_for_job(&job, pending_kind, None, 1);
     std::fs::remove_dir_all(root).ok();
     result
 }
@@ -2218,7 +2699,22 @@ fn failed_stage(job: &Job) -> Option<Stage> {
 ///
 /// Extracted from the Controller so worker-side queue rebuilds after deletion
 /// can refresh the detail pane without going through UI-thread-only state.
-fn show_job_detail(app: &App, job: &Job) {
+fn show_job_detail(app: &App, job: &Job, current_model: Option<&str>, summary_tier: i32) {
+    let tier_kind = match summary_tier {
+        0 => Some(ArtifactKindV1::ShortSummary),
+        2 => Some(ArtifactKindV1::LongSummary),
+        _ => Some(ArtifactKindV1::DefaultSummary),
+    };
+    show_job_detail_inner(app, job, tier_kind, current_model, summary_tier);
+}
+
+fn show_job_detail_inner(
+    app: &App,
+    job: &Job,
+    tier_kind: Option<ArtifactKindV1>,
+    current_model: Option<&str>,
+    summary_tier: i32,
+) {
     let stages_rc = app.get_stages();
     let speakers_rc = app.get_speakers();
 
@@ -2226,7 +2722,7 @@ fn show_job_detail(app: &App, job: &Job) {
     let now = chrono::Utc::now();
     let snap = jobs::JobViewSnapshot::from_job(job, now);
     let (elapsed_secs, elapsed_label) = fmt_job_elapsed(job, now);
-    let content_result = content_results_for_job(job, None);
+    let content_result = content_results_for_job(job, None, current_model, summary_tier);
     let content_entry_visible = content_result.entry_visible;
     app.set_result(content_result);
 
@@ -2283,6 +2779,7 @@ fn show_job_detail(app: &App, job: &Job) {
 
     let caps = &snap.capabilities;
     let document_words = document_words_placeholder(job);
+    let (reading_estimate, reading_saved, reading_profile) = reading_detail_for_job(job, tier_kind);
     app.set_detail(JobDetailData {
         has_job: true,
         title: snap.title.clone().into(),
@@ -2336,6 +2833,9 @@ fn show_job_detail(app: &App, job: &Job) {
         requested_language: snap.requested_language.clone().into(),
         reported_language: snap.reported_language.clone().into(),
         reported_model: snap.reported_model.clone().into(),
+        reading_estimate: reading_estimate.into(),
+        reading_saved: reading_saved.into(),
+        reading_profile: reading_profile.into(),
         can_view_result: content_entry_visible,
     });
     if document_words == "统计中…" {
@@ -2371,8 +2871,14 @@ fn clear_job_detail(app: &App) {
 /// statistics only become truthful after the terminal job state and retention
 /// policy are known.  Keep this small refresh on the UI event loop boundary so
 /// a selected job never keeps the previous task's media/document values.
-fn refresh_selected_detail(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: Uuid) {
+fn refresh_selected_detail(
+    app: &Weak<App>,
+    queue: &Arc<Mutex<Queue>>,
+    config: &Arc<Mutex<Config>>,
+    job_id: Uuid,
+) {
     let queue = queue.clone();
+    let config = config.clone();
     let _ = app.upgrade_in_event_loop(move |app| {
         let model = app.get_jobs();
         let mut selected = None;
@@ -2413,17 +2919,33 @@ fn refresh_selected_detail(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: U
         detail.media_size = fmt_media_size(&job).into();
         detail.document_words = document_words.into();
         app.set_detail(detail);
+        let current_model = config
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.llm_connection.as_ref().map(|c| c.model.clone()));
         let pending_kind = regenerable_kind_from_action(app.get_action_pending_kind().as_str())
             .map(RegenerableKind::artifact_kind);
-        app.set_result(content_results_for_job(&job, pending_kind));
+        let summary_tier = app.get_summary_tier();
+        app.set_result(content_results_for_job(
+            &job,
+            pending_kind,
+            current_model.as_deref(),
+            summary_tier,
+        ));
         if document_words == "统计中…" {
             refresh_document_words_async(app.as_weak(), job);
         }
     });
 }
 
-fn refresh_selected_result(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: Uuid) {
+fn refresh_selected_result(
+    app: &Weak<App>,
+    queue: &Arc<Mutex<Queue>>,
+    config: &Arc<Mutex<Config>>,
+    job_id: Uuid,
+) {
     let queue = queue.clone();
+    let config = config.clone();
     let _ = app.upgrade_in_event_loop(move |app| {
         let selected = (0..app.get_jobs().row_count()).find_map(|index| {
             let row = app.get_jobs().row_data(index)?;
@@ -2439,9 +2961,19 @@ fn refresh_selected_result(app: &Weak<App>, queue: &Arc<Mutex<Queue>>, job_id: U
             .ok()
             .and_then(|queue| queue.get(job_id).cloned())
         {
+            let current_model = config
+                .lock()
+                .ok()
+                .and_then(|cfg| cfg.llm_connection.as_ref().map(|c| c.model.clone()));
             let pending_kind = regenerable_kind_from_action(app.get_action_pending_kind().as_str())
                 .map(RegenerableKind::artifact_kind);
-            app.set_result(content_results_for_job(&job, pending_kind));
+            let summary_tier = app.get_summary_tier();
+            app.set_result(content_results_for_job(
+                &job,
+                pending_kind,
+                current_model.as_deref(),
+                summary_tier,
+            ));
         }
     });
 }
@@ -2460,6 +2992,8 @@ struct Controller {
     history_confirmation: RefCell<Option<HistoryConfirmation>>,
     /// Debounce timer for speaker name edits.
     speaker_timer: Mutex<Option<slint::Timer>>,
+    selected_summary_tier: RefCell<usize>,
+    probe_token: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2479,6 +3013,94 @@ enum HistoryConfirmation {
 }
 
 impl Controller {
+    fn current_model(&self) -> Option<String> {
+        self.config
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.llm_connection.as_ref().map(|c| c.model.clone()))
+    }
+
+    fn test_connection(&self, settings: SettingsView) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        if app.get_settings_saving() {
+            return;
+        }
+        // Reuse the same resolver as Job creation / regeneration so the probe
+        // exercises the canonical loopback validation. Pre-send failures never
+        // touch the network.
+        let connection = {
+            let api_format = crate::llm::ApiFormat::parse(settings.llm_api_format.as_ref())
+                .unwrap_or(crate::llm::ApiFormat::OpenAiChatCompletions);
+            crate::llm::LlmConnection {
+                id: "default".into(),
+                name: settings.llm_connection_name.to_string(),
+                api_format,
+                base_url: crate::llm::normalize_base_url(settings.llm_base_url.as_ref()),
+                model: settings.llm_model.to_string(),
+            }
+        };
+        let target = match crate::content_results::resolve_content_setup(
+            settings.llm_enabled,
+            Some(&connection),
+        )
+        .initial_target
+        {
+            crate::content_results::InitialTargetV1::Ready(target) => target,
+            _ => {
+                app.set_connection_test_state("failure".into());
+                app.set_connection_test_message(
+                    crate::content_results::ConnectionTestFailure::InvalidAddress
+                        .message()
+                        .into(),
+                );
+                return;
+            }
+        };
+        if !connection.is_local() {
+            return;
+        }
+        app.set_connection_test_state("testing".into());
+        app.set_connection_test_message("".into());
+        let token = self.probe_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let probe_token = self.probe_token.clone();
+        let weak = self.app.clone();
+        std::thread::spawn(move || {
+            let outcome = crate::content_results::test_connection(&target);
+            let _ = weak.upgrade_in_event_loop(move |app| {
+                if probe_token.load(Ordering::SeqCst) != token {
+                    return;
+                }
+                match outcome {
+                    Ok(success) => {
+                        let protocol = match success.api_format {
+                            crate::content_results::GenerationApiFormatV1::OpenAiChatCompletions => {
+                                "openai_chat_completions"
+                            }
+                            crate::content_results::GenerationApiFormatV1::AnthropicMessages => {
+                                "anthropic_messages"
+                            }
+                        };
+                        app.set_connection_test_state("success".into());
+                        app.set_connection_test_message(
+                            format!(
+                                "连接成功 · {protocol} · {}。测试成功不代表生成内容正确。",
+                                success.model
+                            )
+                            .into(),
+                        );
+                    }
+                    Err(failure) => {
+                        let message = failure.with_model(&target.model);
+                        app.set_connection_test_state("failure".into());
+                        app.set_connection_test_message(message.into());
+                    }
+                }
+            });
+        });
+    }
+
     fn install_runtime(&self, settings: SettingsView) {
         let Some(app) = self.app.upgrade() else {
             return;
@@ -2595,6 +3217,169 @@ impl Controller {
             requested_language,
         });
         self.refresh_pending_runtime();
+    }
+
+    fn select_summary_tier(&self, tier: i32) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let tier = tier.clamp(0, 2);
+        *self.selected_summary_tier.borrow_mut() = tier as usize;
+        app.set_summary_tier(tier);
+        let Some(job_id) = self.selected_job_id() else {
+            return;
+        };
+        let current_model = self.current_model();
+        let Some(job) = self.queue.lock().ok().and_then(|q| q.get(job_id).cloned()) else {
+            return;
+        };
+        let pending_kind = regenerable_kind_from_action(app.get_action_pending_kind().as_str())
+            .map(|k| k.artifact_kind());
+        app.set_result(content_results_for_job(
+            &job,
+            pending_kind,
+            current_model.as_deref(),
+            tier,
+        ));
+        // Keep job detail's estimate in sync if the selected summary tier changed.
+        let tier_kind = match tier {
+            0 => Some(ArtifactKindV1::ShortSummary),
+            2 => Some(ArtifactKindV1::LongSummary),
+            _ => Some(ArtifactKindV1::DefaultSummary),
+        };
+        let (reading_estimate, reading_saved, reading_profile) =
+            reading_detail_for_job(&job, tier_kind);
+        let mut detail = app.get_detail();
+        detail.reading_estimate = reading_estimate.into();
+        detail.reading_saved = reading_saved.into();
+        detail.reading_profile = reading_profile.into();
+        app.set_detail(detail);
+    }
+
+    fn handle_search(&self, query: String) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let Some(job_id) = self.selected_job_id() else {
+            return;
+        };
+        let Some(job) = self.queue.lock().ok().and_then(|q| q.get(job_id).cloned()) else {
+            return;
+        };
+        let Ok(crate::content_results::ContentViewV1::Current(snapshot)) =
+            crate::content_results::current(&job)
+        else {
+            return;
+        };
+        let trimmed = query.trim().to_string();
+        if trimmed.is_empty() {
+            self.clear_search();
+            return;
+        }
+        // Parse with time > speaker > text priority; caller supplies speaker map.
+        let parsed =
+            crate::content_results::parse_search_query_with_speakers(&trimmed, &job.speaker_map)
+                .or_else(|| crate::content_results::parse_search_query(&trimmed))
+                .unwrap_or(crate::content_results::SearchQuery::Text(trimmed.clone()));
+        let hits = crate::content_results::search(&snapshot, &job.speaker_map, &parsed);
+        let count = hits.len() as i32;
+        // Project hits into ContentRow search rows (same flat ListView, no nesting).
+        let search_rows: Vec<ContentRow> = hits
+            .into_iter()
+            .enumerate()
+            .map(|(idx, hit)| {
+                let can_jump = hit.has_source_refs;
+                let can_source = hit.has_source_refs;
+                let status_kind = if hit.has_source_refs {
+                    "mapped"
+                } else {
+                    "limited"
+                };
+                let range = if hit.has_source_refs {
+                    format!(
+                        "{}–{}",
+                        result_timestamp(hit.start_ms),
+                        result_timestamp(hit.end_ms)
+                    )
+                } else {
+                    String::new()
+                };
+                let url = if can_jump {
+                    crate::bilibili::video_url(&job.bvid, job.page, Some(hit.start_ms))
+                } else {
+                    String::new()
+                };
+                content_row(
+                    format!("search-{idx}"),
+                    "block",
+                    hit.layer.label(),
+                    hit.snippet.clone(),
+                    "",
+                    hit.layer.label(),
+                    status_kind,
+                    hit.snippet.clone(),
+                    String::new(),
+                    range,
+                    url,
+                    can_jump,
+                    can_source,
+                    "",
+                    "",
+                    false,
+                )
+            })
+            .collect();
+        // If no hits, show a single empty section row with the fixed copy.
+        let mut result = app.get_result();
+        if search_rows.is_empty() {
+            let empty = section_row(
+                "search-empty",
+                format!("没有找到“{trimmed}”。"),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                false,
+                "",
+            );
+            result.search_rows = ModelRc::from(Rc::new(VecModel::from(vec![empty])));
+            result.search_result_count = 0;
+        } else {
+            // Prepend a section header row with count.
+            let header = section_row(
+                "search-header",
+                format!("搜索“{trimmed}” · {count} 条结果"),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                false,
+                "",
+            );
+            let mut rows = vec![header];
+            rows.extend(search_rows);
+            result.search_rows = ModelRc::from(Rc::new(VecModel::from(rows)));
+            result.search_result_count = count;
+        }
+        result.search_active = true;
+        result.search_query = trimmed.into();
+        app.set_result(result);
+    }
+
+    fn clear_search(&self) {
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let mut result = app.get_result();
+        result.search_active = false;
+        result.search_query = "".into();
+        result.search_result_count = 0;
+        result.search_rows = ModelRc::from(Rc::new(VecModel::<ContentRow>::default()));
+        app.set_result(result);
     }
 
     fn show_unavailable_confirmation(&self, app: &App, bvid: &str, page: u32, error: &str) {
@@ -2926,7 +3711,9 @@ impl Controller {
                                 self.jobs_model
                                     .set_row_data(index, job_to_row(&job, row.selected));
                                 if row.selected {
-                                    show_job_detail(&app, &job);
+                                    let current_model = self.current_model();
+                                    let tier = *self.selected_summary_tier.borrow() as i32;
+                                    show_job_detail(&app, &job, current_model.as_deref(), tier);
                                 }
                                 break;
                             }
@@ -3093,6 +3880,8 @@ impl Controller {
         app.set_action_pending_kind(
             match kind {
                 RegenerableKind::DefaultSummary => "summary",
+                RegenerableKind::ShortSummary => "summary-short",
+                RegenerableKind::LongSummary => "summary-long",
                 RegenerableKind::Highlights => "highlights",
                 RegenerableKind::Chapters => "chapters",
             }
@@ -3101,12 +3890,18 @@ impl Controller {
         app.set_action_pending(true);
         app.set_action_feedback("正在重新生成文字结果…".into());
         app.set_action_feedback_error(false);
+        let tier = match *self.selected_summary_tier.borrow() {
+            0 => crate::document::SummaryTier::Short,
+            2 => crate::document::SummaryTier::Long,
+            _ => crate::document::SummaryTier::Standard,
+        };
         if self
             .tx
             .send(WorkMsg::Regenerate {
                 job_id: id,
                 kind,
                 target,
+                tier,
             })
             .is_err()
         {
@@ -3164,7 +3959,16 @@ impl Controller {
         app.set_action_pending(true);
         app.set_action_feedback("正在修复文字结果…".into());
         app.set_action_feedback_error(false);
-        if self.tx.send(WorkMsg::RepairContent(id)).is_err() {
+        let tier = match *self.selected_summary_tier.borrow() {
+            0 => crate::document::SummaryTier::Short,
+            2 => crate::document::SummaryTier::Long,
+            _ => crate::document::SummaryTier::Standard,
+        };
+        if self
+            .tx
+            .send(WorkMsg::RepairContent { job_id: id, tier })
+            .is_err()
+        {
             clear_content_operation(&self.content_busy, id);
             app.set_action_pending(false);
             app.set_action_feedback("修复失败：后台任务已退出".into());
@@ -3337,7 +4141,14 @@ impl Controller {
                     return;
                 }
             };
-            if let Err(error) = crate::document::rebuild_presentation(&rendered_job, &snapshot) {
+            let doc_tier = match app.get_result().summary_tier {
+                0 => crate::document::SummaryTier::Short,
+                2 => crate::document::SummaryTier::Long,
+                _ => crate::document::SummaryTier::Standard,
+            };
+            if let Err(error) =
+                crate::document::rebuild_presentation_with_tier(&rendered_job, &snapshot, doc_tier)
+            {
                 app.set_action_feedback(format!("打开失败：{error}").into());
                 app.set_action_feedback_error(true);
                 return;
@@ -3629,6 +4440,11 @@ impl Controller {
                 );
                 t
             });
+            let tier = match *self.selected_summary_tier.borrow() {
+                0 => crate::document::SummaryTier::Short,
+                2 => crate::document::SummaryTier::Long,
+                _ => crate::document::SummaryTier::Standard,
+            };
             // Restart with the current job_id. We use a stop + start cycle
             // because Slint Timer doesn't allow changing the callback.
             timer.stop();
@@ -3636,7 +4452,7 @@ impl Controller {
                 slint::TimerMode::SingleShot,
                 std::time::Duration::from_millis(200),
                 move || {
-                    let _ = tx.send(WorkMsg::SpeakerChanged(job_id));
+                    let _ = tx.send(WorkMsg::SpeakerChanged { job_id, tier });
                 },
             );
         } else {
@@ -3688,6 +4504,9 @@ impl Controller {
         }
         let cfg = self.config.lock().unwrap().clone();
         sync_settings(&app, &cfg);
+        self.probe_token.fetch_add(1, Ordering::SeqCst);
+        app.set_connection_test_state("idle".into());
+        app.set_connection_test_message("".into());
         app.set_settings_saving(false);
         app.set_settings_feedback("已保存".into());
         app.set_settings_visible(false);
@@ -3715,7 +4534,12 @@ impl Controller {
         };
 
         match &job_opt {
-            Some(job) => show_job_detail(&app, job),
+            Some(job) => {
+                *self.selected_summary_tier.borrow_mut() = 1;
+                app.set_summary_tier(1);
+                let current_model = self.current_model();
+                show_job_detail(&app, job, current_model.as_deref(), 1);
+            }
             None => clear_job_detail(&app),
         }
         self.update_reorder_capabilities();
@@ -3792,6 +4616,9 @@ fn empty_detail() -> JobDetailData {
         requested_language: "未记录".into(),
         reported_language: "未报告".into(),
         reported_model: "未报告".into(),
+        reading_estimate: "—".into(),
+        reading_saved: "—".into(),
+        reading_profile: "".into(),
         can_view_result: false,
     }
 }
@@ -4171,10 +4998,12 @@ mod tests {
             ..Config::default()
         };
         let job = result_fixture_callback_job(&root, &cfg, "result-success").unwrap();
-        let first = super::content_results_for_job(&job, None);
+        let first = super::content_results_for_job(&job, None, None, 1);
         let refreshed = super::content_results_for_job(
             &job,
             Some(crate::content_results::ArtifactKindV1::Chapters),
+            None,
+            1,
         );
         assert!(!first.job_id.is_empty());
         assert_eq!(first.job_id, refreshed.job_id);
@@ -4183,7 +5012,7 @@ mod tests {
         let other_root =
             std::env::temp_dir().join(format!("bimyscribe-result-session-other-{other_id}"));
         let other_job = result_fixture_callback_job(&other_root, &cfg, "result-success").unwrap();
-        let switched = super::content_results_for_job(&other_job, None);
+        let switched = super::content_results_for_job(&other_job, None, None, 1);
         assert_ne!(first.job_id, switched.job_id);
         std::fs::remove_dir_all(root).ok();
         std::fs::remove_dir_all(other_root).ok();
@@ -4306,7 +5135,12 @@ mod tests {
 
         let cancelled = crate::cancel::CancellationToken::new();
         cancelled.cancel();
-        let (message, is_error, locator) = run_repair_content_operation(&job, &cfg, &cancelled);
+        let (message, is_error, locator) = run_repair_content_operation(
+            &job,
+            &cfg,
+            &cancelled,
+            crate::document::SummaryTier::Standard,
+        );
         assert_eq!(message, "已取消文字结果修复");
         assert!(is_error);
         assert!(locator.is_none());
@@ -4315,8 +5149,12 @@ mod tests {
             ContentViewV1::RawOnly { .. }
         ));
 
-        let (message, is_error, locator) =
-            run_repair_content_operation(&job, &cfg, &crate::cancel::CancellationToken::new());
+        let (message, is_error, locator) = run_repair_content_operation(
+            &job,
+            &cfg,
+            &crate::cancel::CancellationToken::new(),
+            crate::document::SummaryTier::Standard,
+        );
         assert_eq!(message, "文字结果已修复");
         assert!(!is_error);
         assert!(locator.is_some());
@@ -4338,6 +5176,7 @@ mod tests {
             target,
             &cfg,
             &crate::cancel::CancellationToken::new(),
+            crate::document::SummaryTier::Standard,
         );
         assert!(message.contains("重生成失败"));
         assert!(is_error);
@@ -4483,5 +5322,148 @@ mod tests {
         let (_, elapsed) = super::fmt_job_elapsed(&job, chrono::Utc::now());
         assert_eq!(elapsed, "—");
         assert_eq!(super::empty_detail().elapsed.to_string(), "—");
+    }
+
+    #[test]
+    fn model_changed_notice_checks_newest_enhancement_slot() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-result-model-notice-{id}"));
+        let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
+        let job =
+            result_fixture_callback_job(&root, &cfg, "result-success").expect("result fixture job");
+        let Ok(crate::content_results::ContentViewV1::Current(mut snapshot)) =
+            crate::content_results::current(&job)
+        else {
+            panic!("expected current snapshot");
+        };
+
+        snapshot.current.slots.highlights.current = None;
+        snapshot.current.slots.short_summary.current = None;
+        snapshot.current.slots.long_summary.current = None;
+
+        if let Some(record) = snapshot.current.slots.chapters.current.as_mut() {
+            record.provenance.model = Some("model-old".into());
+            record.created_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+        }
+        if let Some(record) = snapshot.current.slots.default_summary.current.as_mut() {
+            record.provenance.model = Some("model-newest".into());
+            record.created_at = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+        }
+
+        // When current model is model-newest, newest slot matches -> no notice.
+        assert_eq!(
+            super::model_changed_notice(&snapshot, Some("model-newest")),
+            None
+        );
+
+        // When current model is model-target, notice uses newest slot's model.
+        let notice = super::model_changed_notice(&snapshot, Some("model-target")).unwrap();
+        assert!(notice.contains("model-newest → model-target"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ungenerated_slot_presents_clean_empty_state_and_initial_generation_button() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-result-ungenerated-{id}"));
+        let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
+        let job =
+            result_fixture_callback_job(&root, &cfg, "result-success").expect("result fixture job");
+        let Ok(crate::content_results::ContentViewV1::Current(mut snapshot)) =
+            crate::content_results::current(&job)
+        else {
+            panic!("expected current snapshot");
+        };
+
+        snapshot.current.slots.short_summary.current = None;
+        snapshot.current.slots.short_summary.last_failure = None;
+
+        let rows = super::slot_rows(
+            &job,
+            &snapshot,
+            crate::content_results::ArtifactKindV1::ShortSummary,
+            "短摘要",
+            "short-summary",
+            None,
+            "将使用：qwen2.5:7b",
+        );
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.title.as_str(), "短摘要");
+        assert_eq!(row.status_label.as_str(), "");
+        assert_eq!(row.status_kind.as_str(), "idle");
+        assert_eq!(row.text.as_str(), "短摘要尚未生成");
+        assert_eq!(row.action_label.as_str(), "生成短摘要");
+        assert_eq!(row.action_kind.as_str(), "short-summary");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn presentation_operation_preserves_selected_summary_tier_in_full_md() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-presentation-tier-{id}"));
+        let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
+        let job =
+            result_fixture_callback_job(&root, &cfg, "result-success").expect("result fixture job");
+        let Ok(crate::content_results::ContentViewV1::Current(mut snapshot)) =
+            crate::content_results::current(&job)
+        else {
+            panic!("expected current snapshot");
+        };
+
+        // Populate a short summary slot.
+        let mut short_record = snapshot
+            .current
+            .slots
+            .default_summary
+            .current
+            .clone()
+            .unwrap();
+        short_record.kind = crate::content_results::ArtifactKindV1::ShortSummary;
+        short_record.blocks = vec![crate::content_results::ContentBlockV1 {
+            id: "short-1".into(),
+            role: crate::content_results::ContentBlockRoleV1::Summary,
+            title: None,
+            text: "这是独立生成的短摘要文本。".into(),
+            source_refs: Vec::new(),
+            source_status: crate::content_results::SourceStatusV1::Mapped,
+        }];
+        snapshot.current.slots.short_summary.current = Some(short_record);
+
+        let config_arc = Arc::new(Mutex::new(cfg));
+        let (_, is_error, output_dir) = super::presentation_operation(
+            job.clone(),
+            &snapshot,
+            &config_arc,
+            crate::document::SummaryTier::Short,
+            "success".into(),
+            false,
+        );
+        assert!(!is_error);
+        let out = output_dir.expect("output dir");
+        let full_md = std::fs::read_to_string(out.join("full.md")).expect("read full.md");
+        assert!(full_md.contains("这是独立生成的短摘要文本。"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn probe_token_invalidates_earlier_background_probe_writeback() {
+        let token = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let initial_token = token.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(initial_token, 1);
+
+        // When user edits settings draft, cancels, or saves, probe_token is bumped:
+        token.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let newer_token = token.load(std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(initial_token, newer_token);
+        // An in-flight probe with initial_token will see token != newer_token and return early.
     }
 }

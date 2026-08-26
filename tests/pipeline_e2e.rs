@@ -824,3 +824,103 @@ fn config_changes_do_not_override_frozen_language_selection() {
     assert_eq!(full_md, original_full_md, "full.md 不应被 Config 变化重写");
     assert!(!full_md.contains("Hello and welcome to the English integration test fixture."));
 }
+
+// ---- v0.6 Scenario: v1 current migration on rebuild ----
+
+#[test]
+fn v1_current_file_migration_preserves_slots_and_rebuilds_presentation() {
+    let _home_lock = HOME_LOCK.lock().unwrap();
+    if !ffmpeg_available() {
+        eprintln!("skipping pipeline_e2e: ffmpeg 不在 PATH 上，无法执行真实标准化阶段");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let cfg = Config {
+        working_dir: sandbox.working_root(),
+        output_dir: sandbox.output_root(),
+        ..Config::default()
+    };
+    let deps = FixtureDeps::zh();
+    let mut job = fixture_job(&sandbox.root, SourceLanguage::Zh);
+    let weak = headless_weak();
+    let cancel_token = CancellationToken::new();
+
+    pipeline::run_job_with_deps(&mut job, &cfg, &weak, &cancel_token, &deps)
+        .expect("首次完整运行应成功");
+
+    let work_dir = job.work_dir.clone().unwrap();
+    let final_dir = job.final_output_dir.clone().unwrap();
+    let current_file = work_dir.join("content-current.v1.json");
+
+    // Rewrite on-disk content to genuine v1: schema_version = 1, no short/long tier slots.
+    let mut current_v1: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&current_file).unwrap()).unwrap();
+    current_v1["schema_version"] = serde_json::json!(1);
+    if let Some(slots) = current_v1.get_mut("slots").and_then(|s| s.as_object_mut()) {
+        slots.remove("short_summary");
+        slots.remove("long_summary");
+    }
+    std::fs::write(
+        &current_file,
+        serde_json::to_vec_pretty(&current_v1).unwrap(),
+    )
+    .unwrap();
+
+    // Remove presentation markdown files to simulate a recovery rebuild.
+    std::fs::remove_file(work_dir.join("transcript.readable.md")).unwrap();
+    std::fs::remove_file(final_dir.join("full.md")).unwrap();
+
+    // Rebuild presentation via pipeline recovery.
+    let reloaded = jobs::load_job_state(&work_dir).unwrap();
+    let mut queue = jobs::Queue {
+        jobs: vec![reloaded],
+    };
+    let reports = jobs::recover(&mut queue);
+    assert!(reports[0].reset_stages.is_empty());
+    let mut repaired = queue.jobs.remove(0);
+
+    let resume_deps = FixtureDeps::zh();
+    pipeline::run_job_with_deps(&mut repaired, &cfg, &weak, &cancel_token, &resume_deps)
+        .expect("从 v1 current 重建 Presentation 应成功");
+    assert_eq!(resume_deps.transcribe_call_count(), 0);
+
+    assert!(work_dir.join("transcript.readable.md").is_file());
+    assert!(final_dir.join("full.md").is_file());
+    let full_md = std::fs::read_to_string(final_dir.join("full.md")).unwrap();
+    assert!(full_md.contains("## 忠实整理"));
+    assert!(full_md.contains("## 全文"));
+}
+
+// ---- v0.6 Scenario: versioned reading metadata in full.md ----
+
+#[test]
+fn reading_metadata_in_full_md_reflects_versioned_estimate_and_omits_missing_profile() {
+    let _home_lock = HOME_LOCK.lock().unwrap();
+    if !ffmpeg_available() {
+        eprintln!("skipping pipeline_e2e: ffmpeg 不在 PATH 上，无法执行真实标准化阶段");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let cfg = Config {
+        working_dir: sandbox.working_root(),
+        output_dir: sandbox.output_root(),
+        ..Config::default()
+    };
+    let deps = FixtureDeps::zh();
+    let mut job = fixture_job(&sandbox.root, SourceLanguage::Zh);
+    let weak = headless_weak();
+    let cancel_token = CancellationToken::new();
+
+    pipeline::run_job_with_deps(&mut job, &cfg, &weak, &cancel_token, &deps)
+        .expect("zh 任务运行应成功");
+
+    let final_dir = job.final_output_dir.clone().unwrap();
+    let full_md = std::fs::read_to_string(final_dir.join("full.md")).unwrap();
+
+    // With zh profile: duration, scale, reading time, and saved time are all present.
+    assert!(full_md.contains("- 正文规模: 约"));
+    assert!(full_md.contains("- 估算口径: reading-profile v1（中文 400 字/分、英文 240 词/分、1.0x 倍速；依据 Brysbaert 2019 与 2024 中文阅读实验）"));
+    assert!(full_md.contains("- 视频时长: 0分10秒"));
+    assert!(full_md.contains("- 预计阅读: 约"));
+    assert!(full_md.contains("- 预计节省: 约"));
+}

@@ -72,6 +72,12 @@ export struct JobDetailData {
     requested-language: string,
     reported-language: string,
     reported-model: string,
+    // v0.6 F5: task information panel's two read-only rows share the same
+    // primary-consumption estimate as the result header and full.md. Missing
+    // shows "—" rather than 0; handling time stays on its own line.
+    reading-estimate: string,
+    reading-saved: string,
+    reading-profile: string,
     can-view-result: bool,       // terminal v0.5 job with validated raw Evidence
 }
 
@@ -96,6 +102,7 @@ export struct ContentRow {
     action-kind: string,         // summary / highlights / chapters / open-raw
     action-label: string,
     action-pending: bool,
+    action-caption: string,      // F2: "将使用：{model}" for every section with an action
 }
 
 // Read-only projection of ContentResults::current.  The Rust controller is
@@ -108,11 +115,27 @@ export struct ContentResultsData {
     bvid: string,
     page: int,
     video-duration: string,
+    // v0.6 F5: versioned reading estimate caption for the fixed header.
+    // Empty when no reliable profile exists; otherwise
+    // "视频 {D} 分钟 · 正文约 {N} 字 · 预计阅读约 {M} 分钟 · 预计节省约 {K} 分钟 · {P}%（相对 1.0x 观看）".
+    reading-caption: string,
+    reading-profile: string,     // "reading-profile v1" when estimate is available
+    show-reading-explainer: bool,
+    reading-explainer: string,
+    // F2: page-level neutral banner when current model differs from newest record.
+    model-notice: string,
+    show-model-notice: bool,
+    // F4: search state (active replaces tab content with results in the same ListView).
+    search-active: bool,
+    search-query: string,
+    search-result-count: int,
+    search-rows: [ContentRow],
     status-label: string,
     notice: string,
     notice-error: bool,
     source-url: string,
     default-tab: int,            // 0 summary, 1 chapters, 2 faithful, 3 raw
+    summary-tier: int,           // 0 short, 1 standard, 2 long (F3)
     show-summary: bool,
     show-chapters: bool,
     show-faithful: bool,
