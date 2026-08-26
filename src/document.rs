@@ -15,6 +15,37 @@ use crate::content_results::{
 use crate::funasr::Utterance;
 use crate::jobs::Job;
 
+/// Which summary tier a rendered/exported document contains. The default is
+/// the standard tier; the UI passes the tier currently selected in the result
+/// view (Spec §7.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryTier {
+    Short,
+    Standard,
+    Long,
+}
+
+impl SummaryTier {
+    pub(crate) fn artifact_kind(self) -> ArtifactKindV1 {
+        match self {
+            Self::Short => ArtifactKindV1::ShortSummary,
+            Self::Standard => ArtifactKindV1::DefaultSummary,
+            Self::Long => ArtifactKindV1::LongSummary,
+        }
+    }
+
+    /// Resolve the tier actually rendered: only renders the selected tier
+    /// when present, without falling back to a different summary tier.
+    fn resolve(&self, snapshot: &ContentSnapshotV1) -> Option<ArtifactKindV1> {
+        let selected = self.artifact_kind();
+        if snapshot.current.slots.get(selected).current.is_some() {
+            Some(selected)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DocumentError {
     #[error("document I/O: {0}")]
@@ -138,6 +169,17 @@ pub(crate) fn rebuild_presentation(
     job: &Job,
     snapshot: &ContentSnapshotV1,
 ) -> Result<(), DocumentError> {
+    rebuild_presentation_with_tier(job, snapshot, SummaryTier::Standard)
+}
+
+/// Same as [`rebuild_presentation`] but renders the given summary tier into
+/// `full.md`. When the selected tier has not been generated, no summary section
+/// is written at all (never silently writes another tier).
+pub(crate) fn rebuild_presentation_with_tier(
+    job: &Job,
+    snapshot: &ContentSnapshotV1,
+    summary_tier: SummaryTier,
+) -> Result<(), DocumentError> {
     let Some(work_dir) = job.work_dir.as_deref() else {
         return Err(DocumentError::Snapshot("任务没有工作目录".into()));
     };
@@ -172,7 +214,8 @@ pub(crate) fn rebuild_presentation(
         page: job.page,
         source_url: job.source_url.clone(),
     };
-    let full = render_snapshot_full_markdown(job, &meta, snapshot, &readable, &raw_path);
+    let full =
+        render_snapshot_full_markdown(job, &meta, snapshot, &readable, &raw_path, summary_tier);
 
     crate::jobs::atomic_write(&raw_path, raw.as_bytes())?;
     crate::jobs::atomic_write(
@@ -229,6 +272,7 @@ fn render_snapshot_full_markdown(
     snapshot: &ContentSnapshotV1,
     faithful_body: &str,
     raw_path: &Path,
+    summary_tier: SummaryTier,
 ) -> String {
     // Reuse the stable legacy header and faithful body formatting, then insert
     // the structured v0.5 records before the full transcript section.
@@ -239,13 +283,90 @@ fn render_snapshot_full_markdown(
         Some(faithful_body),
         raw_path,
     );
+    document = rewrite_reading_time_metadata(document, job, snapshot, summary_tier);
     if let Some(index) = document.find("## 全文") {
-        document.insert_str(index, &render_snapshot_sections(job, snapshot));
+        document.insert_str(
+            index,
+            &render_snapshot_sections(job, snapshot, summary_tier),
+        );
     }
     document
 }
 
-fn render_snapshot_sections(job: &Job, snapshot: &ContentSnapshotV1) -> String {
+/// Replace the legacy char-count/5k heuristic in the metadata block with the
+/// versioned `reading-profile v1` estimate computed from the same primary
+/// consumption artifact the App UI uses. Missing profile keeps video duration
+/// and scale but omits reading/saved lines — never fabricated numbers.
+fn rewrite_reading_time_metadata(
+    mut document: String,
+    job: &Job,
+    snapshot: &ContentSnapshotV1,
+    summary_tier: SummaryTier,
+) -> String {
+    let language = job
+        .transcription_result
+        .as_ref()
+        .and_then(|result| result.reported_language)
+        .or_else(|| {
+            job.transcription_selection
+                .as_ref()
+                .map(|selection| selection.requested_language)
+        });
+    let record = crate::content_results::primary_consumption_record(
+        snapshot,
+        Some(summary_tier.artifact_kind()),
+    );
+    let text = record
+        .map(crate::content_results::record_plain_text)
+        .unwrap_or_default();
+    let estimate = crate::reading_time::estimate(&text, job.duration_ms, language);
+
+    let legacy_start = match document.find("- 字符数: ") {
+        Some(index) => index,
+        None => return document,
+    };
+    let legacy_end = document[legacy_start..]
+        .find("\n")
+        .map(|offset| legacy_start + offset + 1)
+        .unwrap_or(document.len());
+    // The legacy block is exactly two lines (字符数 + 阅读时间).
+    let legacy_end = if document[legacy_start..].contains("阅读时间")
+        && document[legacy_end..].starts_with("- 阅读时间")
+    {
+        document[legacy_end..]
+            .find('\n')
+            .map(|offset| legacy_end + offset + 1)
+            .unwrap_or(legacy_end)
+    } else {
+        legacy_end
+    };
+    let scale = estimate.scale;
+    let mut replacement = format!("- 正文规模: 约 {}\n", scale.format_scale());
+    if let (Some(reading), Some(saved)) = (estimate.reading_ms, estimate.saved_ms) {
+        replacement.push_str(&format!(
+            "- 估算口径: {}（中文 400 字/分、英文 240 词/分、1.0x 倍速；依据 Brysbaert 2019 与 2024 中文阅读实验）\n",
+            crate::reading_time::READING_PROFILE_VERSION
+        ));
+        if let Some(video_ms) = estimate.video_ms {
+            replacement.push_str(&format!("- 视频时长: {}\n", fmt_duration(video_ms)));
+        }
+        replacement.push_str(&format!(
+            "- 预计阅读: 约 {} 分钟\n- 预计节省: 约 {} 分钟\n",
+            (reading as f64 / 60_000.0).ceil() as u64,
+            (saved as f64 / 60_000.0).ceil() as u64
+        ));
+    } else if let Some(video_ms) = estimate.video_ms {
+        replacement.push_str(&format!("- 视频时长: {}\n", fmt_duration(video_ms)));
+    }
+    document.replace_range(legacy_start..legacy_end, &replacement);
+    document
+}
+
+fn render_snapshot_sections(
+    job: &Job,
+    snapshot: &ContentSnapshotV1,
+    summary_tier: SummaryTier,
+) -> String {
     let mut sections = String::new();
     sections.push_str("## 内容来源说明\n\n");
     sections.push_str(
@@ -263,8 +384,39 @@ fn render_snapshot_sections(job: &Job, snapshot: &ContentSnapshotV1) -> String {
         sections
             .push_str("忠实正文只允许对 Evidence 做保序、可核对的整理；正文主体见下方“全文”。\n\n");
     }
+    // `full.md` renders exactly one summary tier: the resolved selection.
+    // Other already-generated tiers stay in the structured result and appear
+    // after switching tiers and re-exporting; ungenerated tiers leave no
+    // placeholder section at all.
+    let summary_kinds: Vec<ArtifactKindV1> = summary_tier.resolve(snapshot).into_iter().collect();
+    for kind in summary_kinds {
+        let slot = snapshot.current.slots.get(kind);
+        if let Some(record) = slot.current.as_ref() {
+            sections.push_str("## 摘要\n\n");
+            sections.push_str(&format_provenance(record));
+            sections.push_str(&format!(
+                "> 来源{}\n\n",
+                source_status_label(record.validation.record_source_status)
+            ));
+            for block in &record.blocks {
+                if let Some(title) = block.title.as_deref() {
+                    sections.push_str(&format!("### {}\n\n", title.trim()));
+                }
+                if block.source_status == SourceStatusV1::Limited {
+                    sections.push_str("> 来源受限\n\n");
+                }
+                sections.push_str(block.text.trim());
+                sections.push_str("\n\n");
+                if block.source_status == SourceStatusV1::Mapped {
+                    let source = render_block_sources(job, snapshot, block);
+                    if !source.is_empty() {
+                        sections.push_str(&format!("来源：{}\n\n", source));
+                    }
+                }
+            }
+        }
+    }
     for (kind, heading) in [
-        (ArtifactKindV1::DefaultSummary, "## 摘要"),
         (ArtifactKindV1::Highlights, "## 重点"),
         (ArtifactKindV1::Chapters, "## 章节"),
     ] {
@@ -392,6 +544,8 @@ fn artifact_kind_label(kind: ArtifactKindV1) -> &'static str {
     match kind {
         ArtifactKindV1::FaithfulText => "忠实正文",
         ArtifactKindV1::DefaultSummary => "默认摘要",
+        ArtifactKindV1::ShortSummary => "短摘要",
+        ArtifactKindV1::LongSummary => "长摘要",
         ArtifactKindV1::Highlights => "重点",
         ArtifactKindV1::Chapters => "章节",
     }
@@ -1055,5 +1209,41 @@ mod tests {
         let rendered = format_provenance(&fallback);
         assert!(rendered.contains("target_unavailable / AI 配置不可用"));
         assert!(rendered.contains("本地 AI 配置不可用"));
+    }
+
+    #[test]
+    fn rewrite_reading_time_metadata_omits_profile_when_language_is_auto_or_missing() {
+        let id = Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("bimyscribe-doc-reading-time-{id}"));
+        let cfg = crate::config::Config::for_paths(
+            &crate::paths::AppPaths::discover().expect("app paths"),
+        );
+        let mut job = crate::desktop::result_fixture_callback_job(&root, &cfg, "result-success")
+            .expect("result fixture job");
+        let Ok(crate::content_results::ContentViewV1::Current(snapshot)) =
+            crate::content_results::current(&job)
+        else {
+            panic!("expected current snapshot");
+        };
+
+        job.transcription_result = None;
+        if let Some(selection) = job.transcription_selection.as_mut() {
+            selection.requested_language = SourceLanguage::Auto;
+        }
+
+        let initial_doc = "- 字符数: 100\n- 阅读时间: 1分钟\n## 全文\n";
+        let rewritten = rewrite_reading_time_metadata(
+            initial_doc.to_string(),
+            &job,
+            &snapshot,
+            SummaryTier::Standard,
+        );
+        assert!(rewritten.contains("- 正文规模: 约"));
+        assert!(rewritten.contains("- 视频时长: 1分04秒"));
+        assert!(!rewritten.contains("估算口径"));
+        assert!(!rewritten.contains("预计阅读"));
+        assert!(!rewritten.contains("预计节省"));
+
+        std::fs::remove_dir_all(root).ok();
     }
 }

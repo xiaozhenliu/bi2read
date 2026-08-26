@@ -248,7 +248,7 @@ export component SettingsModal inherits Rectangle {
     // llm-api-format / default-retention，若直接比较 draft != settings 会在
     // 打开瞬间就把这些规范化动作误报成"用户编辑"。
     property <SettingsView> baseline: root.draft;
-    property <int> selected-page: 0; // general, transcribe, AI
+    in-out property <int> selected-page: 0; // general, transcribe, AI
     property <string> page-title: root.selected-page == 0 ? "常规"
         : root.selected-page == 1 ? "转写" : "AI 润色";
     property <[string]> retention-options: ["推荐", "保留全部", "仅保留文档"];
@@ -281,9 +281,19 @@ export component SettingsModal inherits Rectangle {
         || root.draft.llm-api-format != root.baseline.llm-api-format
         || root.draft.default-retention != root.baseline.default-retention
         || root.draft.default-screenshots != root.baseline.default-screenshots;
+    in-out property <string> connection-test-state: "idle"; // idle | testing | success | failure
+    in-out property <string> connection-test-message: "";
+    property <bool> connection-test-busy: root.connection-test-state == "testing";
+    property <bool> connection-test-can-run: !root.connection-test-busy && !root.saving
+        && !root.remote-warning
+        && root.draft.llm-enabled
+        && !root.draft.llm-base-url.is-empty
+        && !root.draft.llm-model.is-empty;
     callback save(SettingsView);
     callback install-runtime(SettingsView);
+    callback test-connection(SettingsView);
     callback cancel();
+    callback draft-changed();
     callback choose-directory(string) -> string;
     callback default-directory(string) -> string;
 
@@ -331,13 +341,16 @@ export component SettingsModal inherits Rectangle {
     changed shown => {
         if root.shown {
             root.draft = root.settings;
-            root.selected-page = 0;
             root.normalize-draft();
             // Equivalent to `baseline = draft` right after a fresh
             // normalized copy, but expressed via the same
             // settings-is-the-source-of-truth path `changed settings` uses,
             // so there is exactly one definition of "what baseline means".
             root.rebuild-baseline();
+        } else {
+            root.connection-test-state = "idle";
+            root.connection-test-message = "";
+            root.selected-page = 0;
         }
     }
 
@@ -755,7 +768,12 @@ export component SettingsModal inherits Rectangle {
                                     title: "启用 AI 润色";
                                     description: "转写完成后使用大模型润色文稿，提升可读性";
                                     checked: root.draft.llm-enabled;
-                                    toggled(v) => { root.draft.llm-enabled = v; }
+                                    toggled(v) => {
+                                        root.draft.llm-enabled = v;
+                                        root.connection-test-state = "idle";
+                                        root.connection-test-message = "";
+                                        root.draft-changed();
+                                    }
                                 }
 
                                 if !root.draft.llm-enabled : NoticeCard {
@@ -768,17 +786,32 @@ export component SettingsModal inherits Rectangle {
                                     LabeledEdit {
                                         label: "连接名称";
                                         value: root.draft.llm-connection-name;
-                                        edited(v) => { root.draft.llm-connection-name = v; }
+                                        edited(v) => {
+                                            root.draft.llm-connection-name = v;
+                                            root.connection-test-state = "idle";
+                                            root.connection-test-message = "";
+                                            root.draft-changed();
+                                        }
                                     }
                                     LabeledEdit {
                                         label: "模型";
                                         value: root.draft.llm-model;
-                                        edited(v) => { root.draft.llm-model = v; }
+                                        edited(v) => {
+                                            root.draft.llm-model = v;
+                                            root.connection-test-state = "idle";
+                                            root.connection-test-message = "";
+                                            root.draft-changed();
+                                        }
                                     }
                                     LabeledEdit {
                                         label: "Base URL";
                                         value: root.draft.llm-base-url;
-                                        edited(v) => { root.draft.llm-base-url = v; }
+                                        edited(v) => {
+                                            root.draft.llm-base-url = v;
+                                            root.connection-test-state = "idle";
+                                            root.connection-test-message = "";
+                                            root.draft-changed();
+                                        }
                                     }
                                     VerticalLayout {
                                         spacing: Theme.space-xxs;
@@ -797,8 +830,18 @@ export component SettingsModal inherits Rectangle {
                                                 root.draft.llm-api-format = value == "Anthropic 兼容"
                                                     ? "anthropic_messages"
                                                     : "openai_chat_completions";
+                                                root.connection-test-state = "idle";
+                                                root.connection-test-message = "";
+                                                root.draft-changed();
                                             }
                                         }
+                                    }
+                                    Text {
+                                        text: "常见本地服务：Ollama http://127.0.0.1:11434/v1 · LM Studio http://127.0.0.1:1234/v1。BiMyScribe 只向你填写的地址发送文字内容，不下载或启动模型。";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-caption;
+                                        wrap: word-wrap;
+                                        height: self.preferred-height;
                                     }
                                     if root.remote-warning : Text {
                                         text: "远程端点需要鉴权，当前版本仅支持本地无鉴权端点（如 Ollama）。";
@@ -806,6 +849,32 @@ export component SettingsModal inherits Rectangle {
                                         font-size: Theme.font-caption;
                                         wrap: word-wrap;
                                         height: self.preferred-height;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: Theme.space-xs;
+                                        SecondaryButton {
+                                            text: root.connection-test-busy ? "正在测试…" : "测试连接";
+                                            disabled: !root.connection-test-can-run;
+                                            clicked => { root.test-connection(root.draft); }
+                                        }
+                                        Text {
+                                            text: root.connection-test-state == "testing" ? "正在测试…"
+                                                : root.connection-test-state == "success" ? "连接成功"
+                                                : root.connection-test-state == "failure" ? "测试失败"
+                                                : "未测试";
+                                            color: root.connection-test-state == "failure" ? Theme.danger-text
+                                                : root.connection-test-state == "success" ? Theme.success : Theme.text-muted;
+                                            font-size: Theme.font-caption;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if !root.connection-test-message.is-empty : Text {
+                                        text: root.connection-test-message;
+                                        color: root.connection-test-state == "failure" ? Theme.danger-text : Theme.text-secondary;
+                                        font-size: Theme.font-body;
+                                        wrap: word-wrap;
+                                        height: self.preferred-height;
+                                        accessible-live-region: polite;
                                     }
                                 }
                             }

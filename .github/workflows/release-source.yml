@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   validate:
+    if: github.repository == 'xiaozhenliu/bimyscribe'
     runs-on: macos-14
     outputs:
       private_revision: ${{ steps.identity.outputs.private_revision }}
@@ -39,6 +40,9 @@ jobs:
       - name: Verify public snapshot
         run: python3 scripts/check-public-snapshot.py verify --root .
 
+      - name: Install Rust formatting component
+        run: rustup component add rustfmt
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -49,6 +53,7 @@ jobs:
         run: cargo test
 
   publish:
+    if: github.repository == 'xiaozhenliu/bimyscribe'
     needs: validate
     runs-on: macos-14
     permissions:
@@ -146,4 +151,3 @@ jobs:
           path: published.json
           if-no-files-found: error
           retention-days: 90
-

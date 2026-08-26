@@ -14,7 +14,7 @@ BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录�
 - 生成带时间链接的完整 Markdown 文稿
 - 任务中断后可恢复，并支持取消、重试和保留策略
 - 可选连接 Ollama 等本地 LLM，对文稿进行可读性整理
-- v0.5.0 支持终态可信文字消费结果：忠实正文、章节、默认摘要、重点和可核对来源
+- v0.6.0 支持智能文字处理与精选：AI 连接测试、模型更换提示与重生成、短/标准/长三档摘要、单视频文字与说话人搜索、版本化阅读时间估算
 
 ## 运行要求
 
@@ -33,7 +33,7 @@ Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器�
 ## 安装与启动
 
 App 版本以 [`Cargo.toml`](Cargo.toml) 为唯一来源；当前版本的完整中英文变化、兼容性与
-限制见 [`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md)。
+限制见 [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md)。
 
 ```bash
 git clone https://github.com/xiaozhenliu/bimyscribe.git
@@ -194,8 +194,7 @@ speaker information.
 - Speaker renaming without re-running transcription
 - Markdown output with clickable Bilibili timestamp links
 - Optional text refinement through a local LLM service such as Ollama
-- v0.5.0 result view for terminal jobs: faithful text, chapters, a default summary,
-  highlights, and verifiable source links
+- v0.6.0 smart text curation for terminal jobs: AI connection test, model changed notice & regeneration, short/standard/long summary tiers, single-job text and speaker search, and versioned reading time estimation
 
 ### Requirements
 
@@ -213,7 +212,7 @@ Docker runtime.
 ### Install and run
 
 [`Cargo.toml`](Cargo.toml) is the single source of truth for the app version.
-See [`docs/releases/v0.5.1.md`](docs/releases/v0.5.1.md) for the current bilingual
+See [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md) for the current bilingual
 release notes, compatibility details, and limitations.
 
 ```bash
