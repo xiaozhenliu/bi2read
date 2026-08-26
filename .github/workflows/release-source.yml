@@ -39,6 +39,9 @@ jobs:
       - name: Verify public snapshot
         run: python3 scripts/check-public-snapshot.py verify --root .
 
+      - name: Install Rust formatting component
+        run: rustup component add rustfmt
+
       - name: Check formatting
         run: cargo fmt --check
 
