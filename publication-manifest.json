@@ -10,8 +10,8 @@
     {
       "executable": false,
       "path": ".github/workflows/release-source.yml",
-      "sha256": "c55a52f07865324682e5f0274e784ac11f9a998df1280ed1cccb7c3f2eee58dd",
-      "size": 5997
+      "sha256": "51bb01328db9e733cc59d36652253b7bc1558452e81fb497006950606a71bc3f",
+      "size": 6243
     },
     {
       "executable": false,
@@ -40,8 +40,8 @@
     {
       "executable": false,
       "path": "README.md",
-      "sha256": "a5811c9bc85f2171efea691aa09bfad438b8b4ffdfd22ee490b7ae663640bfdb",
-      "size": 17192
+      "sha256": "71bd772f03a3520cbd9993449ed8f41c6f7880b2d38dffc133b86e9a7ed1b534",
+      "size": 16794
     },
     {
       "executable": false,
@@ -54,36 +54,6 @@
       "path": "build.rs",
       "sha256": "06c059f00bc5afd24b4e2c5d277b5ff875ebd8c734f233cc681f443248815fb7",
       "size": 240
-    },
-    {
-      "executable": false,
-      "path": "docs/adr/0001-v0.4-runtime-language-selection.md",
-      "sha256": "0cfb08e1009d44ddbd0bb2b4b7474e21eeeca02095b25dadea622e13d115c3b6",
-      "size": 8501
-    },
-    {
-      "executable": false,
-      "path": "docs/adr/0002-v0.5-trusted-content-derivation.md",
-      "sha256": "879be74e42ae435d7fba60ed6ce606d6f2bd0c40cf4d6d7afef6ee5b7e1593dd",
-      "size": 22432
-    },
-    {
-      "executable": false,
-      "path": "docs/adr/0003-rename-to-bi2read.md",
-      "sha256": "26cbcd17846155679b6c95d5c62fa66dde3551194507ac3dd143320ba2d453a0",
-      "size": 4763
-    },
-    {
-      "executable": false,
-      "path": "docs/architecture.md",
-      "sha256": "2072385dbf56dd06355b68c346684eb503e18c2bdb86bd5c7103e3947f448f30",
-      "size": 14325
-    },
-    {
-      "executable": false,
-      "path": "docs/design/bi2read-design-spec.md",
-      "sha256": "9977b19252fff26ad8bad39c0e78bb2c821f43af39377a4a51e341ab8924df38",
-      "size": 31720
     },
     {
       "executable": false,
@@ -132,12 +102,6 @@
       "path": "docs/releases/v0.6.1.md",
       "sha256": "30dfde737872359e1c303772a742f9195daf008c72f28009a6c859b7c9075df0",
       "size": 8352
-    },
-    {
-      "executable": false,
-      "path": "docs/roadmap.md",
-      "sha256": "7564bce27cab973236bb740804fd8c9471b0aa3fe3685b17d50bfc3df45f79f6",
-      "size": 15315
     },
     {
       "executable": false,
@@ -190,8 +154,8 @@
     {
       "executable": false,
       "path": "packaging/public-paths.txt",
-      "sha256": "c30bcb49b53a75f0349fb2c73ad3bea7680a1510f4e60793d7ca74648bcee92f",
-      "size": 828
+      "sha256": "25cdff5621cd66999e468525abc6e41265dc330e493f89bc9e9d71635aa06745",
+      "size": 746
     },
     {
       "executable": false,
@@ -226,8 +190,8 @@
     {
       "executable": true,
       "path": "scripts/check-public-snapshot.py",
-      "sha256": "bad133b113d15117a788d44da2cfdf10c6a6d6b982b72fa9330b2375d673f30f",
-      "size": 12980
+      "sha256": "0a1d71e8c3fec5ae4e2119b2bd23d5f7658a79fde3ad29f1848ec1952ed57394",
+      "size": 13365
     },
     {
       "executable": true,
@@ -602,11 +566,11 @@
       "size": 7283
     }
   ],
-  "private_revision": "3dd005c949f55c8265710e53aa30ffce0ad85bca",
-  "public_path_policy_sha256": "c30bcb49b53a75f0349fb2c73ad3bea7680a1510f4e60793d7ca74648bcee92f",
-  "publicignore_sha256": "265bc7250a3457b629d21ba82c970d265f9736ebb7a13754a4cb175829ac33d7",
+  "private_revision": "5d58757900262cfb5866dfb6b71a8d4a104add1d",
+  "public_path_policy_sha256": "25cdff5621cd66999e468525abc6e41265dc330e493f89bc9e9d71635aa06745",
+  "publicignore_sha256": "72488306fc07700a2f173e457c016d87ce3e4f353961edc0ef4f01325d2663d3",
   "release_config_sha256": "457085760abda2af1d36260c4418a62939130a9727e15fe9ac7ae17f4deb1b1e",
-  "release_requested": true,
+  "release_requested": false,
   "runtime_revision": "18da5ce07d2b52b5c225fa1b45458b05eacc8989",
   "runtime_tag": "v2.0.0",
   "schema_version": 1
