@@ -179,12 +179,6 @@ v0.5.0 新任务保留单一最终 `full.md` 出口；legacy 任务继续使用�
 - 内置原生 Runtime v2.0.0 的英文结果按 VAD 段输出，可能缺少句末标点；英文按句分段需要
   后续 Runtime 版本。
 
-## 产品与设计文档
-
-- [当前路线图](docs/roadmap.md)
-- [架构与模块接口](docs/architecture.md)
-- [界面设计规范](docs/design/bi2read-design-spec.md)
-
 ## 许可证
 
 [MIT License](LICENSE)
@@ -352,12 +346,6 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document. v0.5.0 new
 - English output from the bundled native Runtime v2.0.0 follows VAD segments and
   may lack sentence punctuation; sentence-level English segmentation needs a
   later Runtime release.
-
-### Product and design documents
-
-- [Current roadmap (Chinese)](docs/roadmap.md)
-- [Architecture and module interfaces (Chinese)](docs/architecture.md)
-- [UI design specification (Chinese)](docs/design/bi2read-design-spec.md)
 
 ### License
 

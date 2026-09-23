@@ -20,6 +20,7 @@ jobs:
       private_revision: ${{ steps.identity.outputs.private_revision }}
       tag: ${{ steps.identity.outputs.tag }}
       version: ${{ steps.identity.outputs.version }}
+      release_requested: ${{ steps.identity.outputs.release_requested }}
     steps:
       - name: Check out published source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -32,7 +33,7 @@ jobs:
           version=$(python3 -c 'import json; print(json.load(open("publication-manifest.json"))["app_version"])')
           private_revision=$(python3 -c 'import json; print(json.load(open("publication-manifest.json"))["private_revision"])')
           requested=$(python3 -c 'import json; print(str(json.load(open("publication-manifest.json"))["release_requested"]).lower())')
-          test "$requested" = true
+          printf 'release_requested=%s\n' "$requested" >> "$GITHUB_OUTPUT"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'tag=v%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'private_revision=%s\n' "$private_revision" >> "$GITHUB_OUTPUT"
@@ -53,7 +54,8 @@ jobs:
         run: cargo test
 
   publish:
-    if: github.repository == 'xiaozhenliu/bi2read'
+    # Documentation-only snapshots are validated but never tagged or released.
+    if: github.repository == 'xiaozhenliu/bi2read' && needs.validate.outputs.release_requested == 'true'
     needs: validate
     runs-on: macos-14
     permissions:

@@ -263,7 +263,7 @@ def generate(args: argparse.Namespace) -> None:
         "public_path_policy_sha256": sha256_file(root / POLICY_PATH),
         "publicignore_sha256": sha256_file(ignore_path),
         "release_config_sha256": sha256_file(root / RELEASE_CONFIG_PATH),
-        "release_requested": True,
+        "release_requested": not args.no_release,
         "runtime_revision": config["runtime_revision"],
         "runtime_tag": config["runtime_tag"],
         "schema_version": 1,
@@ -291,11 +291,13 @@ def verify(args: argparse.Namespace) -> None:
         "public_path_policy_sha256": sha256_file(root / POLICY_PATH),
         "publicignore_sha256": manifest.get("publicignore_sha256"),
         "release_config_sha256": sha256_file(root / RELEASE_CONFIG_PATH),
-        "release_requested": True,
+        "release_requested": manifest.get("release_requested"),
         "runtime_revision": config["runtime_revision"],
         "runtime_tag": config["runtime_tag"],
         "schema_version": 1,
     }
+    if not isinstance(manifest.get("release_requested"), bool):
+        raise SnapshotError("manifest release_requested must be a boolean")
     if not REVISION_RE.fullmatch(str(manifest.get("private_revision", ""))):
         raise SnapshotError("manifest private_revision is not a full lowercase SHA")
     if not SHA256_RE.fullmatch(str(manifest.get("publicignore_sha256", ""))):
@@ -319,6 +321,9 @@ def parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--root", type=Path, required=True)
     generate_parser.add_argument("--private-revision", required=True)
     generate_parser.add_argument("--ignore-file", type=Path, required=True)
+    # A documentation-only sync updates public files without asking the
+    # release-source workflow to tag or publish a Release.
+    generate_parser.add_argument("--no-release", action="store_true")
     generate_parser.set_defaults(handler=generate)
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("--root", type=Path, required=True)
