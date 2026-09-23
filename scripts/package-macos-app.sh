@@ -41,7 +41,7 @@ runtime_contract=$(printf '%s\n' "$release_values" | sed -n '4p')
 expected_uv_version=$(printf '%s\n' "$release_values" | sed -n '5p')
 target_platform=$(printf '%s\n' "$release_values" | sed -n '6p')
 target_arch=$(printf '%s\n' "$release_values" | sed -n '7p')
-runtime_repo=${runtime_repo:-"$(dirname "$repo_root")/bimyscribe-funasr-runtime-release"}
+runtime_repo=${runtime_repo:-"$(dirname "$repo_root")/bi2read-funasr-runtime-release"}
 uv_bin=${uv_bin:-"$(command -v uv || true)"}
 
 [ -n "$output_dir" ] || { usage >&2; exit 2; }
@@ -64,7 +64,7 @@ case "$output_dir" in /*) ;; *) printf 'Output directory must be absolute.\n' >&
 case "$CARGO_TARGET_DIR" in /*) ;; *) printf 'CARGO_TARGET_DIR must be absolute.\n' >&2; exit 2 ;; esac
 
 [ -z "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ] || {
-    printf 'BiMyScribe source repository must be clean.\n' >&2
+    printf 'bi2read source repository must be clean.\n' >&2
     exit 1
 }
 [ -z "$(git -C "$runtime_repo" status --porcelain --untracked-files=all)" ] || {
@@ -79,14 +79,19 @@ actual_runtime_revision=$(git -C "$runtime_repo" rev-list -n 1 "$runtime_tag")
 [ "$actual_runtime_revision" = "$runtime_revision" ] || {
     printf 'Runtime revision mismatch: expected %s, found %s.\n' "$runtime_revision" "$actual_runtime_revision" >&2; exit 1;
 }
-runtime_manifest=$(git -C "$runtime_repo" show "$runtime_tag:bimyscribe-runtime.toml")
+# Runtime tags after the bi2read rename ship bi2read-runtime.toml; v2.0.0 and
+# earlier ship the legacy bimyscribe-runtime.toml.
+runtime_manifest_name=bi2read-runtime.toml
+git -C "$runtime_repo" cat-file -e "$runtime_tag:$runtime_manifest_name" 2>/dev/null || \
+    runtime_manifest_name=bimyscribe-runtime.toml
+runtime_manifest=$(git -C "$runtime_repo" show "$runtime_tag:$runtime_manifest_name")
 printf '%s\n' "$runtime_manifest" | rg -q '^backend = "native-uv"$' || {
     printf 'Bundled Runtime backend must be native-uv.\n' >&2; exit 1;
 }
 printf '%s\n' "$runtime_manifest" | rg -q "^contract_version = $runtime_contract$" || {
     printf 'Runtime contract mismatch: expected %s.\n' "$runtime_contract" >&2; exit 1;
 }
-for required_runtime_file in pyproject.toml .python-version uv.lock LICENSE bimyscribe-runtime.toml; do
+for required_runtime_file in pyproject.toml .python-version uv.lock LICENSE "$runtime_manifest_name"; do
     git -C "$runtime_repo" cat-file -e "$runtime_tag:$required_runtime_file" 2>/dev/null || {
         printf 'Runtime tag is incomplete; missing %s.\n' "$required_runtime_file" >&2
         exit 1
@@ -109,30 +114,30 @@ case "$build_number" in *[!0-9]*|'') printf 'Build number must be a positive int
 [ "$build_number" -gt 0 ] || { printf 'Build number must be greater than zero.\n' >&2; exit 2; }
 public_revision=$(git -C "$repo_root" rev-parse HEAD)
 
-app="$output_dir/BiMyScribe.app"
+app="$output_dir/bi2read.app"
 [ ! -e "$app" ] || { printf 'Refusing to replace existing bundle: %s\n' "$app" >&2; exit 1; }
 mkdir -p "$output_dir" "$CARGO_TARGET_DIR"
 
-cargo build --manifest-path "$repo_root/Cargo.toml" --release --locked --bin bimyscribe
-binary="$CARGO_TARGET_DIR/release/bimyscribe"
+cargo build --manifest-path "$repo_root/Cargo.toml" --release --locked --bin bi2read
+binary="$CARGO_TARGET_DIR/release/bi2read"
 [ -x "$binary" ] || { printf 'Release binary was not produced: %s\n' "$binary" >&2; exit 1; }
 file "$binary" | rg -q 'Mach-O 64-bit executable arm64' || {
-    printf 'BiMyScribe release binary is not arm64.\n' >&2
+    printf 'bi2read release binary is not arm64.\n' >&2
     exit 1
 }
 
 contents="$app/Contents"
 resources="$contents/Resources"
 mkdir -p "$contents/MacOS" "$resources/bin" "$resources/runtime" "$resources/licenses"
-cp "$binary" "$contents/MacOS/bimyscribe"
+cp "$binary" "$contents/MacOS/bi2read"
 cp "$uv_bin" "$resources/bin/uv"
 cp "$repo_root/packaging/macos/assets/AppIcon.icns" "$resources/AppIcon.icns"
-chmod 755 "$contents/MacOS/bimyscribe" "$resources/bin/uv"
+chmod 755 "$contents/MacOS/bi2read" "$resources/bin/uv"
 git -C "$runtime_repo" archive "$runtime_tag" | tar -xf - -C "$resources/runtime"
 
-binary_sha256=$(shasum -a 256 "$contents/MacOS/bimyscribe" | awk '{print $1}')
+binary_sha256=$(shasum -a 256 "$contents/MacOS/bi2read" | awk '{print $1}')
 uv_sha256=$(shasum -a 256 "$resources/bin/uv" | awk '{print $1}')
-runtime_manifest_sha256=$(shasum -a 256 "$resources/runtime/bimyscribe-runtime.toml" | awk '{print $1}')
+runtime_manifest_sha256=$(shasum -a 256 "$resources/runtime/$runtime_manifest_name" | awk '{print $1}')
 
 python3 - "$resources/release-manifest.json" "$app_version" "$build_number" "$public_revision" \
     "$private_revision" "$runtime_tag" "$runtime_revision" "$runtime_contract" \
@@ -152,18 +157,18 @@ PY
 
 sed -e "s/@APP_VERSION@/$app_version/g" -e "s/@BUILD_NUMBER@/$build_number/g" \
     "$repo_root/packaging/macos/Info.plist.in" > "$contents/Info.plist"
-cp "$repo_root/LICENSE" "$resources/licenses/BiMyScribe-MIT.txt"
+cp "$repo_root/LICENSE" "$resources/licenses/bi2read-MIT.txt"
 cp "$repo_root/packaging/macos/THIRD_PARTY_NOTICES.md" "$resources/licenses/THIRD_PARTY_NOTICES.md"
 cp "$repo_root/packaging/macos/licenses/UV-LICENSE-APACHE" "$resources/licenses/UV-LICENSE-APACHE"
 cp "$repo_root/packaging/macos/licenses/UV-LICENSE-MIT" "$resources/licenses/UV-LICENSE-MIT"
 
 plutil -lint "$contents/Info.plist" >/dev/null
-test -f "$resources/runtime/bimyscribe-runtime.toml"
+test -f "$resources/runtime/$runtime_manifest_name"
 test -f "$resources/runtime/uv.lock"
 test -f "$resources/AppIcon.icns"
 test -x "$resources/bin/uv"
 test -f "$resources/release-manifest.json"
-"$contents/MacOS/bimyscribe" --package-self-check
+"$contents/MacOS/bi2read" --package-self-check
 
 printf 'Created unsigned application bundle:\n%s\n' "$app"
 printf 'App version: %s (%s)\nRuntime: %s\nuv: %s\n' \

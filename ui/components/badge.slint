@@ -75,7 +75,7 @@ export component CountPill inherits Rectangle {
 
     height: Theme.pill-height;
     border-radius: Theme.pill-radius;
-    background: Theme.surface-selected;
+    background: Theme.surface-disabled;
     horizontal-stretch: 0;
     min-width: min(20px + count-label.preferred-width, root.content-max-width);
     preferred-width: self.min-width;
@@ -89,7 +89,7 @@ export component CountPill inherits Rectangle {
 
         count-label := Text {
             text: root.text;
-            color: Theme.accent-text;
+            color: Theme.text-secondary;
             font-size: Theme.font-caption;
             font-weight: 600;
             vertical-alignment: center;

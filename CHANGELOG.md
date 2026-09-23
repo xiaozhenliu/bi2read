@@ -13,6 +13,39 @@ This file keeps short per-version summaries; see `docs/releases/` for details.
 
 - None.
 
+## 0.6.1 - 2026-09-23
+
+### 中文
+
+- 产品更名为 bi2read：App、CLI、bundle 标识与公开仓库统一改名；首次启动把旧
+  `Application Support/BiMyScribe` 状态目录一次性迁移到 `bi2read`，用户自选路径与已有文稿不移动。
+- 界面视觉统一：B 站蓝语义配色、白色输入框、18/14/12px 字号、队列信息分层与说话人列表单一收尾线。
+- 音频流水线恢复：Finder 启动时也能找到常见位置的 FFmpeg/ffprobe，音频原子下载并拒绝截断响应，
+  多分 P 使用所选分 P 时长。
+- Runtime 内存耗尽与超时收敛：区分 `runtime-out-of-memory` 与 `runtime-timeout`，检测 Docker 引擎失联，
+  写入 `logs/runtime-exit.json`；重启时被中断的转写标记为失败并可重试，不再自动重放。
+- 任务冻结的 Runtime identity 改变后进入“等待用户操作”并提供重建入口；详情面板实时同步阶段与进度。
+- `transcribe --json` 的 stdout 只输出 JSON；打包自检与发布脚本兼容新旧 Runtime manifest 文件名，
+  内置 Runtime v2.0.0 继续回报实际处理身份。Runtime 固定输入保持 v2.0.0。
+
+### English
+
+- Renamed to bi2read across the app, CLI, bundle identifier, and public repository; the legacy
+  `Application Support/BiMyScribe` state directory moves to `bi2read` once on first launch, while user-selected
+  paths and existing documents stay in place.
+- Unified visuals: Bilibili-blue semantic colours, white inputs, an 18/14/12px type scale, layered queue
+  information, and a single closing rule under the speaker list.
+- Audio pipeline recovery: Finder-launched apps find FFmpeg/ffprobe in common locations, audio downloads are
+  atomic and reject truncated responses, and multi-part videos use the selected part's duration.
+- Runtime out-of-memory and timeout convergence: `runtime-out-of-memory` and `runtime-timeout` are distinct,
+  Docker engine loss is detected, `logs/runtime-exit.json` is written, and an interrupted transcription is
+  marked failed with retry instead of being replayed after restart.
+- A job whose frozen Runtime identity changed moves to "needs user action" with a rebuild action; the detail
+  pane follows live stage and progress updates.
+- `transcribe --json` keeps stdout JSON-only; the package self-check and release scripts accept both Runtime
+  manifest names, and bundled Runtime v2.0.0 keeps reporting the processing identity. Runtime inputs stay at
+  v2.0.0.
+
 ## 0.6.0 - 2026-08-25
 
 ### 中文

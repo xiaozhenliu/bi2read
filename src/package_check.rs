@@ -62,12 +62,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             && release.binary_sha256 != sha256(&std::env::current_exe()?)?)
         || release.uv_sha256 != sha256(&uv)?
         || release.runtime_manifest_sha256
-            != sha256(&runtime.join(crate::funasr::RUNTIME_MANIFEST))?
+            != sha256(&crate::funasr::runtime_manifest_path(&runtime))?
     {
         return Err("release manifest does not match packaged inputs".into());
     }
     println!(
-        "BiMyScribe package is ready: {} · contract v{} · Runtime {} · uv {} · build {}",
+        "bi2read package is ready: {} · contract v{} · Runtime {} · uv {} · build {}",
         manifest.backend.label(),
         manifest.contract_version,
         release.runtime_tag,

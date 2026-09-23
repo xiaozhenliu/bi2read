@@ -14,7 +14,7 @@ tests/
 docs/roadmap.md
 docs/architecture.md
 docs/adr/
-docs/design/bimyscribe-design-spec.md
+docs/design/bi2read-design-spec.md
 docs/releases/
 .github/workflows/public-snapshot.yml
 .github/workflows/release-source.yml

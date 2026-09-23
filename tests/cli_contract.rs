@@ -1,10 +1,10 @@
 use std::process::Command;
 
 fn run_cli(arguments: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_bimyscribe"))
+    Command::new(env!("CARGO_BIN_EXE_bi2read"))
         .args(arguments)
         .output()
-        .expect("bimyscribe binary should start")
+        .expect("bi2read binary should start")
 }
 
 fn json_object(output: &std::process::Output) -> serde_json::Value {
@@ -20,10 +20,10 @@ fn json_object(output: &std::process::Output) -> serde_json::Value {
 }
 
 fn setup_v1_release_root() -> (std::path::PathBuf, String) {
-    let root = std::env::temp_dir().join(format!("bimyscribe-cli-v1-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("bi2read-cli-v1-{}", uuid::Uuid::new_v4()));
     let token = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join(".bimyscribe-release-check"), token).unwrap();
+    std::fs::write(root.join(".bi2read-release-check"), token).unwrap();
     let runtime = root.join("Runtime");
     std::fs::create_dir_all(runtime.join("schemas")).unwrap();
     std::fs::write(
@@ -55,7 +55,7 @@ fn setup_v1_release_root() -> (std::path::PathBuf, String) {
         "state initialization failed: {}",
         String::from_utf8_lossy(&initialized.stderr)
     );
-    let app_support = root.join("Library/Application Support/BiMyScribe");
+    let app_support = root.join("Library/Application Support/bi2read");
     std::fs::write(
         app_support.join("config.toml"),
         format!(
@@ -81,8 +81,7 @@ fn invalid_language_returns_one_json_error_envelope_and_exit_two() {
 
 #[test]
 fn transcribe_without_runtime_returns_one_json_runtime_error() {
-    let root =
-        std::env::temp_dir().join(format!("bimyscribe-cli-contract-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("bi2read-cli-contract-{}", uuid::Uuid::new_v4()));
     let output = run_cli(&[
         "--release-check-root",
         root.to_str().unwrap(),
@@ -105,7 +104,7 @@ fn transcribe_without_runtime_returns_one_json_runtime_error() {
 
 #[test]
 fn runtime_status_json_without_runtime_is_one_json_runtime_error() {
-    let root = std::env::temp_dir().join(format!("bimyscribe-cli-status-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("bi2read-cli-status-{}", uuid::Uuid::new_v4()));
     let output = run_cli(&[
         "--release-check-root",
         root.to_str().unwrap(),

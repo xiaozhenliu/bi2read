@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -51,6 +51,66 @@ impl SubprocessSpec {
         self.env.push((key.into(), value.into()));
         self
     }
+}
+
+/// Resolve a bare executable name for both terminal and Finder-launched App
+/// processes. Finder does not reliably inherit the user's shell `PATH`, so
+/// common per-user and macOS package-manager locations are checked after the
+/// inherited path. Explicit paths are left untouched.
+fn resolve_executable(
+    program: &str,
+    environment: &[(OsString, OsString)],
+) -> Result<PathBuf, SubprocessError> {
+    let search_path = environment
+        .iter()
+        .find(|(key, _)| key.as_os_str() == std::ffi::OsStr::new("PATH"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("PATH"));
+    let home = environment
+        .iter()
+        .find(|(key, _)| key.as_os_str() == std::ffi::OsStr::new("HOME"))
+        .map(|(_, value)| PathBuf::from(value))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    resolve_executable_from(program, search_path.as_deref(), home.as_deref())
+}
+
+fn resolve_executable_from(
+    program: &str,
+    search_path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> Result<PathBuf, SubprocessError> {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('/') || program.contains('\\') {
+        return Ok(path.to_path_buf());
+    }
+
+    let mut directories: Vec<PathBuf> = search_path
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(path))
+        .collect();
+    if let Some(home) = home {
+        directories.extend([home.join(".local").join("bin"), home.join("bin")]);
+    }
+    #[cfg(target_os = "macos")]
+    directories.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/local/bin"),
+    ]);
+
+    directories.dedup();
+    if let Some(candidate) = directories
+        .into_iter()
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+    {
+        return Ok(candidate);
+    }
+
+    Err(SubprocessError::Spawn(format!(
+        "executable '{program}' not found in PATH or standard macOS locations; \
+         install it or add its directory to PATH"
+    )))
 }
 
 #[derive(Debug, Error)]
@@ -156,7 +216,8 @@ pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// Spawn a subprocess per the spec. On Unix the child is placed in its own
 /// process group so cancellation can kill the entire descendant tree.
 pub fn spawn(spec: SubprocessSpec) -> Result<ChildHandle, SubprocessError> {
-    let mut cmd = Command::new(&spec.argv[0]);
+    let executable = resolve_executable(&spec.argv[0], &spec.env)?;
+    let mut cmd = Command::new(executable);
     cmd.args(&spec.argv[1..]);
     if let Some(cwd) = &spec.cwd {
         cmd.current_dir(cwd);
@@ -169,8 +230,10 @@ pub fn spawn(spec: SubprocessSpec) -> Result<ChildHandle, SubprocessError> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    // Merge stderr into stdout and append to the log file if given; otherwise
-    // inherit so the user sees real output during interactive runs.
+    // Merge stderr into stdout and append to the log file if given. Without a
+    // log file, stdout is discarded: the CLI owns stdout for its JSON envelope
+    // and helper commands (ffprobe, docker rm) would otherwise leak into it.
+    // stderr still inherits so diagnostics stay visible in interactive runs.
     if let Some(log) = &spec.log {
         if let Some(parent) = log.parent() {
             std::fs::create_dir_all(parent).map_err(|e| SubprocessError::Spawn(e.to_string()))?;
@@ -186,7 +249,7 @@ pub fn spawn(spec: SubprocessSpec) -> Result<ChildHandle, SubprocessError> {
         ));
         cmd.stderr(Stdio::from(f));
     } else {
-        cmd.stdout(Stdio::inherit());
+        cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit());
     }
     cmd.stdin(Stdio::null());
@@ -207,6 +270,79 @@ pub fn spawn(spec: SubprocessSpec) -> Result<ChildHandle, SubprocessError> {
 /// Convenience: run a spec to completion and return the exit code.
 pub fn run(spec: SubprocessSpec) -> Result<i32, SubprocessError> {
     spawn(spec)?.wait()
+}
+
+/// Captured result of a bounded helper command such as `docker inspect`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedOutput {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run `argv` with stdout/stderr captured, killing the whole process group if
+/// it has not exited within `timeout`. `Ok(None)` means the deadline passed:
+/// callers treat that as "the tool is unresponsive", which is exactly the
+/// Docker Desktop stale-socket failure mode where `docker` blocks forever.
+pub fn capture_with_timeout(
+    argv: Vec<String>,
+    timeout: Duration,
+) -> Result<Option<CapturedOutput>, SubprocessError> {
+    let executable = resolve_executable(&argv[0], &[])?;
+    let mut cmd = Command::new(executable);
+    cmd.args(&argv[1..]);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| SubprocessError::Spawn(e.to_string()))?;
+    #[cfg(unix)]
+    let pgid = child.id() as i32;
+
+    fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_string(&mut text);
+            }
+            text
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::killpg(pgid, libc::SIGKILL);
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(SubprocessError::Wait(e.to_string())),
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    Ok(status.map(|status| CapturedOutput {
+        code: status.code().unwrap_or(1),
+        stdout,
+        stderr,
+    }))
 }
 
 /// Force-remove a named Docker container, used during cancellation cleanup
@@ -236,6 +372,44 @@ pub fn docker_rm_force(container_name: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_home_local_bin_when_not_on_path() {
+        let root = std::env::temp_dir().join(format!(
+            "bi2read-process-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("ffmpeg");
+        std::fs::write(&executable, b"placeholder").unwrap();
+
+        let resolved = resolve_executable_from(
+            "ffmpeg",
+            Some(std::ffi::OsStr::new("/missing")),
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(resolved, executable);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_executable_reports_search_guidance() {
+        let program = format!("ffmpeg-missing-{}", std::process::id());
+        let error = resolve_executable_from(
+            &program,
+            Some(std::ffi::OsStr::new("/missing")),
+            Some(Path::new("/missing-home")),
+        )
+        .expect_err("missing executable must fail before spawning");
+        assert!(error.to_string().contains("add its directory to PATH"));
+    }
 
     #[test]
     fn runs_true_exit_zero() {
@@ -273,27 +447,28 @@ mod tests {
         ]))
         .unwrap();
         assert!(handle.is_running());
+        // 只检查本测试自己的进程组，避免匹配到机器上其他无关的 `sleep 30`。
+        let pgid = handle.pgid.expect("unix spawn records a process group");
         handle.cancel().unwrap();
         assert!(!handle.is_running());
         // Give the kernel a moment to reap.
         std::thread::sleep(Duration::from_millis(100));
-        // Verify no lingering `sleep 30` process from this test.
         let ps = std::process::Command::new("pgrep")
-            .args(["-f", "sleep 30"])
+            .args(["-g", &pgid.to_string()])
             .output()
             .ok();
         if let Some(out) = ps {
             // pgrep returns non-zero if no match; stdout should be empty.
             assert!(
                 out.stdout.is_empty(),
-                "a `sleep 30` process is still alive after cancel"
+                "a process from group {pgid} is still alive after cancel"
             );
         }
     }
 
     #[test]
     fn log_is_appended() {
-        let dir = std::env::temp_dir().join("bimyscribe-process-test");
+        let dir = std::env::temp_dir().join("bi2read-process-test");
         std::fs::remove_dir_all(&dir).ok();
         let log = dir.join("out.log");
         // First write.

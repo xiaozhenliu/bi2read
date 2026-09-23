@@ -5,17 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>BiMyScribe</string>
+    <string>bi2read</string>
     <key>CFBundleExecutable</key>
-    <string>bimyscribe</string>
+    <string>bi2read</string>
     <key>CFBundleIdentifier</key>
-    <string>com.xiaozhenliu.bimyscribe</string>
+    <string>com.xiaozhenliu.bi2read</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>BiMyScribe</string>
+    <string>bi2read</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

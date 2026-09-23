@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   validate:
-    if: github.repository == 'xiaozhenliu/bimyscribe'
+    if: github.repository == 'xiaozhenliu/bi2read'
     runs-on: macos-14
     outputs:
       private_revision: ${{ steps.identity.outputs.private_revision }}
@@ -53,7 +53,7 @@ jobs:
         run: cargo test
 
   publish:
-    if: github.repository == 'xiaozhenliu/bimyscribe'
+    if: github.repository == 'xiaozhenliu/bi2read'
     needs: validate
     runs-on: macos-14
     permissions:
@@ -78,7 +78,7 @@ jobs:
           else
             git config user.name github-actions[bot]
             git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git tag -a "$TAG" "$GITHUB_SHA" -m "BiMyScribe $TAG"
+            git tag -a "$TAG" "$GITHUB_SHA" -m "bi2read $TAG"
             git push origin "refs/tags/$TAG"
           fi
 
@@ -102,12 +102,12 @@ jobs:
           PY
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "BiMyScribe $TAG" --notes-file "$notes"
+              --title "bi2read $TAG" --notes-file "$notes"
           fi
 
       - name: Verify anonymous published source
         run: |
-          published_root=$(mktemp -d "$RUNNER_TEMP/bimyscribe-published.XXXXXX")
+          published_root=$(mktemp -d "$RUNNER_TEMP/bi2read-published.XXXXXX")
           mkdir -p "$published_root/source"
           for attempt in $(seq 1 12); do
             if curl --fail --location --silent --show-error \

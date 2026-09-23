@@ -4,7 +4,7 @@
 //! `FixtureDeps` replaces the three external side effects of the pipeline
 //! (metadata, audio download, transcription) while every other stage —
 //! including the real ffmpeg normalization subprocess — runs unchanged through
-//! [`bimyscribe::pipeline::run_job_with_deps`]. No network, Docker, uv, or
+//! [`bi2read::pipeline::run_job_with_deps`]. No network, Docker, uv, or
 //! external drive is required.
 
 use std::ffi::OsString;
@@ -15,18 +15,18 @@ use std::sync::{Arc, Mutex};
 use slint::Weak;
 use uuid::Uuid;
 
-use bimyscribe::cancel::CancellationToken;
-use bimyscribe::config::Config;
-use bimyscribe::funasr::{
+use bi2read::cancel::CancellationToken;
+use bi2read::config::Config;
+use bi2read::funasr::{
     parse_transcript_outcome, FunasrError, TranscribeOutcome, TranscribeRequest,
 };
-use bimyscribe::jobs::SourceLanguage;
-use bimyscribe::jobs::{
+use bi2read::jobs::SourceLanguage;
+use bi2read::jobs::{
     self, CreatedFrom, Job, JobStatus, RetentionPolicy, RuntimeBackend, RuntimeSource, Stage,
     StageState, TranscriptionSelection,
 };
-use bimyscribe::pipeline::{self, PipelineDeps, PipelineError};
-use bimyscribe::App;
+use bi2read::pipeline::{self, PipelineDeps, PipelineError};
+use bi2read::App;
 
 const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 const FIXTURE_WAV: &str = concat!(
@@ -103,8 +103,8 @@ impl PipelineDeps for FixtureDeps {
         &self,
         bvid: &str,
         _page: Option<u32>,
-    ) -> Result<bimyscribe::bilibili::Metadata, PipelineError> {
-        Ok(bimyscribe::bilibili::Metadata {
+    ) -> Result<bi2read::bilibili::Metadata, PipelineError> {
+        Ok(bi2read::bilibili::Metadata {
             bvid: bvid.to_string(),
             cid: 4242,
             title: self.title.to_string(),
@@ -162,7 +162,7 @@ impl PipelineDeps for FixtureDeps {
         // Same persisted file shape as funasr::run.
         let dest = request.job_dir.join("transcript.raw.json");
         let data = serde_json::to_vec_pretty(&outcome.utterances).map_err(FunasrError::Parse)?;
-        bimyscribe::jobs::atomic_write(&dest, &data)
+        bi2read::jobs::atomic_write(&dest, &data)
             .map_err(|error| FunasrError::Io(error.to_string()))?;
         Ok(outcome)
     }
@@ -177,7 +177,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("bimyscribe-pipeline-e2e-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-pipeline-e2e-{}", Uuid::new_v4()));
         let home = root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(root.join("working")).unwrap();
@@ -283,7 +283,7 @@ fn run_happy_path(deps: FixtureDeps) {
     };
 
     // Sentinel: the production queue.json must stay byte-identical.
-    let production_queue = bimyscribe::jobs::queue_path().unwrap();
+    let production_queue = bi2read::jobs::queue_path().unwrap();
     std::fs::create_dir_all(production_queue.parent().unwrap()).unwrap();
     let sentinel = br#"{"production":"queue must stay byte-identical"}"#;
     std::fs::write(&production_queue, sentinel).unwrap();

@@ -133,14 +133,20 @@ pub(crate) fn set_job_stage(
     let label = label.to_string();
     let app = app.clone();
     app.upgrade_in_event_loop(move |app| {
-        update_row(&app, &id, |row| {
+        let status_name = status_name_for_stage(&name);
+        let updated = update_row(&app, &id, |row| {
             row.stage_name = name.clone().into();
             row.stage_label = label.clone().into();
             row.indeterminate = indeterminate;
             row.status_label = label.clone().into();
+            row.status_name = status_name.into();
             row.stage_progress = 0;
             row.total_progress = recompute_total(row.stage_name.as_str(), row.stage_progress);
         });
+        if let Some(row) = updated.filter(|row| row.selected) {
+            mirror_row_to_detail(&app, &row);
+            mark_detail_stage_started(&app, &name, indeterminate);
+        }
     })
     .ok();
 }
@@ -149,10 +155,14 @@ pub(crate) fn set_job_progress(app: &Weak<App>, job_id: Uuid, percent: u8) {
     let id = job_id.to_string();
     let app = app.clone();
     app.upgrade_in_event_loop(move |app| {
-        update_row(&app, &id, |row| {
+        let updated = update_row(&app, &id, |row| {
             row.stage_progress = percent as i32;
             row.total_progress = recompute_total(row.stage_name.as_str(), row.stage_progress);
         });
+        if let Some(row) = updated.filter(|row| row.selected) {
+            mirror_row_to_detail(&app, &row);
+            update_detail_stage_progress(&app, row.stage_name.as_str(), percent as i32);
+        }
     })
     .ok();
 }
@@ -162,25 +172,104 @@ pub(crate) fn set_job_error(app: &Weak<App>, job_id: Uuid, error: &str) {
     let error = error.to_string();
     let app = app.clone();
     app.upgrade_in_event_loop(move |app| {
-        update_row(&app, &id, |row| {
+        let updated = update_row(&app, &id, |row| {
             row.has_error = true;
             row.error_text = error.clone().into();
         });
+        if let Some(row) = updated.filter(|row| row.selected) {
+            mirror_row_to_detail(&app, &row);
+        }
     })
     .ok();
 }
 
-fn update_row<F: FnOnce(&mut crate::JobRow)>(app: &crate::App, id: &str, update: F) {
+/// Machine-readable JobStatus key implied by a stage push. Pipeline stages run
+/// under `Running`; the wait/terminal pseudo-stages carry their own status.
+fn status_name_for_stage(stage_name: &str) -> &'static str {
+    match stage_name {
+        "needs_user_action" => "needs_user_action",
+        "waiting_for_drive" => "waiting_for_drive",
+        "cancelled" => "cancelled",
+        "completed" => "completed",
+        _ => "running",
+    }
+}
+
+/// Keep the detail header of the selected job in step with live row updates.
+/// `apply_snapshot` still owns the full refresh; this only mirrors the fields
+/// that background stage/progress/error pushes change, so the detail badge
+/// does not sit at "排队中" for the whole run.
+fn mirror_row_to_detail(app: &crate::App, row: &crate::JobRow) {
+    let mut detail = app.get_detail();
+    if !detail.has_job {
+        return;
+    }
+    detail.stage_name = row.stage_name.clone();
+    detail.status_name = row.status_name.clone();
+    detail.status_label = row.status_label.clone();
+    detail.total_progress = row.total_progress;
+    detail.has_error = row.has_error;
+    detail.error_text = row.error_text.clone();
+    app.set_detail(detail);
+}
+
+/// A new stage started: earlier pipeline stages that were active are done,
+/// the named stage becomes the active one with zero progress.
+fn mark_detail_stage_started(app: &crate::App, stage_name: &str, indeterminate: bool) {
+    let model = app.get_stages();
+    let mut seen_current = false;
+    for index in 0..model.row_count() {
+        let Some(mut view) = model.row_data(index) else {
+            continue;
+        };
+        let is_current = view.name == stage_name;
+        if is_current {
+            seen_current = true;
+            view.active = true;
+            view.progress = 0;
+            view.indeterminate = indeterminate;
+            view.error = false;
+        } else {
+            if view.active && !seen_current && !view.skipped {
+                view.done = true;
+            }
+            view.active = false;
+            view.indeterminate = false;
+            view.progress = 0;
+        }
+        model.set_row_data(index, view);
+    }
+}
+
+fn update_detail_stage_progress(app: &crate::App, stage_name: &str, percent: i32) {
+    let model = app.get_stages();
+    for index in 0..model.row_count() {
+        if let Some(mut view) = model.row_data(index) {
+            if view.name == stage_name {
+                view.progress = percent;
+                model.set_row_data(index, view);
+                break;
+            }
+        }
+    }
+}
+
+fn update_row<F: FnOnce(&mut crate::JobRow)>(
+    app: &crate::App,
+    id: &str,
+    update: F,
+) -> Option<crate::JobRow> {
     let model = app.get_jobs();
     for index in 0..model.row_count() {
         if let Some(mut row) = model.row_data(index) {
             if row.id == id {
                 update(&mut row);
-                model.set_row_data(index, row);
-                break;
+                model.set_row_data(index, row.clone());
+                return Some(row);
             }
         }
     }
+    None
 }
 
 pub(crate) fn fmt_elapsed(seconds: u64) -> String {
@@ -215,5 +304,30 @@ mod tests {
             }
         }
         assert_eq!(recompute_total(Stage::Completed.name(), 0), 100);
+    }
+
+    #[test]
+    fn stage_push_implies_running_except_for_wait_and_terminal_pseudo_stages() {
+        for stage in crate::pipeline::stage_sequence() {
+            if stage == Stage::Completed {
+                continue;
+            }
+            assert_eq!(
+                status_name_for_stage(stage.name()),
+                "running",
+                "{}",
+                stage.name()
+            );
+        }
+        assert_eq!(
+            status_name_for_stage("needs_user_action"),
+            "needs_user_action"
+        );
+        assert_eq!(
+            status_name_for_stage("waiting_for_drive"),
+            "waiting_for_drive"
+        );
+        assert_eq!(status_name_for_stage("completed"), "completed");
+        assert_eq!(status_name_for_stage("cancelled"), "cancelled");
     }
 }

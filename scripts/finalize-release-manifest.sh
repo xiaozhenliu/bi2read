@@ -10,19 +10,20 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$app" ] && [ -d "$app/Contents" ] || {
-    printf 'Usage: %s [--signed] /absolute/path/BiMyScribe.app\n' "$0" >&2
+    printf 'Usage: %s [--signed] /absolute/path/bi2read.app\n' "$0" >&2
     exit 2
 }
 case "$app" in /*) ;; *) printf 'App path must be absolute.\n' >&2; exit 2 ;; esac
 
 manifest="$app/Contents/Resources/release-manifest.json"
 [ -f "$manifest" ] || { printf 'Release manifest is missing.\n' >&2; exit 1; }
-binary="$app/Contents/MacOS/bimyscribe"
+binary="$app/Contents/MacOS/bi2read"
 uv="$app/Contents/Resources/bin/uv"
-runtime_manifest="$app/Contents/Resources/runtime/bimyscribe-runtime.toml"
+runtime_manifest="$app/Contents/Resources/runtime/bi2read-runtime.toml"
+[ -f "$runtime_manifest" ] || runtime_manifest="$app/Contents/Resources/runtime/bimyscribe-runtime.toml"
 
 # With `--signed`, the bundle is signed after this script runs, and that final
-# `codesign` re-signs Contents/MacOS/bimyscribe (it carries the bundle's
+# `codesign` re-signs Contents/MacOS/bi2read (it carries the bundle's
 # CodeDirectory, which references _CodeSignature/CodeResources). Any hash
 # recorded here for the main executable is therefore stale by construction, and
 # re-running finalize + codesign never converges: touching the manifest changes

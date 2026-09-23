@@ -3,8 +3,10 @@ import { Theme } from "../theme.slint";
 // A native-looking button with primary / secondary / danger variants.
 export component BaseButton inherits Rectangle {
     in property <string> text;
-    in property <color> base-color: Theme.accent;
-    in property <color> text-color: Theme.on-accent;
+    in property <color> base-color: Theme.action;
+    in property <color> hover-color: Theme.action-hover;
+    in property <color> pressed-color: Theme.action-pressed;
+    in property <color> text-color: Theme.on-action;
     in property <bool> outlined: false;
     in property <bool> disabled: false;
     // Outline color used when `outlined` is true. Defaults reproduce the
@@ -38,8 +40,8 @@ export component BaseButton inherits Rectangle {
              : root.outlined
                 ? (touch.pressed ? Theme.surface-pressed
                     : touch.has-hover ? Theme.surface-hover : Theme.surface)
-             : touch.pressed ? Theme.accent-pressed
-             : touch.has-hover ? Theme.accent-hover
+             : touch.pressed ? root.pressed-color
+             : touch.has-hover ? root.hover-color
              : root.base-color;
     // Primary and Danger solid buttons have no border in any state,
     // including disabled. Outlined variants (Secondary/DangerOutline) always
@@ -110,7 +112,7 @@ export component BaseButton inherits Rectangle {
 }
 
 export component PrimaryButton inherits BaseButton {
-    base-color: Theme.accent;
+    base-color: Theme.action;
 }
 export component SecondaryButton inherits BaseButton {
     outlined: true;
@@ -120,13 +122,16 @@ export component SecondaryButton inherits BaseButton {
 // "cancel task" uses DangerOutlineButton below to avoid excessive emphasis.
 export component DangerButton inherits BaseButton {
     base-color: Theme.danger;
+    hover-color: Theme.danger-hover;
+    pressed-color: Theme.danger-pressed;
+    text-color: Theme.on-accent;
 }
 // `surface` background + 1px `danger` outline + `danger` text.
 // Used for "cancel task" so the destructive action doesn't compete visually
 // with the solid-red DangerButton reserved for future confirmation prompts.
 export component DangerOutlineButton inherits BaseButton {
     outlined: true;
-    text-color: Theme.danger;
+    text-color: Theme.danger-text;
     outline-color: Theme.danger;
     outline-color-hover: Theme.danger;
 }

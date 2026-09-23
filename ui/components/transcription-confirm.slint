@@ -27,7 +27,7 @@ component LanguageChoice inherits Rectangle {
     height: Theme.control-height;
     border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: root.selected ? Theme.accent : Theme.border;
+    border-color: root.selected ? Theme.selection : Theme.border;
     background: !root.enabled ? Theme.surface-disabled
         : root.selected ? Theme.surface-selected
         : touch.has-hover ? Theme.surface-hover : Theme.surface;
@@ -35,7 +35,7 @@ component LanguageChoice inherits Rectangle {
     Text {
         text: root.text;
         color: !root.enabled ? Theme.text-disabled
-            : root.selected ? Theme.accent-pressed : Theme.text-primary;
+            : root.selected ? Theme.selection : Theme.text-primary;
         font-size: Theme.font-body;
         font-weight: root.selected ? 600 : 400;
         horizontal-alignment: center;
@@ -302,7 +302,7 @@ export component TranscriptionConfirmModal inherits Rectangle {
                             border-width: 1px;
                             border-color: Theme.border;
                             compatibility-message := Text {
-                                text: "请根据 Runtime 说明选择；BiMyScribe 不验证该 Runtime 是否适合当前视频。";
+                                text: "请根据 Runtime 说明选择；bi2read 不验证该 Runtime 是否适合当前视频。";
                                 color: Theme.text-secondary;
                                 font-size: Theme.font-caption;
                                 wrap: word-wrap;

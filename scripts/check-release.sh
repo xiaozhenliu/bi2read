@@ -38,7 +38,7 @@ public_release_json() {
     release_json=$(curl --fail --silent --show-error \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        -H 'User-Agent: BiMyScribe-release-gate' \
+        -H 'User-Agent: bi2read-release-gate' \
         "https://api.github.com/repos/$slug/releases/tags/$release_tag?release_gate=$request_id" \
         2>/dev/null || true)
     if [ -n "$release_json" ]; then
@@ -48,7 +48,7 @@ public_release_json() {
     repo_json=$(curl --fail --silent --show-error \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        -H 'User-Agent: BiMyScribe-release-gate' \
+        -H 'User-Agent: bi2read-release-gate' \
         "https://api.github.com/repos/$slug?release_gate=$request_id" \
         2>/dev/null || true)
     repo_id=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id", ""))' <<<"$repo_json" 2>/dev/null || true)
@@ -56,7 +56,7 @@ public_release_json() {
     curl --fail --silent --show-error \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        -H 'User-Agent: BiMyScribe-release-gate' \
+        -H 'User-Agent: bi2read-release-gate' \
         "https://api.github.com/repositories/$repo_id/releases/tags/$release_tag?release_gate=$request_id" \
         2>/dev/null
 }
@@ -159,7 +159,7 @@ source)
     cargo_lock_version=$(python3 - "$repo_root/Cargo.lock" <<'PY'
 import sys, tomllib
 with open(sys.argv[1], "rb") as handle: data = tomllib.load(handle)
-print(next(p["version"] for p in data["package"] if p["name"] == "bimyscribe"))
+print(next(p["version"] for p in data["package"] if p["name"] == "bi2read"))
 PY
 )
     [ "$cargo_lock_version" = "$app_version" ] || fail "$app_version in Cargo.lock" "$cargo_lock_version" "synchronize Cargo.toml and Cargo.lock"
@@ -269,7 +269,7 @@ PY
             fail "public files without credentials or private paths" found "remove private material from the public candidate"
     else
         rg -q '^/docs/public-release-runbook\.md$' "$repo_root/.publicignore" || fail "runbook excluded by .publicignore" missing "add the private runbook to .publicignore"
-        snapshot_root=$(mktemp -d /private/tmp/bimyscribe-source-snapshot.XXXXXX)
+        snapshot_root=$(mktemp -d /private/tmp/bi2read-source-snapshot.XXXXXX)
         archive_root="$snapshot_root/archive"; public_root="$snapshot_root/public"
         mkdir -p "$archive_root" "$public_root"
         git -C "$repo_root" archive HEAD | tar -xf - -C "$archive_root"
@@ -296,10 +296,13 @@ runtime)
     [ -z "$(git -C "$runtime_repo" status --porcelain --untracked-files=all)" ] || fail "clean Runtime clone" dirty "clean the Runtime clone"
     actual=$(git -C "$runtime_repo" rev-list -n 1 "$runtime_tag" 2>/dev/null || true)
     [ "$actual" = "$runtime_revision" ] || fail "$runtime_revision" "${actual:-missing}" "publish or fetch the pinned Runtime tag"
-    manifest=$(git -C "$runtime_repo" show "$runtime_tag:bimyscribe-runtime.toml" 2>/dev/null || true)
+    runtime_manifest_name=bi2read-runtime.toml
+    git -C "$runtime_repo" cat-file -e "$runtime_tag:$runtime_manifest_name" 2>/dev/null || \
+        runtime_manifest_name=bimyscribe-runtime.toml
+    manifest=$(git -C "$runtime_repo" show "$runtime_tag:$runtime_manifest_name" 2>/dev/null || true)
     printf '%s\n' "$manifest" | rg -q '^backend = "native-uv"$' || fail "native-uv backend" missing "publish a native-uv Runtime"
     printf '%s\n' "$manifest" | rg -q "^contract_version = $runtime_contract$" || fail "contract $runtime_contract" mismatch "fix the pinned Runtime contract"
-    for path in pyproject.toml .python-version uv.lock LICENSE bimyscribe-runtime.toml; do
+    for path in pyproject.toml .python-version uv.lock LICENSE "$runtime_manifest_name"; do
         git -C "$runtime_repo" cat-file -e "$runtime_tag:$path" 2>/dev/null || fail "Runtime $path" missing "publish a complete Runtime tag"
     done
     remote=$(git -C "$runtime_repo" remote get-url origin 2>/dev/null || true)
@@ -309,7 +312,7 @@ runtime)
     mkdir -p "$download_dir"
     archive="$download_dir/runtime.tar.gz"
     curl --fail --location --silent --show-error --output "$archive" "$public_remote/archive/refs/tags/$runtime_tag.tar.gz" || fail "anonymous Runtime source archive" unavailable "publish the Runtime tag publicly"
-    tar -tzf "$archive" | rg -q '/bimyscribe-runtime.toml$' || fail "Runtime manifest in downloaded archive" missing "publish a complete Runtime tag"
+    tar -tzf "$archive" | rg -q -F "/$runtime_manifest_name" || fail "Runtime manifest in downloaded archive" missing "publish a complete Runtime tag"
     runtime_slug=${public_remote#https://github.com/}
     runtime_release=$(public_release_json "$runtime_slug" "$runtime_tag" || true)
     [ -n "$runtime_release" ] || fail "public Runtime GitHub Release" unavailable "publish the Runtime Release"
@@ -355,10 +358,12 @@ expected={"app_version":sys.argv[2],"build_number":int(sys.argv[3]),"runtime_tag
 "public_revision":sys.argv[10],"private_revision":sys.argv[11]}
 assert all(data.get(k)==v for k,v in expected.items())
 PY
+    bundled_runtime_manifest="$app/Contents/Resources/runtime/bi2read-runtime.toml"
+    [ -f "$bundled_runtime_manifest" ] || bundled_runtime_manifest="$app/Contents/Resources/runtime/bimyscribe-runtime.toml"
     for pair in \
-        "binary_sha256:$app/Contents/MacOS/bimyscribe" \
+        "binary_sha256:$app/Contents/MacOS/bi2read" \
         "uv_sha256:$app/Contents/Resources/bin/uv" \
-        "runtime_manifest_sha256:$app/Contents/Resources/runtime/bimyscribe-runtime.toml"; do
+        "runtime_manifest_sha256:$bundled_runtime_manifest"; do
         key=${pair%%:*}; path=${pair#*:}
         expected_hash=$(python3 - "$release_manifest" "$key" <<'PY'
 import json, sys
@@ -371,9 +376,9 @@ PY
     plist_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
     plist_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")
     [ "$plist_version/$plist_build" = "$app_version/$build_number" ] || fail "$app_version/$build_number" "$plist_version/$plist_build" "reassemble Info.plist"
-    file "$app/Contents/MacOS/bimyscribe" | rg -q 'Mach-O 64-bit executable arm64' || fail "arm64 App binary" wrong-architecture "use an arm64 release build"
+    file "$app/Contents/MacOS/bi2read" | rg -q 'Mach-O 64-bit executable arm64' || fail "arm64 App binary" wrong-architecture "use an arm64 release build"
     file "$app/Contents/Resources/bin/uv" | rg -q 'Mach-O 64-bit executable arm64' || fail "arm64 uv binary" wrong-architecture "use the pinned arm64 uv asset"
-    "$app/Contents/MacOS/bimyscribe" --package-self-check || fail "package self-check" failed "return to App assembly"
+    "$app/Contents/MacOS/bi2read" --package-self-check || fail "package self-check" failed "return to App assembly"
     write_evidence "public_revision=$expected_public_revision" "private_revision=$private_revision" \
         "release_manifest_sha256=$(shasum -a 256 "$release_manifest" | awk '{print $1}')"
     pass "App identity, manifest, bundled native-uv and package self-check"
@@ -382,14 +387,14 @@ dmg)
     [ -n "$issue" ] && [ -f "$issue" ] || fail "release issue" "${issue:-missing}" "pass --issue"
     [ -n "$signing_evidence" ] && [ -f "$signing_evidence" ] || fail "independent signing/notarization evidence" "${signing_evidence:-missing}" "run record-signing-evidence.sh"
     [ -n "$dmg" ] && [ -f "$dmg" ] || fail "DMG" "${dmg:-missing}" "pass --dmg"
-    expected_name="BiMyScribe-v$app_version-macos-arm64.dmg"
+    expected_name="bi2read-v$app_version-macos-arm64.dmg"
     [ "$(basename "$dmg")" = "$expected_name" ] || fail "$expected_name" "$(basename "$dmg")" "recreate the DMG without renaming"
     [ -n "$sha_file" ] && [ -f "$sha_file" ] || fail "SHA-256 file" "${sha_file:-missing}" "pass --sha256-file"
     (cd "$(dirname "$dmg")" && shasum -a 256 -c "$(basename "$sha_file")") || fail "matching SHA-256" mismatch "freeze and checksum the final DMG"
     codesign --verify --strict --verbose=2 "$dmg" || fail "valid DMG signature" invalid "return to signing"
     xcrun stapler validate "$dmg" || fail "valid notarization staple" invalid "return to notarization"
     spctl --assess --type open --context context:primary-signature "$dmg" || fail "Gatekeeper-approved DMG" rejected "return to signing/notarization"
-    mount_root=$(mktemp -d /private/tmp/bimyscribe-dmg-check.XXXXXX)
+    mount_root=$(mktemp -d /private/tmp/bi2read-dmg-check.XXXXXX)
     cleanup_mount() { hdiutil detach "$mount_root" >/dev/null 2>&1 || true; rmdir "$mount_root" >/dev/null 2>&1 || true; }
     trap cleanup_mount EXIT
     hdiutil attach -nobrowse -readonly -mountpoint "$mount_root" "$dmg" >/dev/null || fail "read-only DMG mount" failed "recreate the DMG"
@@ -398,9 +403,9 @@ import json, os, sys
 print(json.dumps(sorted(os.listdir(sys.argv[1]))))
 PY
 )
-    [ "$top_level" = '["BiMyScribe.app"]' ] || fail "DMG top level containing only BiMyScribe.app" "$top_level" "recreate from a dedicated clean staging directory"
-    mounted_app="$mount_root/BiMyScribe.app"
-    [ -d "$mounted_app" ] || fail "mounted BiMyScribe.app" missing "recreate the DMG layout"
+    [ "$top_level" = '["bi2read.app"]' ] || fail "DMG top level containing only bi2read.app" "$top_level" "recreate from a dedicated clean staging directory"
+    mounted_app="$mount_root/bi2read.app"
+    [ -d "$mounted_app" ] || fail "mounted bi2read.app" missing "recreate the DMG layout"
     codesign --verify --deep --strict --verbose=2 "$mounted_app" || fail "mounted App signature" invalid "return to App signing"
     spctl --assess --type execute "$mounted_app" || fail "Gatekeeper-approved mounted App" rejected "return to signing/notarization"
     mounted_identity=$(codesign -dvvv "$mounted_app" 2>&1 | sed -n 's/^Authority=//p' | head -n 1)
@@ -426,7 +431,7 @@ assert data.get("app_tree_sha256")==sys.argv[2] and data.get("signing_identity")
 assert data.get("dmg_sha256")==sys.argv[4] and data.get("notarization_request_id")
 assert data.get("notarization_status")=="accepted" and data.get("staple")=="passed" and data.get("gatekeeper")=="passed"
 PY
-    "$mounted_app/Contents/MacOS/bimyscribe" --package-self-check || fail "mounted App package self-check" failed "return to App assembly"
+    "$mounted_app/Contents/MacOS/bi2read" --package-self-check || fail "mounted App package self-check" failed "return to App assembly"
     manifest="$mounted_app/Contents/Resources/release-manifest.json"
     [ -n "$private_revision" ] || fail "source private revision" missing "pass --private-revision from private source evidence"
     printf '%s' "$private_revision" | rg -q '^[0-9a-f]{40}$' || fail "full private revision" "$private_revision" "pass the frozen private candidate SHA"
@@ -601,7 +606,7 @@ PY
         remote_revision=$(git ls-remote "https://github.com/$repo_slug.git" "refs/tags/$tag^{}" 2>/dev/null | awk 'NR==1 {print $1}')
         [ "$remote_revision" = "$public_revision" ] || fail "annotated tag at $public_revision" "${remote_revision:-missing-or-lightweight}" "publish the immutable annotated tag"
         published_title=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))' <<<"$release_json")
-        [ "$published_title" = "BiMyScribe v$app_version" ] || fail "BiMyScribe v$app_version" "$published_title" "correct the Release title"
+        [ "$published_title" = "bi2read v$app_version" ] || fail "bi2read v$app_version" "$published_title" "correct the Release title"
         published_body=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("body", ""), end="")' <<<"$release_json")
         [ "$published_body" = "$(cat "$repo_root/$notes_path")" ] || fail "versioned Release Notes body" different "create the Release from $notes_path"
         asset_count=$(python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("assets", [])))' <<<"$release_json")
@@ -655,7 +660,7 @@ PY
     [ -n "$remote_revision" ] || fail "annotated tag $tag" lightweight-or-missing "create an annotated immutable tag"
     [ "$remote_revision" = "$public_revision" ] || fail "$public_revision" "${remote_revision:-missing}" "fix the tag target; never move a public tag"
     mkdir -p "$download_dir"
-    expected_dmg="BiMyScribe-v$app_version-macos-arm64.dmg"
+    expected_dmg="bi2read-v$app_version-macos-arm64.dmg"
     for asset in "$expected_dmg" "$expected_dmg.sha256"; do
         url=$(python3 -c 'import json,sys; data=json.load(sys.stdin); name=sys.argv[1]; print(next((x["browser_download_url"] for x in data["assets"] if x["name"]==name), ""))' "$asset" <<<"$release_json")
         [ -n "$url" ] || fail "public asset $asset" missing "upload the exact frozen assets"
@@ -664,7 +669,7 @@ PY
     published_title=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("name", ""))' <<<"$release_json")
     published_draft=$(python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("draft", True)).lower())' <<<"$release_json")
     published_prerelease=$(python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("prerelease", True)).lower())' <<<"$release_json")
-    [ "$published_title" = "BiMyScribe v$app_version" ] || fail "BiMyScribe v$app_version" "$published_title" "correct the Release title"
+    [ "$published_title" = "bi2read v$app_version" ] || fail "bi2read v$app_version" "$published_title" "correct the Release title"
     [ "$published_draft/$published_prerelease" = "false/false" ] || fail "non-draft non-prerelease" "$published_draft/$published_prerelease" "publish the final Release correctly"
     published_body=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("body", ""), end="")' <<<"$release_json")
     [ "$published_body" = "$(cat "$repo_root/$notes_path")" ] || fail "versioned Release Notes body" different "create the Release from $notes_path"

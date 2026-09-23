@@ -7,7 +7,7 @@ import { Theme } from "../theme.slint";
 export component ProgressBar inherits Rectangle {
     in property <int> value: 0;          // 0..100, ignored when indeterminate
     in property <bool> indeterminate: false;
-    in property <color> bar-color: Theme.accent;
+    in property <color> bar-color: Theme.progress;
     // Track (unfilled) color. Callers on a selected/highlighted surface pass
     // `Theme.selected-track` so the empty portion of the bar stays visible
     // against the row's tinted background instead of the default track color.

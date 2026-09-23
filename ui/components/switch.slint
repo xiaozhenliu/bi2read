@@ -27,7 +27,7 @@ export component AppSwitch inherits Rectangle {
     height: 24px;
     border-radius: 12px;
     background: !root.enabled ? Theme.surface-disabled
-        : root.checked ? Theme.accent : Theme.track;
+        : root.checked ? Theme.selection : Theme.track;
 
     thumb := Rectangle {
         width: 20px;

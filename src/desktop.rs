@@ -26,7 +26,7 @@ use crate::jobs::{
     CreatedFrom, Job, JobCreationInput, JobStatus, Queue, SourceLanguage, Stage, StageState,
     TranscriptionSelection,
 };
-use crate::scheduler::{DrainOutcome, Scheduler};
+use crate::scheduler::{DrainOutcome, JobResult, Scheduler};
 
 /// Messages from the UI thread to the single background worker.
 #[allow(dead_code)]
@@ -134,6 +134,8 @@ fn parse_ui_fixture(value: &str) -> Option<&'static str> {
         "running" => Some("running"),
         "failed" => Some("failed"),
         "queue-scroll" => Some("queue-scroll"),
+        "speaker-empty" => Some("speaker-empty"),
+        "speaker-single" => Some("speaker-single"),
         "" | "1" | "true" | "completed" => Some("completed"),
         "result-success" => Some("result-success"),
         "result-limited" => Some("result-limited"),
@@ -217,13 +219,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => return Err(error.into()),
     };
-    let ui_fixture = std::env::var("BIMYSCRIBE_UI_FIXTURE")
+    let ui_fixture = std::env::var("BI2READ_UI_FIXTURE")
         .ok()
         .and_then(|value| match parse_ui_fixture(&value) {
             Some(state) => Some(state),
             None => {
                 log::warn!(
-                    "ignoring unknown BIMYSCRIBE_UI_FIXTURE={value:?}; expected empty, running, failed, completed, queue-scroll, settings, confirmation, delete-confirm, or clear-confirm"
+                    "ignoring unknown BI2READ_UI_FIXTURE={value:?}; expected empty, running, failed, completed, queue-scroll, settings, confirmation, delete-confirm, or clear-confirm"
                 );
                 None
             }
@@ -237,9 +239,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Config::load()?
     };
     let result_fixture = ui_fixture.is_some_and(|state| state.starts_with("result-"));
-    let fixture_root = result_fixture.then(|| {
-        std::env::temp_dir().join(format!("bimyscribe-result-fixture-{}", Uuid::new_v4()))
-    });
+    let fixture_root = result_fixture
+        .then(|| std::env::temp_dir().join(format!("bi2read-result-fixture-{}", Uuid::new_v4())));
     let is_settings_test_fixture = matches!(
         ui_fixture,
         Some("settings-connection-tested" | "settings-connection-failed")
@@ -444,18 +445,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             app.set_ui_verification_fixture(state.into());
         }
-        let (x, y) = parse_ui_fixture_position(
-            std::env::var("BIMYSCRIBE_UI_FIXTURE_POSITION")
-                .ok()
-                .as_deref(),
-        );
+        let (x, y) =
+            parse_ui_fixture_position(std::env::var("BI2READ_UI_FIXTURE_POSITION").ok().as_deref());
         let (width, height) =
-            parse_ui_fixture_size(std::env::var("BIMYSCRIBE_UI_FIXTURE_SIZE").ok().as_deref());
+            parse_ui_fixture_size(std::env::var("BI2READ_UI_FIXTURE_SIZE").ok().as_deref());
         app.window()
             .set_size(slint::PhysicalSize::new(width, height));
         app.window()
             .set_position(slint::LogicalPosition::new(x as f32, y as f32));
-        if std::env::var("BIMYSCRIBE_UI_FIXTURE_INSPECTOR")
+        if std::env::var("BI2READ_UI_FIXTURE_INSPECTOR")
             .ok()
             .is_some_and(|value| value == "info")
         {
@@ -1178,7 +1176,7 @@ fn show_already_running() {
     let _ = std::process::Command::new("osascript")
         .args([
             "-e",
-            "display alert \"BiMyScribe 已在运行\" message \"请使用已经打开的窗口。\" as informational",
+            "display alert \"bi2read 已在运行\" message \"请使用已经打开的窗口。\" as informational",
         ])
         .status();
 }
@@ -1286,18 +1284,12 @@ fn handle_work_message(
             if let DrainOutcome::Ran { job_id, .. } = &outcome {
                 refresh_selected_detail(app, &scheduler.queue, config, *job_id);
             }
+            let (feedback, is_error) = retry_feedback(&outcome);
             let app = app.clone();
             let _ = app.upgrade_in_event_loop(move |app| {
                 app.set_action_pending(false);
-                app.set_action_feedback(
-                    match outcome {
-                        DrainOutcome::Ran { .. } => "重试已完成",
-                        DrainOutcome::Waiting => "已重新排队，等待运行条件",
-                        DrainOutcome::Idle => "已重新排队",
-                    }
-                    .into(),
-                );
-                app.set_action_feedback_error(false);
+                app.set_action_feedback(feedback.into());
+                app.set_action_feedback_error(is_error);
             });
         }
         WorkMsg::Regenerate {
@@ -2679,7 +2671,7 @@ fn content_results_for_job(
 #[cfg(test)]
 fn fixture_content_results(selector: &str) -> ContentResultsData {
     let id = Uuid::new_v4();
-    let root = std::env::temp_dir().join(format!("bimyscribe-result-fixture-{id}"));
+    let root = std::env::temp_dir().join(format!("bi2read-result-fixture-{id}"));
     let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
     let job = result_fixture_callback_job(&root, &cfg, selector).expect("result fixture job");
     let pending_kind = (selector == "result-regenerating").then_some(ArtifactKindV1::Chapters);
@@ -2693,6 +2685,33 @@ fn failed_stage(job: &Job) -> Option<Stage> {
     jobs::pipeline_stages()
         .into_iter()
         .find(|s| job.stage_state(*s) == StageState::Failed)
+}
+
+fn retry_feedback(outcome: &DrainOutcome) -> (String, bool) {
+    match outcome {
+        DrainOutcome::Ran {
+            result: JobResult::Completed,
+            ..
+        } => ("重试已完成".into(), false),
+        DrainOutcome::Ran {
+            result: JobResult::Failed(message),
+            ..
+        } => (format!("重试失败：{message}"), true),
+        DrainOutcome::Ran {
+            result: JobResult::Cancelled,
+            ..
+        } => ("重试已取消".into(), true),
+        DrainOutcome::Ran {
+            result: JobResult::NeedsUserAction,
+            ..
+        } => ("重试需要外部操作".into(), true),
+        DrainOutcome::Ran {
+            result: JobResult::WaitingForDrive,
+            ..
+        } => ("重试已排队，等待外接盘".into(), false),
+        DrainOutcome::Waiting => ("已重新排队，等待运行条件".into(), false),
+        DrainOutcome::Idle => ("已重新排队".into(), false),
+    }
 }
 
 /// Show the full detail pane (stages, speakers, task info) for one job.
@@ -4791,8 +4810,9 @@ mod tests {
         parse_ui_fixture_position, parse_ui_fixture_size, persist_job_cancellation_with,
         queue_scroll_fixture_jobs, regenerable_kind_from_action, regeneration_feedback,
         reorder_capabilities, reserve_content_operation, result_fixture_callback_job,
-        run_regenerate_content_operation, run_repair_content_operation, speaker_rebuild_feedback,
-        start_content_operation, valid_result_source_url, ContentBusy, JobRow,
+        retry_feedback, run_regenerate_content_operation, run_repair_content_operation,
+        speaker_rebuild_feedback, start_content_operation, valid_result_source_url, ContentBusy,
+        JobRow,
     };
     use crate::config::Config;
     use crate::content_results::{
@@ -4801,12 +4821,25 @@ mod tests {
         ReadyGenerationTargetV1, RegenerableKind, TargetUnavailableCodeV1, TargetUnavailableV1,
     };
     use crate::jobs::{Job, JobCapabilities, JobStatus, Stage, StageState};
-    use crate::scheduler::Scheduler;
+    use crate::scheduler::{DrainOutcome, JobResult, Scheduler};
     use slint::{Model, VecModel};
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use uuid::Uuid;
+
+    #[test]
+    fn retry_feedback_does_not_report_failed_run_as_completed() {
+        let outcome = DrainOutcome::Ran {
+            job_id: Uuid::new_v4(),
+            result: JobResult::Failed("ffmpeg unavailable".into()),
+        };
+
+        assert_eq!(
+            retry_feedback(&outcome),
+            ("重试失败：ffmpeg unavailable".into(), true)
+        );
+    }
 
     #[test]
     fn cancellation_persistence_failures_restore_retryable_state() {
@@ -4853,6 +4886,8 @@ mod tests {
         assert_eq!(parse_ui_fixture("settings"), Some("settings"));
         assert_eq!(parse_ui_fixture("running"), Some("running"));
         assert_eq!(parse_ui_fixture("queue-scroll"), Some("queue-scroll"));
+        assert_eq!(parse_ui_fixture("speaker-empty"), Some("speaker-empty"));
+        assert_eq!(parse_ui_fixture("speaker-single"), Some("speaker-single"));
         assert_eq!(parse_ui_fixture("confirmation"), Some("confirmation"));
         assert_eq!(parse_ui_fixture("delete-confirm"), Some("delete-confirm"));
         assert_eq!(parse_ui_fixture("clear-confirm"), Some("clear-confirm"));
@@ -4955,7 +4990,7 @@ mod tests {
     #[test]
     fn result_fixture_uses_a_selected_terminal_job_and_closed_callback_inputs() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-result-bridge-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-result-bridge-{id}"));
         let cfg = Config {
             working_dir: root.join("jobs"),
             output_dir: root.join("output"),
@@ -4990,7 +5025,7 @@ mod tests {
     #[test]
     fn result_projection_identity_is_stable_for_refresh_and_changes_for_job_switch() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-result-session-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-result-session-{id}"));
         let cfg = Config {
             working_dir: root.join("jobs"),
             output_dir: root.join("output"),
@@ -5010,7 +5045,7 @@ mod tests {
 
         let other_id = Uuid::new_v4();
         let other_root =
-            std::env::temp_dir().join(format!("bimyscribe-result-session-other-{other_id}"));
+            std::env::temp_dir().join(format!("bi2read-result-session-other-{other_id}"));
         let other_job = result_fixture_callback_job(&other_root, &cfg, "result-success").unwrap();
         let switched = super::content_results_for_job(&other_job, None, None, 1);
         assert_ne!(first.job_id, switched.job_id);
@@ -5093,7 +5128,7 @@ mod tests {
     #[test]
     fn production_content_operations_preserve_terminal_job_and_never_run_upstream() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-content-worker-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-content-worker-{id}"));
         let work = root.join("work");
         let output = root.join("output");
         std::fs::create_dir_all(&work).unwrap();
@@ -5235,7 +5270,7 @@ mod tests {
             JobStatus::Cancelled,
         ] {
             let id = Uuid::new_v4();
-            let root = std::env::temp_dir().join(format!("bimyscribe-locator-{id}"));
+            let root = std::env::temp_dir().join(format!("bi2read-locator-{id}"));
             std::fs::create_dir_all(&root).unwrap();
             let raw_path = root.join("transcript.raw.json");
             std::fs::write(&raw_path, br#"[{"id":"u1","text":"raw"}]"#).unwrap();
@@ -5297,7 +5332,7 @@ mod tests {
     fn large_markdown_statistics_benchmark() {
         const SIZE: usize = 20 * 1024 * 1024;
         let path =
-            std::env::temp_dir().join(format!("bimyscribe-large-markdown-{}.md", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-large-markdown-{}.md", Uuid::new_v4()));
         std::fs::write(&path, vec![b'a'; SIZE]).expect("write large markdown fixture");
 
         let started = Instant::now();
@@ -5327,7 +5362,7 @@ mod tests {
     #[test]
     fn model_changed_notice_checks_newest_enhancement_slot() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-result-model-notice-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-result-model-notice-{id}"));
         let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
         let job =
             result_fixture_callback_job(&root, &cfg, "result-success").expect("result fixture job");
@@ -5370,7 +5405,7 @@ mod tests {
     #[test]
     fn ungenerated_slot_presents_clean_empty_state_and_initial_generation_button() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-result-ungenerated-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-result-ungenerated-{id}"));
         let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
         let job =
             result_fixture_callback_job(&root, &cfg, "result-success").expect("result fixture job");
@@ -5408,7 +5443,7 @@ mod tests {
     #[test]
     fn presentation_operation_preserves_selected_summary_tier_in_full_md() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-presentation-tier-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-presentation-tier-{id}"));
         let cfg = Config::for_paths(&crate::paths::AppPaths::discover().expect("app paths"));
         let job =
             result_fixture_callback_job(&root, &cfg, "result-success").expect("result fixture job");

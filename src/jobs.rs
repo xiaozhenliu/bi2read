@@ -315,6 +315,16 @@ impl TranscriptionSelectionStatus {
 
 pub const LEGACY_UNRECORDED: &str = "legacy-unrecorded";
 
+/// Surfaced when `recover()` finds the Transcribe stage still Running at App
+/// startup: the previous attempt was interrupted (Runtime OOM kill, lost
+/// Docker engine, or an App restart) and is deliberately not requeued, since
+/// requeuing would silently replay the same failure.
+/// 转写阶段检测到冻结的 Runtime 身份失配时持久化到 `error` 的错误码前缀。
+pub const RUNTIME_IDENTITY_CHANGED: &str = "runtime-identity-changed";
+
+pub const TRANSCRIBE_INTERRUPTED: &str =
+    "上次转写在 App 退出或 Runtime 中断时未完成，未自动重跑；请确认 Docker Desktop 内存充足后手动重试";
+
 /// All pipeline stages plus the non-linear waiting and terminal states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -615,7 +625,7 @@ impl JobCapabilities {
         Self {
             can_cancel: job.status.can_request_cancel(),
             can_rebuild: job.status == JobStatus::NeedsUserAction
-                && job.requires_transcription_rebuild(),
+                && (job.requires_transcription_rebuild() || job.requires_runtime_reselection()),
             can_retry: (job.status == JobStatus::Failed
                 || job.status == JobStatus::NeedsUserAction)
                 && job.transcription_selection.is_some()
@@ -911,6 +921,16 @@ impl Job {
         self.transcription_selection.is_none()
     }
 
+    /// 任务冻结的 Runtime 身份已与当前 Runtime 失配：重试注定再次失败，
+    /// 只能用当前 Runtime 重建。判定依据是转写阶段持久化的机器可读错误码。
+    pub fn requires_runtime_reselection(&self) -> bool {
+        self.status == JobStatus::NeedsUserAction
+            && self
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with(RUNTIME_IDENTITY_CHANGED))
+    }
+
     /// Apply the single persisted cancellation state contract.
     ///
     /// Running work remains cooperative so its pipeline/runtime resources can
@@ -1181,16 +1201,30 @@ pub fn recover(queue: &mut Queue) -> Vec<RecoveryReport> {
             .into_iter()
             .filter(|s| job.stage_state(*s) == StageState::Running)
             .collect();
-        for s in &running {
-            job.set_stage_state(*s, StageState::Pending);
-            report.reset_stages.push(*s);
-        }
-
-        // If the job was Running overall, demote to Queued.
-        if job.status == JobStatus::Running {
-            job.status = JobStatus::Queued;
-            job.stage = next_pending_stage(job).unwrap_or(Stage::Queued);
+        if running.contains(&Stage::Transcribe) {
+            // A Runtime OOM kill, a lost Docker engine, or an App restart
+            // mid-transcription all leave this stage Running forever
+            // (`funasr::run`'s wait loop never returned). Requeuing would
+            // silently replay the same OOM instead of surfacing it, so this
+            // is the one stage recovery converges to Failed rather than
+            // Pending/Queued.
+            job.set_stage_state(Stage::Transcribe, StageState::Failed);
+            job.status = JobStatus::Failed;
+            job.stage = Stage::Transcribe;
             job.stage_progress = 0;
+            job.error = Some(TRANSCRIBE_INTERRUPTED.to_string());
+        } else {
+            for s in &running {
+                job.set_stage_state(*s, StageState::Pending);
+                report.reset_stages.push(*s);
+            }
+
+            // If the job was Running overall, demote to Queued.
+            if job.status == JobStatus::Running {
+                job.status = JobStatus::Queued;
+                job.stage = next_pending_stage(job).unwrap_or(Stage::Queued);
+                job.stage_progress = 0;
+            }
         }
 
         // A pre-v0.4 Job has no trustworthy Runtime or language identity.
@@ -1682,7 +1716,7 @@ mod tests {
             r#"{{"id":"{}","bvid":"BV1legacy","page":1,"title":"legacy","stage":"queued","status":"queued","stage_progress":0,"error":null,"work_dir":null,"stages":{{}},"speaker_map":{{}}}}"#,
             id
         );
-        let queue_dir = std::env::temp_dir().join(format!("bimyscribe-queue-fixture-{id}"));
+        let queue_dir = std::env::temp_dir().join(format!("bi2read-queue-fixture-{id}"));
         std::fs::remove_dir_all(&queue_dir).ok();
         std::fs::create_dir_all(&queue_dir).unwrap();
         let queue_path = queue_dir.join("queue.json");
@@ -1780,7 +1814,7 @@ mod tests {
     #[test]
     fn cancelled_legacy_job_persists_reloads_and_does_not_resurrect() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-cancel-reload-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-cancel-reload-{id}"));
         std::fs::create_dir_all(&root).unwrap();
         let queue_path = root.join("queue.json");
         let mut job = Job::new(id, "BV1legacy-cancel".into(), 1);
@@ -1835,7 +1869,7 @@ mod tests {
             ContentSetupV1::disabled(),
         ));
         let queue_path =
-            std::env::temp_dir().join(format!("bimyscribe-selection-freeze-{}.json", job.id));
+            std::env::temp_dir().join(format!("bi2read-selection-freeze-{}.json", job.id));
         let queue = Queue { jobs: vec![job] };
         std::fs::write(&queue_path, serde_json::to_vec_pretty(&queue).unwrap()).unwrap();
 
@@ -1869,7 +1903,7 @@ mod tests {
             .is_some_and(|message| message.contains(LEGACY_UNRECORDED)));
 
         let id = Uuid::new_v4();
-        let dir = std::env::temp_dir().join(format!("bimyscribe-legacy-complete-{id}"));
+        let dir = std::env::temp_dir().join(format!("bi2read-legacy-complete-{id}"));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1916,15 +1950,21 @@ mod tests {
 
         recover(&mut queue);
 
+        // A Transcribe stage left Running is a Runtime-side interruption
+        // (OOM kill, lost Docker engine, App restart) that must converge to
+        // Failed rather than being silently requeued (see
+        // `recover_marks_interrupted_transcribe_as_failed`); the recorded
+        // selection must still survive so the user can retry with it.
         assert_eq!(
             queue.jobs[0].transcription_selection.as_ref(),
             Some(&selection)
         );
-        assert_eq!(queue.jobs[0].status, JobStatus::Queued);
+        assert_eq!(queue.jobs[0].status, JobStatus::Failed);
         assert_eq!(
             queue.jobs[0].stage_state(Stage::Transcribe),
-            StageState::Pending
+            StageState::Failed
         );
+        assert!(JobCapabilities::from_job(&queue.jobs[0]).can_retry);
     }
 
     #[test]
@@ -2005,7 +2045,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces() {
-        let dir = std::env::temp_dir().join(format!("bimyscribe-jobs-test-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("bi2read-jobs-test-{}", Uuid::new_v4()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("f.json");
@@ -2021,7 +2061,7 @@ mod tests {
     #[test]
     fn recover_resets_running_to_pending() {
         let id = Uuid::new_v4();
-        let dir = std::env::temp_dir().join(format!("bimyscribe-recover-{}", id));
+        let dir = std::env::temp_dir().join(format!("bi2read-recover-{}", id));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let mut job = Job::new(id, "BV1test".into(), 1);
@@ -2047,9 +2087,63 @@ mod tests {
     }
 
     #[test]
+    fn runtime_identity_change_opens_rebuild_but_legacy_rule_still_holds() {
+        let mut job = Job::new(Uuid::new_v4(), "BV1test".into(), 1);
+        job.transcription_selection = Some(sample_selection(CreatedFrom::App));
+        job.content_setup = Some(ContentSetupV1::disabled());
+        job.status = JobStatus::NeedsUserAction;
+        job.stage = Stage::NeedsUserAction;
+        job.error = Some(format!(
+            "{RUNTIME_IDENTITY_CHANGED}: 任务冻结的 Runtime 已改变"
+        ));
+        assert!(job.requires_runtime_reselection());
+        assert!(JobCapabilities::from_job(&job).can_rebuild);
+
+        // 同样的错误码在 Failed 状态下不开放重建：只有等待用户操作才是重建入口。
+        job.status = JobStatus::Failed;
+        assert!(!job.requires_runtime_reselection());
+        assert!(!JobCapabilities::from_job(&job).can_rebuild);
+
+        // 其他等待用户操作的原因（如 Docker 未运行）不冒充身份失配。
+        job.status = JobStatus::NeedsUserAction;
+        job.error = Some("docker not running".into());
+        assert!(!JobCapabilities::from_job(&job).can_rebuild);
+    }
+
+    #[test]
+    fn recover_marks_interrupted_transcribe_as_failed() {
+        let id = Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("bi2read-recover-transcribe-{}", id));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut job = Job::new(id, "BV1test".into(), 1);
+        job.transcription_selection = Some(sample_selection(CreatedFrom::App));
+        job.content_setup = Some(ContentSetupV1::disabled());
+        job.work_dir = Some(dir.clone());
+        job.set_stage_state(Stage::DownloadAudio, StageState::Completed);
+        job.set_stage_state(Stage::Metadata, StageState::Completed);
+        job.set_stage_state(Stage::NormalizeAudio, StageState::Completed);
+        job.set_stage_state(Stage::Transcribe, StageState::Running);
+        job.status = JobStatus::Running;
+        job.stage = Stage::Transcribe;
+        let mut q = Queue { jobs: vec![job] };
+        let reports = recover(&mut q);
+        assert_eq!(reports.len(), 1);
+        let job = &q.jobs[0];
+        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.stage, Stage::Transcribe);
+        assert_eq!(job.stage_state(Stage::Transcribe), StageState::Failed);
+        let error = job.error.as_deref().unwrap_or("");
+        assert!(error.contains("未自动重跑"), "unexpected error: {error}");
+        // A Runtime failure like this must stay user-retryable.
+        assert!(JobCapabilities::from_job(job).can_retry);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn recover_keeps_valid_completed() {
         let id = Uuid::new_v4();
-        let dir = std::env::temp_dir().join(format!("bimyscribe-recover2-{}", id));
+        let dir = std::env::temp_dir().join(format!("bi2read-recover2-{}", id));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         // Write a valid metadata.json.
@@ -2073,11 +2167,11 @@ mod tests {
     fn recover_is_in_memory_and_does_not_touch_the_app_queue() {
         let _guard = HOME_ENV_LOCK.lock().unwrap();
         let original_home = std::env::var_os("HOME");
-        let home = std::env::temp_dir().join(format!("bimyscribe-recover-home-{}", Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("bi2read-recover-home-{}", Uuid::new_v4()));
         let app_dir = home
             .join("Library")
             .join("Application Support")
-            .join("BiMyScribe");
+            .join("bi2read");
         std::fs::create_dir_all(&app_dir).unwrap();
         let queue_file = app_dir.join("queue.json");
         let sentinel = b"production queue sentinel";
@@ -2107,7 +2201,7 @@ mod tests {
 
     fn completed_job_with_retained_artifacts(retention: RetentionPolicy) -> (Job, PathBuf) {
         let id = Uuid::new_v4();
-        let dir = std::env::temp_dir().join(format!("bimyscribe-completed-{id}"));
+        let dir = std::env::temp_dir().join(format!("bi2read-completed-{id}"));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let mut job = Job::new(id, "BV1test".into(), 1);
@@ -2313,7 +2407,7 @@ mod tests {
     fn v05_terminal_missing_or_corrupt_current_stays_terminal_for_raw_only_repair() {
         for current in [None, Some(br"not-json".as_slice())] {
             let id = Uuid::new_v4();
-            let dir = std::env::temp_dir().join(format!("bimyscribe-v05-raw-only-{id}"));
+            let dir = std::env::temp_dir().join(format!("bi2read-v05-raw-only-{id}"));
             std::fs::create_dir_all(&dir).unwrap();
             let mut job = Job::new(id, "BV1v05rawonly".into(), 1);
             job.content_setup = Some(ContentSetupV1::disabled());
@@ -2392,7 +2486,7 @@ mod tests {
 
     #[test]
     fn capabilities_for_completed_job() {
-        let dir = std::env::temp_dir().join(format!("bimyscribe-caps-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("bi2read-caps-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("transcript.raw.json"),
@@ -2423,7 +2517,7 @@ mod tests {
     #[test]
     fn v05_raw_only_failed_job_uses_repair_instead_of_generic_retry() {
         let id = Uuid::new_v4();
-        let dir = std::env::temp_dir().join(format!("bimyscribe-caps-raw-only-{id}"));
+        let dir = std::env::temp_dir().join(format!("bi2read-caps-raw-only-{id}"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("transcript.raw.json"),
@@ -2455,7 +2549,7 @@ mod tests {
             ),
         ] {
             let id = Uuid::new_v4();
-            let dir = std::env::temp_dir().join(format!("bimyscribe-caps-invalid-{id}"));
+            let dir = std::env::temp_dir().join(format!("bi2read-caps-invalid-{id}"));
             std::fs::create_dir_all(&dir).unwrap();
             if let Some(raw) = raw {
                 std::fs::write(dir.join("transcript.raw.json"), raw).unwrap();
@@ -2524,7 +2618,7 @@ mod tests {
             // Give the job a separate per-job output directory, as the pipeline
             // does when `output_dir` is configured.
             let out_dir = std::env::temp_dir().join(format!(
-                "bimyscribe-delete-out-{}-{}",
+                "bi2read-delete-out-{}-{}",
                 job.id,
                 retention.label()
             ));
@@ -2551,9 +2645,8 @@ mod tests {
         let id = Uuid::new_v4();
         let mut job = Job::new(id, "BV1test".into(), 1);
         job.status = JobStatus::Cancelled;
-        job.work_dir = Some(std::env::temp_dir().join(format!("bimyscribe-absent-{id}")));
-        job.final_output_dir =
-            Some(std::env::temp_dir().join(format!("bimyscribe-absent-out-{id}")));
+        job.work_dir = Some(std::env::temp_dir().join(format!("bi2read-absent-{id}")));
+        job.final_output_dir = Some(std::env::temp_dir().join(format!("bi2read-absent-out-{id}")));
         // External drive unplugged: neither directory exists.
         delete_job_artifacts(&job).unwrap();
     }
@@ -2563,7 +2656,7 @@ mod tests {
         let (job, work_dir) = completed_job_with_retained_artifacts(RetentionPolicy::KeepAll);
         // A final_output_dir without full.md is not recognizable as a
         // job-owned directory (e.g. a legacy shared root) and must survive.
-        let shared_root = std::env::temp_dir().join(format!("bimyscribe-shared-{}", job.id));
+        let shared_root = std::env::temp_dir().join(format!("bi2read-shared-{}", job.id));
         std::fs::remove_dir_all(&shared_root).ok();
         std::fs::create_dir_all(&shared_root).unwrap();
         std::fs::write(shared_root.join("other.txt"), "keep me").unwrap();
@@ -2588,7 +2681,7 @@ mod tests {
             job
         };
         let queue_path =
-            std::env::temp_dir().join(format!("bimyscribe-delete-{}.json", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-delete-{}.json", Uuid::new_v4()));
         {
             let mut queue = Queue {
                 jobs: vec![terminal.clone(), live.clone()],

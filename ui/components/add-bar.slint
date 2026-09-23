@@ -30,7 +30,7 @@ export component AddBar inherits Rectangle {
     // `Theme.window-min-width` (920px). At that width the toolbar's content
     // area (920 - 2*16px padding = 888px) already fits brand + input + button
     // + settings icon with the app name shown: logo 28 + gap 8 + name
-    // (~90px worst case for 13px/600 "BiMyScribe") + gap 12 + input (min
+    // (~90px worst case for 13px/600 "bi2read") + gap 12 + input (min
     // 280) + gap 12 + button (~90px worst case for the "正在添加…" busy
     // label) + gap 12 + icon 36 = ~568px, ~320px under 888 — no hiding is
     // actually required at the documented minimum. 760px keeps a ~160px
@@ -88,7 +88,7 @@ export component AddBar inherits Rectangle {
                 }
 
                 if root.show-app-name : Text {
-                    text: "BiMyScribe";
+                    text: "bi2read";
                     font-size: Theme.font-body;
                     font-weight: 600;
                     color: Theme.text-primary;
@@ -131,7 +131,7 @@ export component AddBar inherits Rectangle {
         if !root.display-feedback.is-empty : Text {
             text: root.display-feedback;
             color: root.display-state == "error" ? Theme.danger-text
-                : root.display-state == "success" ? Theme.success
+                : root.display-state == "success" ? Theme.success-text
                 : Theme.text-muted;
             font-size: Theme.font-caption;
             height: 16px;

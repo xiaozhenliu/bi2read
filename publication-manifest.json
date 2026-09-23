@@ -1,35 +1,35 @@
 {
-  "app_version": "0.6.0",
+  "app_version": "0.6.1",
   "files": [
     {
       "executable": false,
       "path": ".github/workflows/public-snapshot.yml",
-      "sha256": "2c8d59c796bbfbe6ebb12bdc83522d16bd1be3bbf1f9117377b4fdd31c9a0a1a",
-      "size": 1264
+      "sha256": "b6b12d8aaa258d18a47bea60c3fa0bd5d44c762a9fc9bb889c3051fe74783100",
+      "size": 1261
     },
     {
       "executable": false,
       "path": ".github/workflows/release-source.yml",
-      "sha256": "a7b487c773bdc8c30cb7e24f27f1c55c99a0abd772c8620a1de2ceb31af9af90",
-      "size": 6012
+      "sha256": "c55a52f07865324682e5f0274e784ac11f9a998df1280ed1cccb7c3f2eee58dd",
+      "size": 5997
     },
     {
       "executable": false,
       "path": "CHANGELOG.md",
-      "sha256": "28c395a6c77bf45b8d18fd1d7492eb11f3d0729555242ce20efddec97eb5febb",
-      "size": 8673
+      "sha256": "b70a44c20c7175338ae51fc137a4017e3daa6b12cc8f325f593b23aa7f643656",
+      "size": 11150
     },
     {
       "executable": false,
       "path": "Cargo.lock",
-      "sha256": "2529d71c1153c6bd4400b80acebf42bc13b8b0a19695d1762b499321b92ad2e3",
-      "size": 163887
+      "sha256": "75382fbb6af69e0ddd45ce401d3c260385f991d0adc4fc2a3131401b5d5e8f75",
+      "size": 163884
     },
     {
       "executable": false,
       "path": "Cargo.toml",
-      "sha256": "99205961d7696a8b9d5e28871925c03be6e3a010652d47672292879242fc1f9e",
-      "size": 1041
+      "sha256": "28c3848da150ee5a5ea2e4ab9cadccfb7d73d00cd960d47f579435e714d233d4",
+      "size": 1038
     },
     {
       "executable": false,
@@ -40,14 +40,14 @@
     {
       "executable": false,
       "path": "README.md",
-      "sha256": "1233e44933f6bca286d9705ab4a5b2837e3a13ef3d2efba0d7d131b4c36305d2",
-      "size": 14890
+      "sha256": "a5811c9bc85f2171efea691aa09bfad438b8b4ffdfd22ee490b7ae663640bfdb",
+      "size": 17192
     },
     {
       "executable": false,
       "path": "RELEASE_NOTES.md",
-      "sha256": "1880d90b1c0e5c70a2340be5dabde8b612e30f1a18b9b02ea936db1c85aef736",
-      "size": 5575
+      "sha256": "30dfde737872359e1c303772a742f9195daf008c72f28009a6c859b7c9075df0",
+      "size": 8352
     },
     {
       "executable": false,
@@ -58,26 +58,32 @@
     {
       "executable": false,
       "path": "docs/adr/0001-v0.4-runtime-language-selection.md",
-      "sha256": "9435070c2355916cac9710c684a5e80f22fb2f1c1b926a337547b3cb9ecebc62",
-      "size": 8504
+      "sha256": "0cfb08e1009d44ddbd0bb2b4b7474e21eeeca02095b25dadea622e13d115c3b6",
+      "size": 8501
     },
     {
       "executable": false,
       "path": "docs/adr/0002-v0.5-trusted-content-derivation.md",
-      "sha256": "cc2d0367de189ee201fcf73dfd196c18e7d599834d46cc4799f4aed62bd9e020",
-      "size": 22435
+      "sha256": "879be74e42ae435d7fba60ed6ce606d6f2bd0c40cf4d6d7afef6ee5b7e1593dd",
+      "size": 22432
+    },
+    {
+      "executable": false,
+      "path": "docs/adr/0003-rename-to-bi2read.md",
+      "sha256": "26cbcd17846155679b6c95d5c62fa66dde3551194507ac3dd143320ba2d453a0",
+      "size": 4763
     },
     {
       "executable": false,
       "path": "docs/architecture.md",
-      "sha256": "8d091af5c1a66fb9948c01d994af6b98d40c40a168cab42a52d478dfc8cfda3b",
-      "size": 12697
+      "sha256": "2072385dbf56dd06355b68c346684eb503e18c2bdb86bd5c7103e3947f448f30",
+      "size": 14325
     },
     {
       "executable": false,
-      "path": "docs/design/bimyscribe-design-spec.md",
-      "sha256": "d0fa5f42983c2a019a8a95f869e19e5828307737f6805b8067c78f220839140e",
-      "size": 27694
+      "path": "docs/design/bi2read-design-spec.md",
+      "sha256": "9977b19252fff26ad8bad39c0e78bb2c821f43af39377a4a51e341ab8924df38",
+      "size": 31720
     },
     {
       "executable": false,
@@ -123,15 +129,21 @@
     },
     {
       "executable": false,
+      "path": "docs/releases/v0.6.1.md",
+      "sha256": "30dfde737872359e1c303772a742f9195daf008c72f28009a6c859b7c9075df0",
+      "size": 8352
+    },
+    {
+      "executable": false,
       "path": "docs/roadmap.md",
-      "sha256": "c31b137875e97a20ba6dbc76204d9f1e562ccf6892a584c75024502e9f6fbc31",
-      "size": 11339
+      "sha256": "7564bce27cab973236bb740804fd8c9471b0aa3fe3685b17d50bfc3df45f79f6",
+      "size": 15315
     },
     {
       "executable": false,
       "path": "packaging/macos/Info.plist.in",
-      "sha256": "3e9fb1d7ffa1b0a7a73b6d9ccb313a16f7bd0a1342babcd641068e62bb93c185",
-      "size": 982
+      "sha256": "b65d7bafe8fef79dd77ccb9d9eafeb1733ae10e2661a1fbe5720b9b3d2fe340e",
+      "size": 970
     },
     {
       "executable": false,
@@ -178,8 +190,8 @@
     {
       "executable": false,
       "path": "packaging/public-paths.txt",
-      "sha256": "ee64d0c2d29d767b7633642b27b24c6ba40c4d4805ca8e09210d3bd00ba6c1c6",
-      "size": 831
+      "sha256": "c30bcb49b53a75f0349fb2c73ad3bea7680a1510f4e60793d7ca74648bcee92f",
+      "size": 828
     },
     {
       "executable": false,
@@ -190,7 +202,7 @@
     {
       "executable": false,
       "path": "packaging/release.toml",
-      "sha256": "d21d21c738df9a8e240d2773587560c2c3d9e2b26d9db6c34480f43110b76ae9",
+      "sha256": "457085760abda2af1d36260c4418a62939130a9727e15fe9ac7ae17f4deb1b1e",
       "size": 605
     },
     {
@@ -202,50 +214,50 @@
     {
       "executable": true,
       "path": "scripts/build-macos-icon.sh",
-      "sha256": "3978eda1b269c78dcc95a7580a48383d50b9fa0eae3867e010ff5a0716029f67",
-      "size": 1744
+      "sha256": "07b0e13090b272a41e01fb283b684eb4eb304b3344d7bdd098dc801b4fab2164",
+      "size": 1741
     },
     {
       "executable": true,
       "path": "scripts/build-macos-local.sh",
-      "sha256": "54854f76299f3e511e07ecf3f5f452843d66dfbf01d489748eb6f145bcb6c67c",
-      "size": 3748
+      "sha256": "2117271acec7f3100682d8388a81529e0e2b25ebbd90650a85501aba8c013179",
+      "size": 3724
     },
     {
       "executable": true,
       "path": "scripts/check-public-snapshot.py",
-      "sha256": "205a55ae663b2468d2c0c51bdf41c095d50a6c22fbd6f892ce0cf83c03572202",
-      "size": 12989
+      "sha256": "bad133b113d15117a788d44da2cfdf10c6a6d6b982b72fa9330b2375d673f30f",
+      "size": 12980
     },
     {
       "executable": true,
       "path": "scripts/check-release-e2e.sh",
-      "sha256": "bd76b479e11d3372b4e3ab0af21a653bd14c40deb41b896399da7598972a20b7",
-      "size": 7259
+      "sha256": "07def7ebf163d94450f2e3cfc615645111f28604cf818cb8c187f44acf29a799",
+      "size": 7418
     },
     {
       "executable": true,
       "path": "scripts/check-release.sh",
-      "sha256": "ef29feb3ecf85259a866a83d7e8ab0bc9467fdf8d6c90644ce3ec150087d63c4",
-      "size": 57020
+      "sha256": "5bdead51668428a25369ee8e9e753b3c6a365682b7f8e4957925531014d7d031",
+      "size": 57335
     },
     {
       "executable": true,
       "path": "scripts/finalize-release-manifest.sh",
-      "sha256": "1c0cd81df718b3e3a3e81a10f63e70d1a43809883d85edcce7e436e1b58919da",
-      "size": 2243
+      "sha256": "e0925bddca081b5c3c3a52bebf93b2b57252acc3ce00fce2b86da9c6d5298f8c",
+      "size": 2336
     },
     {
       "executable": true,
       "path": "scripts/install-macos-docker-local.sh",
-      "sha256": "69b708c43af7bb368bd8680a602174813fabf99d135f1987874f96a45110aaf1",
-      "size": 8613
+      "sha256": "5c266ea05952c6fa6c3e558d9c1b8a30d7bc036fd35f0fd99efc84cfc954976c",
+      "size": 8649
     },
     {
       "executable": true,
       "path": "scripts/package-macos-app.sh",
-      "sha256": "681340c696046616d8a74a0e55da5a96c91501297884a9384bac95b7ff9f4e9a",
-      "size": 8383
+      "sha256": "3dfc5dc2d903dd1e4fb00eae42a890347ae236bd32bdfedd0cb9d9c88b73f2dd",
+      "size": 8660
     },
     {
       "executable": true,
@@ -256,14 +268,14 @@
     {
       "executable": false,
       "path": "src/bilibili.rs",
-      "sha256": "5f70d03c3ab8aa888a1eec7b87cb1075c288be839faa4ff9250627ec841d3639",
-      "size": 24900
+      "sha256": "dd4a9364d7bbb5f69c23e545e4511679dce5f6f25335d8e16ad4aef1b83f1560",
+      "size": 28077
     },
     {
       "executable": false,
       "path": "src/bin/e2e_smoke.rs",
-      "sha256": "7faddbac9d75fb4ee8782393eee80eaa8988eaa899328139ad38fcfe4983efe7",
-      "size": 19736
+      "sha256": "c8769c68ffc52aea81f55072fff71679d541d2f93f87b3dc30dd3e3981796028",
+      "size": 19652
     },
     {
       "executable": false,
@@ -274,86 +286,86 @@
     {
       "executable": false,
       "path": "src/cli.rs",
-      "sha256": "75b5dee13a2d3f452d4e92a06c2365bf97f197af8ee25566e45ef4d1640eb86d",
-      "size": 28352
+      "sha256": "3322416d26bb62e1f23b6260b8f2aa2f90b11a8b878c526d909aa28d03c78ada",
+      "size": 29340
     },
     {
       "executable": false,
       "path": "src/config.rs",
-      "sha256": "fb76f71d447143a75800fc648d647fe86fc1822e2b54b46a90d3ebe91000992a",
-      "size": 23883
+      "sha256": "d8d3c6e465922ab725c24fae8e9b1a21b957ff8978243d27a93c30738926be65",
+      "size": 23809
     },
     {
       "executable": false,
       "path": "src/content_results.rs",
-      "sha256": "8ee202b22bfb09755b5b1afef48af693685b6705ee37e0de142a27f9bb27c6e6",
-      "size": 218224
+      "sha256": "45debb515bbaa609a9ea3a35fbd339135da15c94befd09a6df44933cb8f96ac5",
+      "size": 218185
     },
     {
       "executable": false,
       "path": "src/desktop.rs",
-      "sha256": "f093af32de3806a1d35918ab81b5b95fda60772549c1f762e8c83e1c30edec19",
-      "size": 209511
+      "sha256": "3c8ec2b87c71cc8b544af59a3508d2219a83652655968ee0c46c0135a201121f",
+      "size": 210822
     },
     {
       "executable": false,
       "path": "src/document.rs",
-      "sha256": "2cba00498372d6f80725967a134217634df37900160937d487b41980ceb25f9f",
-      "size": 46753
+      "sha256": "4501aca5135a76a9345a485b61b0730bd7f4952c43e93858dbaeaf259ebe6ab5",
+      "size": 46747
     },
     {
       "executable": false,
       "path": "src/funasr.rs",
-      "sha256": "188b83592c52d2cb1c25682c8dd46ced2bfecb19aa584d85e40b585d008ad006",
-      "size": 57213
+      "sha256": "f7786f52c687434361322fafa757a145ddf65d88ed9e6ada319b3a172a1bab85",
+      "size": 73559
     },
     {
       "executable": false,
       "path": "src/jobs.rs",
-      "sha256": "61a63a40eeb2ec36a43099590ea3d49b9dc4a8c6c94b7989474555f3b2418a12",
-      "size": 100075
+      "sha256": "fdf12cf272cdf23ffa6e4886f9eca99303c221ed22f26843bb88a521a1f63cba",
+      "size": 105062
     },
     {
       "executable": false,
       "path": "src/lib.rs",
-      "sha256": "3a401a3be05c2a70f0a39321c439dd5028c24fe2b74e392b24ebd2228f32c19c",
-      "size": 463
+      "sha256": "c94635745ef9e16511220795c8f66234762ba9c34d5d6e25dd95b40271fff837",
+      "size": 460
     },
     {
       "executable": false,
       "path": "src/llm.rs",
-      "sha256": "640cd09ada119c86d05de5282485a2321c1d978162ea68cc6da66c6f3577d545",
-      "size": 16018
+      "sha256": "b9c19a633bab1cb002bc84c4d2086fefc4d56556c40e70e2ceb5d9c0d11c24e2",
+      "size": 16015
     },
     {
       "executable": false,
       "path": "src/main.rs",
-      "sha256": "4439e25085db83b7231419c76350037f585e341550cdcf046ba6f44ac2f9dee6",
-      "size": 640
+      "sha256": "165cc3e58525e9278c2f762d92aaf2a421669bf97dc21b07fa275113f10b65da",
+      "size": 628
     },
     {
       "executable": false,
       "path": "src/package_check.rs",
-      "sha256": "1be59abe78c77f12448e26b3f914989abb2a016fd871c5dd3ebb52a62652b142",
-      "size": 3614
+      "sha256": "1996e9e325368522b642d157f3dd4eaa43bda5a564ff6d4e040f840bc70f8477",
+      "size": 3612
     },
     {
       "executable": false,
       "path": "src/paths.rs",
-      "sha256": "d5bfdbb9615b6a43de4b0448ce83e0434a6bc3857c3602daaf6896a17aeddc59",
-      "size": 18165
+      "sha256": "69d33be62cad29d6fc1ed34ab08d5fe72ff4c92db3dbfbd589b568d42d1747b0",
+      "size": 24328
     },
     {
       "executable": false,
       "path": "src/pipeline.rs",
-      "sha256": "b17c7c920b71d60b09324c4711439f9d4a52b0dd1a8fcb14b60e56d455b20e99",
-      "size": 42119
+      "sha256": "73c4baa14faad7feedde2927c10ea3aa28ba4704356981e05941e7249b7dd3c4",
+      "size": 43841
     },
     {
       "executable": false,
       "path": "src/process.rs",
-      "sha256": "d9919aaa08b10ded73509045076f18122f2a541ad823de35f81f7f8e37d040d5",
-      "size": 10159
+      "sha256": "e2f33c576e8bcf5bee1db01813ba793ec622ca34219fc20746caf693d6c40cc7",
+      "size": 16451
     },
     {
       "executable": false,
@@ -364,20 +376,20 @@
     {
       "executable": false,
       "path": "src/scheduler.rs",
-      "sha256": "1b927bb34ea5801277fbd6f459164e893f7ade7c6c96cc69deebc1cb85c7562b",
-      "size": 22425
+      "sha256": "c3b0d79c3cd7b3f0f587974148635d06d5a01e43722fbfd5ca39cd5fc0d079ae",
+      "size": 22511
     },
     {
       "executable": false,
       "path": "src/ui_bridge.rs",
-      "sha256": "b0a1d42e2a2b2465850b68d61ff1d8b14c92e02ff958407c03dffedcc1571f25",
-      "size": 7998
+      "sha256": "6228f9417fcf0b4583ecf631a9cf342f18a550852d3796683cd386715d25cb0e",
+      "size": 12095
     },
     {
       "executable": false,
       "path": "tests/cli_contract.rs",
-      "sha256": "e3a2c2d298bf5daff4766dff1c8c3ebc1c116ab809f0119ad8632d8d6a3347f3",
-      "size": 5691
+      "sha256": "5c773c4415407c44dcc768176d6a9e07068e1c4eea112ed96cc8541636392b0b",
+      "size": 5662
     },
     {
       "executable": false,
@@ -400,32 +412,32 @@
     {
       "executable": false,
       "path": "tests/pipeline_e2e.rs",
-      "sha256": "9f54dfeebfcac35b09c864ca4a1f05defb9de54a7357ddce731b79ff307ff4b9",
-      "size": 36095
+      "sha256": "9a3b921024903b4063e58b83754242207d7c22acdb050ea9ed67d4e6ddba0b5b",
+      "size": 36056
     },
     {
       "executable": false,
       "path": "ui/app.slint",
-      "sha256": "864ed2a8dea82b47e7cc9f3c01e9790a8fb52568e982eff1501b9d2444de427d",
-      "size": 23262
+      "sha256": "2a5b5dd235edbb3646391410f8df175b8b7f154b5a1fd1b716e88c69f36968e4",
+      "size": 23323
     },
     {
       "executable": false,
       "path": "ui/components/add-bar.slint",
-      "sha256": "1eb36651cef4793e71b5af6683b37b899e891056626d0a7a11d533000e8e79d5",
-      "size": 6228
+      "sha256": "135cd6d60ce31f29c346f5d73b6215a9bc21e98961a2b18b3ea2eafaad9f2738",
+      "size": 6227
     },
     {
       "executable": false,
       "path": "ui/components/badge.slint",
-      "sha256": "fcea98de45b74df4252ac598b7f51c26070abd06a3fc3b238e4df38bbba4ea8c",
-      "size": 4074
+      "sha256": "b407ce7480be55bf41188e6c8b05cb54dd65ebf3bd240055049fc1a992e6f991",
+      "size": 4077
     },
     {
       "executable": false,
       "path": "ui/components/button.slint",
-      "sha256": "52a5b4f1653c34ed4c126654b4846e0407e7218ff23ef063b1e3c5715dae38ba",
-      "size": 5117
+      "sha256": "20af336d007e66915f64cb50d708b13613a9765f48ab64a16a33ae4669a11cab",
+      "size": 5347
     },
     {
       "executable": false,
@@ -436,8 +448,8 @@
     {
       "executable": false,
       "path": "ui/components/content-results.slint",
-      "sha256": "ad790e5b72270b206b45833a0b93d482baf302f6fd72c2b27001093a2157816e",
-      "size": 27622
+      "sha256": "ac16d36b83051891620ad1ab4245bfbfeda1b93fffc49f32433ca87dae832c60",
+      "size": 27877
     },
     {
       "executable": false,
@@ -448,44 +460,44 @@
     {
       "executable": false,
       "path": "ui/components/job-detail.slint",
-      "sha256": "8d240e9afa2778fa60eeae630ad6d56fdf4259cead3252e3159421fdd37f3759",
-      "size": 56266
+      "sha256": "50460f8c60c4a84d1010e59435db3956d82c559ce05e17aeed37e544e7fb37d1",
+      "size": 55563
     },
     {
       "executable": false,
       "path": "ui/components/job-row.slint",
-      "sha256": "24cd77817e92277757834e2fdab9accf003219388704486189b45822b9099e67",
-      "size": 7812
+      "sha256": "fda30c953f1e1dbbbf7e6c86ee4930597b7a2090aaf7c3aeae7fdb2a68221ef9",
+      "size": 7088
     },
     {
       "executable": false,
       "path": "ui/components/progress.slint",
-      "sha256": "e74289189ace504adacef30e1f80b9f677900bbf7ab6ebba2070783460ebb18d",
-      "size": 2199
+      "sha256": "efd54d2e90acf38a68d9cb9db3bc806834b1a8bd97f5957acdcb70c737f28a8c",
+      "size": 2201
     },
     {
       "executable": false,
       "path": "ui/components/settings.slint",
-      "sha256": "d8ee45d2a7ba587f89d7d0607c9237658982b902949bbd7c5d573e75d4ee8031",
-      "size": 45358
+      "sha256": "eec48f09b0074484fbf55cb73827f7601ddc27c364bf878fa1359c069752ffb3",
+      "size": 45370
     },
     {
       "executable": false,
       "path": "ui/components/switch.slint",
-      "sha256": "24d7a51845f1566afc3af82cf909af2ec2c1423bae4e7e48b83ff6c659fb210c",
-      "size": 2535
+      "sha256": "9daf9dffa684143fb0b77e416c9aabd46028b5e20d20057c5ad17001b30a2d2f",
+      "size": 2538
     },
     {
       "executable": false,
       "path": "ui/components/text-field.slint",
-      "sha256": "5826048e7112707127150f552bcb730dc078e1f0bfa65b730ae79e3b6bc75b30",
-      "size": 8902
+      "sha256": "22a17853587453323116c4182268a7d0042250ae55eb5ac51c025a1e66c9674e",
+      "size": 9003
     },
     {
       "executable": false,
       "path": "ui/components/transcription-confirm.slint",
-      "sha256": "55fc542cd1fadf7f2e47d27152cf1ce95083725e39ea5628c0370258103ebc3e",
-      "size": 14038
+      "sha256": "32502abf5f4d573cce58b25b2107a630d29cf510c7131c1a119828e9f52741ba",
+      "size": 14033
     },
     {
       "executable": false,
@@ -568,14 +580,14 @@
     {
       "executable": false,
       "path": "ui/stage-style.slint",
-      "sha256": "4a84aa3c8772743942e4853d2c60103e82ca18773254d9e0c423285f285f8218",
-      "size": 7071
+      "sha256": "96e2ceaaa2dc04794a2058099457c60b52487e12123048f5ef564ec56c698fb9",
+      "size": 7619
     },
     {
       "executable": false,
       "path": "ui/theme.slint",
-      "sha256": "77da06a9a66d6c127bcda2b2b033e84e675ae878a44c5c856c99a4ec8376ee32",
-      "size": 5491
+      "sha256": "194d0331c3917bee06843b8cf5bb838354ca912dae0082447572a3d3295ccbe6",
+      "size": 5626
     },
     {
       "executable": false,
@@ -590,10 +602,10 @@
       "size": 7283
     }
   ],
-  "private_revision": "e0abc0607ac6f001cfc8ef550a69fc8bace60722",
-  "public_path_policy_sha256": "ee64d0c2d29d767b7633642b27b24c6ba40c4d4805ca8e09210d3bd00ba6c1c6",
-  "publicignore_sha256": "1193e2bef69b720860f37d86d4669deab9b9ea3bf2425855bfcdac3770b96fb0",
-  "release_config_sha256": "d21d21c738df9a8e240d2773587560c2c3d9e2b26d9db6c34480f43110b76ae9",
+  "private_revision": "3dd005c949f55c8265710e53aa30ffce0ad85bca",
+  "public_path_policy_sha256": "c30bcb49b53a75f0349fb2c73ad3bea7680a1510f4e60793d7ca74648bcee92f",
+  "publicignore_sha256": "265bc7250a3457b629d21ba82c970d265f9736ebb7a13754a4cb175829ac33d7",
+  "release_config_sha256": "457085760abda2af1d36260c4418a62939130a9727e15fe9ac7ae17f4deb1b1e",
   "release_requested": true,
   "runtime_revision": "18da5ce07d2b52b5c225fa1b45458b05eacc8989",
   "runtime_tag": "v2.0.0",
