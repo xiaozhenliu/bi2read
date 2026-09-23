@@ -209,7 +209,7 @@ fn http_post(
     let req = agent
         .post(url)
         .set("Content-Type", "application/json")
-        .set("User-Agent", "bimyscribe/0.1");
+        .set("User-Agent", "bi2read/0.1");
     let resp = req
         .send_string(&body.to_string())
         .map_err(|e| LlmError::Connection(e.to_string()))?;

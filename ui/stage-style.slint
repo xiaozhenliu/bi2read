@@ -63,7 +63,7 @@ export global StageStyle {
         if (kind == "download") {
             Theme.info
         } else if (kind == "transcribe") {
-            Theme.accent
+            Theme.selection
         } else if (kind == "polish") {
             Theme.polish
         } else if (kind == "done") {
@@ -78,8 +78,13 @@ export global StageStyle {
     }
 
     public pure function bar(kind: string) -> color {
-        // Progress bar color mirrors the status dot for the same kind.
-        dot(kind)
+        // Blue progress is distinct from pink status marks. Preserve explicit
+        // failure/attention semantics and the neutral queued state.
+        if (kind == "failed" || kind == "attention" || kind == "queued") {
+            dot(kind)
+        } else {
+            Theme.progress
+        }
     }
 
     public pure function badge-surface(kind: string) -> color {
@@ -100,11 +105,23 @@ export global StageStyle {
         }
     }
 
+    public pure function bar-text-color(kind: string) -> color {
+        if (kind == "failed") {
+            Theme.danger-text
+        } else if (kind == "attention") {
+            Theme.warning-text
+        } else if (kind == "queued") {
+            Theme.text-secondary
+        } else {
+            Theme.progress-text
+        }
+    }
+
     public pure function badge-text-color(kind: string) -> color {
         if (kind == "download") {
             Theme.info-text
         } else if (kind == "transcribe") {
-            Theme.accent-text
+            Theme.selection
         } else if (kind == "polish") {
             Theme.polish-text
         } else if (kind == "done") {

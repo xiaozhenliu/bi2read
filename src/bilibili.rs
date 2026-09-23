@@ -203,8 +203,9 @@ fn extract_page(s: &str) -> Option<u32> {
 ///
 /// Uses `https://api.bilibili.com/x/web-interface/view?bvid=` with only a
 /// User-Agent header (no Referer, no cookies - verified to return `code:0` for
-/// public UGC videos). Resolves the CID for the requested `page` (1-based) from
-/// `data.pages[p-1].cid` (falling back to `data.cid` for page 1).
+/// public UGC videos). Resolves the CID and duration for the requested `page`
+/// (1-based) from `data.pages[p-1]` (falling back to the video-level values when
+/// page details are unavailable).
 pub fn fetch_metadata(bvid: &str, page: Option<u32>) -> Result<Metadata, MetadataError> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
@@ -240,25 +241,29 @@ fn fetch_metadata_with(
     if page > data.videos {
         return Err(MetadataError::NotAccessible);
     }
-    // CID for the requested page: pages[p-1].cid, or data.cid for page 1.
-    let cid = data
-        .pages
-        .get((page as usize).saturating_sub(1))
-        .map(|p| p.cid)
-        .unwrap_or(data.cid);
-    let part_title = data
-        .pages
-        .get((page as usize).saturating_sub(1))
+    Ok(metadata_from_view_data(data, page))
+}
+
+fn metadata_from_view_data(data: ViewData, page: u32) -> Metadata {
+    let selected_page = data.pages.get((page as usize).saturating_sub(1));
+    // CID and duration for the requested page, or the video-level values when
+    // the API omits page details.
+    let cid = selected_page.map(|p| p.cid).unwrap_or(data.cid);
+    let part_title = selected_page
         .map(|p| p.part.trim().to_string())
         .filter(|part| !part.is_empty());
-    Ok(Metadata {
+    let duration_seconds = selected_page
+        .map(|p| p.duration)
+        .filter(|duration| *duration > 0)
+        .unwrap_or(data.duration);
+    Metadata {
         bvid: data.bvid,
         cid,
         title: data.title,
         part_title,
         up_name: data.owner.name,
-        duration_ms: (data.duration as u64) * 1000,
-    })
+        duration_ms: duration_seconds.saturating_mul(1000),
+    }
 }
 
 fn metadata_api_url(video_id: &str) -> String {
@@ -393,22 +398,35 @@ pub fn download_audio<F: FnMut(u64, u64)>(
         std::fs::create_dir_all(parent)
             .map_err(|e| MetadataError::Network(format!("create dest dir: {e}")))?;
     }
+    // Never expose a partially downloaded stream as the stage's final
+    // artifact.  The pipeline may proceed as soon as this function returns,
+    // so publish the file only after the byte-count check below succeeds.
+    let partial = dest.with_extension(format!(
+        "{}.part",
+        dest.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("download")
+    ));
+    let _ = std::fs::remove_file(&partial);
     let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(dest)
+    let mut file = std::fs::File::create(&partial)
         .map_err(|e| MetadataError::Network(format!("create dest file: {e}")))?;
     use std::io::{Read, Write};
     let mut buf = vec![0u8; 64 * 1024];
     let mut written = 0u64;
     let mut since_report = 0u64;
     loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| MetadataError::Network(format!("read stream: {e}")))?;
+        let n = reader.read(&mut buf).map_err(|e| {
+            let _ = std::fs::remove_file(&partial);
+            MetadataError::Network(format!("read stream: {e}"))
+        })?;
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n])
-            .map_err(|e| MetadataError::Network(format!("write dest: {e}")))?;
+        file.write_all(&buf[..n]).map_err(|e| {
+            let _ = std::fs::remove_file(&partial);
+            MetadataError::Network(format!("write dest: {e}"))
+        })?;
         written += n as u64;
         since_report += n as u64;
         if since_report >= 256 * 1024 {
@@ -417,6 +435,20 @@ pub fn download_audio<F: FnMut(u64, u64)>(
         }
     }
     file.sync_all().ok();
+    drop(file);
+    if let Some(total) = total {
+        if written != total {
+            let _ = std::fs::remove_file(&partial);
+            return Err(MetadataError::Network(format!(
+                "incomplete audio download: received {} of {} bytes",
+                written, total
+            )));
+        }
+    }
+    std::fs::rename(&partial, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&partial);
+        MetadataError::Network(format!("publish downloaded audio: {e}"))
+    })?;
     on_progress(written, total.unwrap_or(0));
     Ok(written)
 }
@@ -486,6 +518,8 @@ struct Page {
     #[serde(default)]
     #[allow(dead_code)]
     part: String,
+    #[serde(default)]
+    duration: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -560,6 +594,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_truncated_audio_response_before_publishing_file() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc")
+                .unwrap();
+        });
+
+        let dir = std::env::temp_dir().join(format!("bi2read-download-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("source.audio");
+        let error = download_audio(&format!("http://{address}/audio"), &dest, None, |_, _| {})
+            .expect_err("truncated response must not be accepted");
+
+        server.join().unwrap();
+        assert!(
+            error.to_string().contains("incomplete audio download")
+                || error.to_string().contains("read stream"),
+            "unexpected truncation error: {error}"
+        );
+        assert!(!dest.exists());
+        assert!(!dir.join("source.audio.part").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn parses_b23_short_link() {
         let p = parse_url("https://b23.tv/abc123").unwrap();
         assert_eq!(p.bvid, "b23:abc123");
@@ -616,6 +684,7 @@ mod tests {
         assert_eq!(data.videos, 1);
         assert_eq!(data.pages[0].cid, 137649199);
         assert_eq!(data.pages[0].part, "song");
+        assert_eq!(data.pages[0].duration, 213);
     }
 
     #[test]
@@ -625,7 +694,10 @@ mod tests {
             "code": 0, "data": {
                 "bvid": "BV1test", "cid": 100, "title": "t", "duration": 60, "videos": 2,
                 "owner": {"name": "up"},
-                "pages": [{"cid":100,"page":1,"part":"intro"},{"cid":200,"page":2,"part":"song"}]
+                "pages": [
+                    {"cid":100,"page":1,"part":"intro","duration":30},
+                    {"cid":200,"page":2,"part":"song","duration":45}
+                ]
             }
         }"#;
         let v: ApiResponse<ViewData> = serde_json::from_str(json).unwrap();
@@ -635,6 +707,10 @@ mod tests {
         // page 2 -> pages[1].cid (200)
         assert_eq!(data.pages.get(1).map(|p| p.cid), Some(200));
         assert_eq!(data.pages.get(1).map(|p| p.part.as_str()), Some("song"));
+        assert_eq!(data.pages.get(1).map(|p| p.duration), Some(45));
+        let metadata = metadata_from_view_data(data, 2);
+        assert_eq!(metadata.cid, 200);
+        assert_eq!(metadata.duration_ms, 45_000);
     }
 
     #[test]
@@ -707,12 +783,12 @@ mod tests {
     #[test]
     #[ignore]
     fn live_download_and_normalize() {
-        let Some(test_root) = std::env::var_os("BIMYSCRIBE_LIVE_TEST_DIR") else {
-            eprintln!("skipped: BIMYSCRIBE_LIVE_TEST_DIR is not set");
+        let Some(test_root) = std::env::var_os("BI2READ_LIVE_TEST_DIR") else {
+            eprintln!("skipped: BI2READ_LIVE_TEST_DIR is not set");
             return;
         };
         let url = fetch_playurl_audio("BV1GJ411x7h7", 137649199).expect("playurl");
-        let dir = std::path::PathBuf::from(test_root).join("BiMyScribe-live-download");
+        let dir = std::path::PathBuf::from(test_root).join("bi2read-live-download");
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("source.audio");
         let bytes = download_audio(&url, &dest, None, |_, _| {}).expect("download");

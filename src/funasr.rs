@@ -1,13 +1,16 @@
-//! Versioned BiMyScribe FunASR Runtime adapter.
+//! Versioned bi2read FunASR Runtime adapter.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const RUNTIME_MANIFEST: &str = "bimyscribe-runtime.toml";
+pub const RUNTIME_MANIFEST: &str = "bi2read-runtime.toml";
+pub const LEGACY_RUNTIME_MANIFEST: &str = "bimyscribe-runtime.toml";
+const LEGACY_RUNTIME_IDENTITY_ENV: &str = "BIMYSCRIBE_RUNTIME_IDENTITY";
 pub const LEGACY_CONTRACT_VERSION: u32 = 1;
 pub const SUPPORTED_CONTRACT_VERSION: u32 = 2;
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
@@ -28,7 +31,16 @@ fn bundled_runtime_for_executable(executable: &Path) -> Option<PathBuf> {
     let uv = BUNDLED_UV_RELATIVE
         .iter()
         .fold(resources, |path, part| path.join(part));
-    (runtime.join(RUNTIME_MANIFEST).is_file() && uv.is_file()).then_some(runtime)
+    (runtime_manifest_path(&runtime).is_file() && uv.is_file()).then_some(runtime)
+}
+
+pub(crate) fn runtime_manifest_path(project_dir: &Path) -> PathBuf {
+    let current = project_dir.join(RUNTIME_MANIFEST);
+    if current.is_file() {
+        current
+    } else {
+        project_dir.join(LEGACY_RUNTIME_MANIFEST)
+    }
 }
 
 /// Resolve the Runtime used by the application. An explicit project always
@@ -264,8 +276,12 @@ fn matching_ready_record(
 
 fn runtime_fingerprint(project_dir: &Path, manifest: &RuntimeManifest) -> Result<u64, FunasrError> {
     let mut hasher = DefaultHasher::new();
+    let manifest_file = runtime_manifest_path(project_dir)
+        .strip_prefix(project_dir)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| PathBuf::from(RUNTIME_MANIFEST));
     for relative in [
-        Some(PathBuf::from(RUNTIME_MANIFEST)),
+        Some(manifest_file),
         Some(manifest.output_schema_file.clone()),
         manifest.entrypoint.clone(),
         manifest.compose_file.clone(),
@@ -447,7 +463,7 @@ fn native_uv_environment(
     .env("TORCH_HOME", runtime_data.join("torch").as_os_str())
     .env("TMPDIR", runtime_data.join("tmp").as_os_str())
     .env(
-        "BIMYSCRIBE_FUNASR_CACHE_DIR",
+        "BI2READ_FUNASR_CACHE_DIR",
         runtime_data.join("cache").as_os_str(),
     )
 }
@@ -480,7 +496,7 @@ pub fn load_runtime(project_dir: &Path) -> Result<RuntimeManifest, FunasrError> 
         )));
     }
     let data =
-        std::fs::read_to_string(project_dir.join(RUNTIME_MANIFEST)).map_err(FunasrError::Read)?;
+        std::fs::read_to_string(runtime_manifest_path(project_dir)).map_err(FunasrError::Read)?;
     let manifest: RuntimeManifest =
         toml::from_str(&data).map_err(|error| FunasrError::Manifest(error.to_string()))?;
     if !matches!(
@@ -559,13 +575,144 @@ fn validate_runtime_relative_path(path: &Path) -> Result<(), FunasrError> {
     Ok(())
 }
 
+/// Whether a bounded probe of the Docker engine succeeded.
+///
+/// Docker Desktop's macOS host process (socket, menu bar panel) can keep
+/// reporting healthy while the Linux VM's engine has lost network reachability
+/// (issue 06's "stale socket" failure mode). A liveness probe with an explicit
+/// timeout is the only way to observe that from the host side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerLiveness {
+    Reachable,
+    Unreachable,
+}
+
+fn probe_docker_engine() -> ContainerLiveness {
+    match crate::process::capture_with_timeout(
+        vec![
+            "docker".into(),
+            "version".into(),
+            "--format".into(),
+            "{{.Server.Version}}".into(),
+        ],
+        Duration::from_secs(10),
+    ) {
+        Ok(Some(output)) if output.code == 0 && !output.stdout.trim().is_empty() => {
+            ContainerLiveness::Reachable
+        }
+        _ => ContainerLiveness::Unreachable,
+    }
+}
+
+/// True if the Docker engine responds to `docker version` within 10 seconds.
+/// Unlike a bare `docker ps`, this call is bounded so a stale socket (engine
+/// unreachable, host panel still "healthy") cannot hang the caller forever.
+pub fn docker_engine_reachable() -> bool {
+    matches!(probe_docker_engine(), ContainerLiveness::Reachable)
+}
+
 pub fn docker_is_running() -> bool {
-    crate::process::run(crate::process::SubprocessSpec::new(vec![
-        "docker".into(),
-        "ps".into(),
-    ]))
-    .map(|code| code == 0)
-    .unwrap_or(false)
+    docker_engine_reachable()
+}
+
+/// `docker inspect` result for a container this process owns, used to
+/// distinguish an OOM kill (exit 137, `State.OOMKilled=true`) from any other
+/// non-zero exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerExit {
+    pub oom_killed: bool,
+    pub exit_code: Option<i32>,
+}
+
+/// Classification of a finished Runtime process, folding in container-level
+/// evidence when the backend is Docker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeExitClass {
+    Success,
+    OutOfMemory,
+    Failed,
+}
+
+/// Classify a Runtime process exit. `container` is `None` for the native-uv
+/// backend or when `docker inspect` could not be read; `docker_backend` gates
+/// the Docker-specific "exit 137 without confirmed evidence" heuristic so a
+/// native-uv exit code of 137 (which has no Docker meaning) is never
+/// misclassified as an out-of-memory kill.
+pub fn classify_runtime_exit(
+    exit: i32,
+    container: Option<&ContainerExit>,
+    docker_backend: bool,
+) -> RuntimeExitClass {
+    let oom_killed = container.is_some_and(|container| container.oom_killed);
+    if exit == 0 && !oom_killed {
+        RuntimeExitClass::Success
+    } else if oom_killed || (docker_backend && exit == 137) {
+        RuntimeExitClass::OutOfMemory
+    } else {
+        RuntimeExitClass::Failed
+    }
+}
+
+/// Total wait budget for one transcription run: at least 60 minutes, or ten
+/// times the source audio duration for long inputs, whichever is larger.
+fn runtime_timeout(duration_ms: Option<u64>) -> Duration {
+    const MINIMUM: Duration = Duration::from_secs(60 * 60);
+    let scaled = duration_ms
+        .map(|duration_ms| Duration::from_millis(duration_ms.saturating_mul(10)))
+        .unwrap_or(Duration::ZERO);
+    MINIMUM.max(scaled)
+}
+
+/// Read `State.OOMKilled`/`State.ExitCode` for a container this process owns.
+/// `None` covers both "the bounded `docker inspect` call itself timed out"
+/// (engine unreachable) and "the output could not be parsed" — callers must
+/// treat both as "no OOM evidence", not as "confirmed not OOM".
+fn inspect_container_exit(name: &str) -> Option<ContainerExit> {
+    let output = crate::process::capture_with_timeout(
+        vec![
+            "docker".into(),
+            "inspect".into(),
+            "--format".into(),
+            "{{.State.OOMKilled}}|{{.State.ExitCode}}".into(),
+            name.into(),
+        ],
+        Duration::from_secs(5),
+    )
+    .ok()??;
+    if output.code != 0 {
+        return None;
+    }
+    let (oom, code) = output.stdout.trim().split_once('|')?;
+    Some(ContainerExit {
+        oom_killed: oom.trim() == "true",
+        exit_code: code.trim().parse::<i32>().ok(),
+    })
+}
+
+/// Evidence written to `logs/runtime-exit.json` on every terminal path of a
+/// Docker-backed (or native-uv) transcription run, so a later investigation
+/// does not depend on `docker inspect` still having the container around.
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeExitRecord {
+    exit_code: Option<i32>,
+    oom_killed: bool,
+    docker_reachable: bool,
+    classification: String,
+    recorded_at: String,
+}
+
+/// Best-effort: a failure to persist this evidence must never mask the real
+/// transcription outcome, so errors are swallowed.
+fn write_runtime_exit_record(job_dir: &Path, record: &RuntimeExitRecord) {
+    let path = job_dir.join("logs").join("runtime-exit.json");
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if let Ok(data) = serde_json::to_vec_pretty(record) {
+        let _ = crate::jobs::atomic_write(&path, &data);
+    }
 }
 
 pub fn validate_runtime(
@@ -586,8 +733,7 @@ pub fn validate_runtime(
     std::fs::create_dir_all(&output).map_err(FunasrError::Read)?;
     std::fs::create_dir_all(model_cache).map_err(FunasrError::Read)?;
     std::fs::create_dir_all(runtime_cache).map_err(FunasrError::Read)?;
-    std::fs::write(input.join("sentinel"), b"bimyscribe-runtime-probe")
-        .map_err(FunasrError::Read)?;
+    std::fs::write(input.join("sentinel"), b"bi2read-runtime-probe").map_err(FunasrError::Read)?;
 
     let config_exit = crate::process::run(compose_spec(
         project_dir,
@@ -655,10 +801,10 @@ fn compose_spec(
     argv.extend(tail);
     crate::process::SubprocessSpec::new(argv)
         .cwd(project_dir)
-        .env("BIMYSCRIBE_FUNASR_INPUT_DIR", input.as_os_str())
-        .env("BIMYSCRIBE_FUNASR_OUTPUT_DIR", output.as_os_str())
-        .env("BIMYSCRIBE_FUNASR_MODEL_CACHE_DIR", model_cache.as_os_str())
-        .env("BIMYSCRIBE_FUNASR_CACHE_DIR", runtime_cache.as_os_str())
+        .env("BI2READ_FUNASR_INPUT_DIR", input.as_os_str())
+        .env("BI2READ_FUNASR_OUTPUT_DIR", output.as_os_str())
+        .env("BI2READ_FUNASR_MODEL_CACHE_DIR", model_cache.as_os_str())
+        .env("BI2READ_FUNASR_CACHE_DIR", runtime_cache.as_os_str())
 }
 
 fn docker_transcribe_tail(
@@ -668,17 +814,19 @@ fn docker_transcribe_tail(
     instance_nonce: &str,
     language: crate::jobs::SourceLanguage,
 ) -> Vec<String> {
+    // No `--rm`: the container must survive its exit so the App can
+    // `docker inspect` `State.OOMKilled`/`State.ExitCode` before deleting it
+    // itself (see `remove_owned_container`).
     vec![
         "run".into(),
-        "--rm".into(),
         "--name".into(),
         container.into(),
         "--label".into(),
-        "com.bimyscribe.app=true".into(),
+        "com.bi2read.app=true".into(),
         "--label".into(),
-        format!("com.bimyscribe.job={job_id}"),
+        format!("com.bi2read.job={job_id}"),
         "--label".into(),
-        format!("com.bimyscribe.instance={instance_nonce}"),
+        format!("com.bi2read.instance={instance_nonce}"),
         manifest
             .transcribe_service
             .clone()
@@ -726,13 +874,16 @@ fn native_uv_spec(
         ]),
         runtime_data,
     )
-    .env("BIMYSCRIBE_RUNTIME_IDENTITY", runtime_identity)
+    .env("BI2READ_RUNTIME_IDENTITY", runtime_identity)
+    // Native Runtime v2.0.0 and earlier read the pre-rename variable; set both so
+    // they keep echoing the frozen identity into normalized.json.
+    .env(LEGACY_RUNTIME_IDENTITY_ENV, runtime_identity)
     .cwd(project_dir)
 }
 
 pub fn container_name(job_id: &uuid::Uuid, instance_nonce: &str) -> String {
     let nonce = &instance_nonce[..instance_nonce.len().min(12)];
-    format!("bimyscribe-{nonce}-{job_id}")
+    format!("bi2read-{nonce}-{job_id}")
 }
 
 pub struct TranscribeRequest<'a> {
@@ -812,6 +963,10 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<TranscribeOutcome, FunasrEr
                 return Err(FunasrError::DockerUnavailable);
             }
             let cname = container_name(request.job_id, request.instance_nonce);
+            // Best effort: without `--rm` a container from an earlier crashed
+            // attempt with the same job/instance could still hold this name,
+            // which would make `docker run --name` fail with a conflict.
+            let _ = remove_owned_container(&cname, request.job_id, request.instance_nonce);
             let tail = docker_transcribe_tail(
                 &manifest,
                 &cname,
@@ -830,7 +985,7 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<TranscribeOutcome, FunasrEr
                     tail,
                 )
                 .env(
-                    "BIMYSCRIBE_RUNTIME_IDENTITY",
+                    "BI2READ_RUNTIME_IDENTITY",
                     request.selection.runtime_identity.as_str(),
                 )
                 .log(request.log_path),
@@ -840,13 +995,80 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<TranscribeOutcome, FunasrEr
     };
     let mut handle = crate::process::spawn(spec)
         .map_err(|error| FunasrError::Process(format!("启动 Runtime：{error}")))?;
+    let is_docker_backend = owned_container.is_some();
+    let start = std::time::Instant::now();
+    let deadline = start + runtime_timeout(request.duration_ms);
+    let reachability_interval = Duration::from_secs(5);
+    let mut last_reachability_check = start;
+    let mut consecutive_unreachable = 0u32;
+    let mut last_reachable = true;
     let exit = loop {
         if request.cancel_token.is_cancelled() {
             let _ = handle.cancel();
             if let Some(cname) = &owned_container {
                 let _ = remove_owned_container(cname, request.job_id, request.instance_nonce);
             }
+            let _ = std::fs::remove_file(&input_copy);
+            write_runtime_exit_record(
+                request.job_dir,
+                &RuntimeExitRecord {
+                    exit_code: None,
+                    oom_killed: false,
+                    docker_reachable: last_reachable,
+                    classification: "cancelled".into(),
+                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
             return Err(FunasrError::Cancelled);
+        }
+        let now = std::time::Instant::now();
+        if is_docker_backend && now.duration_since(last_reachability_check) >= reachability_interval
+        {
+            last_reachability_check = now;
+            last_reachable = docker_engine_reachable();
+            if last_reachable {
+                consecutive_unreachable = 0;
+            } else {
+                consecutive_unreachable += 1;
+                if consecutive_unreachable >= 3 {
+                    let _ = handle.cancel();
+                    if let Some(cname) = &owned_container {
+                        let _ =
+                            remove_owned_container(cname, request.job_id, request.instance_nonce);
+                    }
+                    let _ = std::fs::remove_file(&input_copy);
+                    write_runtime_exit_record(
+                        request.job_dir,
+                        &RuntimeExitRecord {
+                            exit_code: None,
+                            oom_killed: false,
+                            docker_reachable: false,
+                            classification: "docker-unavailable".into(),
+                            recorded_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                    return Err(FunasrError::DockerUnavailable);
+                }
+            }
+        }
+        if now >= deadline {
+            let _ = handle.cancel();
+            if let Some(cname) = &owned_container {
+                let _ = remove_owned_container(cname, request.job_id, request.instance_nonce);
+            }
+            let _ = std::fs::remove_file(&input_copy);
+            let minutes = runtime_timeout(request.duration_ms).as_secs() / 60;
+            write_runtime_exit_record(
+                request.job_dir,
+                &RuntimeExitRecord {
+                    exit_code: None,
+                    oom_killed: false,
+                    docker_reachable: last_reachable,
+                    classification: "timeout".into(),
+                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            return Err(FunasrError::Timeout(minutes));
         }
         if handle.is_running() {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -856,8 +1078,78 @@ pub fn run(request: TranscribeRequest<'_>) -> Result<TranscribeOutcome, FunasrEr
                 .map_err(|error| FunasrError::Process(error.to_string()))?;
         }
     };
-    if exit != 0 {
+    if let Some(cname) = &owned_container {
+        let container_exit = inspect_container_exit(cname);
+        let _ = remove_owned_container(cname, request.job_id, request.instance_nonce);
+        let oom_killed = container_exit.is_some_and(|container| container.oom_killed);
+        match classify_runtime_exit(exit, container_exit.as_ref(), true) {
+            RuntimeExitClass::Success => {
+                write_runtime_exit_record(
+                    request.job_dir,
+                    &RuntimeExitRecord {
+                        exit_code: Some(exit),
+                        oom_killed,
+                        docker_reachable: true,
+                        classification: "success".into(),
+                        recorded_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+            }
+            RuntimeExitClass::OutOfMemory => {
+                let _ = std::fs::remove_file(input_copy);
+                write_runtime_exit_record(
+                    request.job_dir,
+                    &RuntimeExitRecord {
+                        exit_code: Some(exit),
+                        oom_killed,
+                        docker_reachable: true,
+                        classification: "out-of-memory".into(),
+                        recorded_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                return Err(FunasrError::OutOfMemory(format!(
+                    "退出码 {exit}，OOMKilled={oom_killed}"
+                )));
+            }
+            RuntimeExitClass::Failed => {
+                let _ = std::fs::remove_file(input_copy);
+                write_runtime_exit_record(
+                    request.job_dir,
+                    &RuntimeExitRecord {
+                        exit_code: Some(exit),
+                        oom_killed,
+                        docker_reachable: true,
+                        classification: "failed".into(),
+                        recorded_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                return Err(FunasrError::Process(format!("Runtime 退出码 {exit}")));
+            }
+        }
+    } else if exit != 0 {
+        let _ = std::fs::remove_file(input_copy);
+        write_runtime_exit_record(
+            request.job_dir,
+            &RuntimeExitRecord {
+                exit_code: Some(exit),
+                oom_killed: false,
+                docker_reachable: true,
+                classification: "failed".into(),
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
         return Err(FunasrError::Process(format!("Runtime 退出码 {exit}")));
+    } else {
+        write_runtime_exit_record(
+            request.job_dir,
+            &RuntimeExitRecord {
+                exit_code: Some(exit),
+                oom_killed: false,
+                docker_reachable: true,
+                classification: "success".into(),
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
     }
 
     let normalized_json = output_dir.join("normalized.json");
@@ -882,7 +1174,7 @@ fn remove_owned_container(container: &str, job_id: &uuid::Uuid, instance_nonce: 
         .args([
             "inspect",
             "--format",
-            "{{ index .Config.Labels \"com.bimyscribe.app\" }}|{{ index .Config.Labels \"com.bimyscribe.job\" }}|{{ index .Config.Labels \"com.bimyscribe.instance\" }}",
+            "{{ index .Config.Labels \"com.bi2read.app\" }}|{{ index .Config.Labels \"com.bi2read.job\" }}|{{ index .Config.Labels \"com.bi2read.instance\" }}",
             container,
         ])
         .output();
@@ -898,7 +1190,7 @@ fn remove_owned_container(container: &str, job_id: &uuid::Uuid, instance_nonce: 
 }
 
 /// Remove only containers whose labels prove they belong to a persisted job
-/// from an earlier BiMyScribe process instance. Unknown containers are left
+/// from an earlier bi2read process instance. Unknown containers are left
 /// untouched.
 pub fn cleanup_residual_containers<'a>(
     job_ids: impl IntoIterator<Item = &'a uuid::Uuid>,
@@ -910,7 +1202,7 @@ pub fn cleanup_residual_containers<'a>(
             "ps",
             "-a",
             "--filter",
-            "label=com.bimyscribe.app=true",
+            "label=com.bi2read.app=true",
             "--format",
             "{{.ID}}",
         ])
@@ -924,7 +1216,7 @@ pub fn cleanup_residual_containers<'a>(
             .args([
                 "inspect",
                 "--format",
-                "{{ index .Config.Labels \"com.bimyscribe.job\" }}|{{ index .Config.Labels \"com.bimyscribe.instance\" }}",
+                "{{ index .Config.Labels \"com.bi2read.job\" }}|{{ index .Config.Labels \"com.bi2read.instance\" }}",
                 container,
             ])
             .output();
@@ -1069,12 +1361,18 @@ pub enum FunasrError {
     Io(String),
     #[error("Docker：{0}")]
     Docker(String),
-    #[error("Docker Desktop 未运行")]
+    #[error("Docker 引擎不可用：Docker Desktop 未运行或 API 无响应")]
     DockerUnavailable,
     #[error("Runtime 进程：{0}")]
     Process(String),
     #[error("任务已取消")]
     Cancelled,
+    #[error(
+        "runtime-out-of-memory: Runtime 在转写时内存不足（{0}）。请为 Docker Desktop 分配更多内存，或为该任务选择明确的中文/英文语言后重试"
+    )]
+    OutOfMemory(String),
+    #[error("runtime-timeout: Runtime 超过 {0} 分钟未完成，已停止；检查 Docker 引擎状态后重试")]
+    Timeout(u64),
 }
 
 #[cfg(test)]
@@ -1082,10 +1380,8 @@ mod tests {
     use super::*;
 
     fn runtime_fixture(manifest: &str, files: &[&str]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "bimyscribe-runtime-manifest-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bi2read-runtime-manifest-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("schemas")).unwrap();
         std::fs::write(root.join(RUNTIME_MANIFEST), manifest).unwrap();
         for file in files {
@@ -1143,6 +1439,30 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     }
 
     #[test]
+    fn loads_legacy_runtime_manifest_name() {
+        let root = runtime_fixture(
+            r#"contract_version = 1
+backend = "docker-compose"
+compose_file = "docker-compose.yml"
+transcribe_service = "transcribe"
+probe_service = "probe"
+output_schema_version = 1
+output_schema_file = "schemas/normalized-v1.schema.json"
+"#,
+            &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
+        );
+        std::fs::rename(
+            root.join(RUNTIME_MANIFEST),
+            root.join(LEGACY_RUNTIME_MANIFEST),
+        )
+        .unwrap();
+
+        let manifest = load_runtime(&root).unwrap();
+        assert_eq!(manifest.backend, RuntimeBackend::DockerCompose);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn loads_docker_contract_without_requiring_native_files() {
         let root = runtime_fixture(
             r#"contract_version = 1
@@ -1179,7 +1499,7 @@ known_limitations = ["仅用于契约测试"]
             &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
         );
         let data_dir =
-            std::env::temp_dir().join(format!("bimyscribe-runtime-data-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-runtime-data-{}", uuid::Uuid::new_v4()));
         let description =
             describe_runtime(&root, &data_dir, crate::jobs::RuntimeSource::External).unwrap();
         assert_eq!(description.contract_version, 2);
@@ -1224,7 +1544,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
         );
         let runtime_data =
-            std::env::temp_dir().join(format!("bimyscribe-v1-data-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-v1-data-{}", uuid::Uuid::new_v4()));
         let selection = crate::jobs::TranscriptionSelection::new(
             crate::jobs::RuntimeSource::External,
             root.canonicalize().unwrap(),
@@ -1235,8 +1555,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             crate::jobs::SourceLanguage::En,
             crate::jobs::CreatedFrom::Cli,
         );
-        let job_dir =
-            std::env::temp_dir().join(format!("bimyscribe-v1-job-{}", uuid::Uuid::new_v4()));
+        let job_dir = std::env::temp_dir().join(format!("bi2read-v1-job-{}", uuid::Uuid::new_v4()));
         let result = run(TranscribeRequest {
             job_dir: &job_dir,
             normalized_wav: &job_dir.join("normalized.wav"),
@@ -1289,6 +1608,12 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             .argv
             .windows(2)
             .any(|pair| pair == ["--language", "en"]));
+        for key in ["BI2READ_RUNTIME_IDENTITY", LEGACY_RUNTIME_IDENTITY_ENV] {
+            assert!(native
+                .env
+                .iter()
+                .any(|(name, value)| name == key && value == "contract-v2:native-uv:test"));
+        }
 
         let docker_root = runtime_fixture(
             r#"contract_version = 2
@@ -1305,7 +1630,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
         let id = uuid::Uuid::new_v4();
         let tail = docker_transcribe_tail(
             &docker_manifest,
-            "bimyscribe-test-container",
+            "bi2read-test-container",
             &id,
             "instance",
             crate::jobs::SourceLanguage::En,
@@ -1322,7 +1647,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     #[test]
     fn parses_normalized_schema_v1() {
         let path =
-            std::env::temp_dir().join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-schema-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"{"schema_version":1,"segments":[{"text":"你好","start_ms":0,"end_ms":500,"speaker":"speaker-1"},{"text":"世界","start_ms":600,"end_ms":900,"speaker":null}]}"#,
@@ -1338,7 +1663,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     #[test]
     fn parses_optional_runtime_result_fields() {
         let path =
-            std::env::temp_dir().join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-schema-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"{"schema_version":1,"reported_language":"en","model":"model-en","runtime_identity":"runtime-en","segments":[{"text":"hello","start_ms":0,"end_ms":500,"speaker":"speaker-1"}]}"#,
@@ -1366,8 +1691,8 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             r#"{"schema_version":1,"segments":[{"text":"too late","start_ms":0,"end_ms":1001,"speaker":null}]}"#,
         ];
         for document in documents {
-            let path = std::env::temp_dir()
-                .join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("bi2read-schema-{}.json", uuid::Uuid::new_v4()));
             std::fs::write(&path, document).unwrap();
             let duration = document.contains("too late").then_some(1_000);
             assert!(matches!(
@@ -1392,7 +1717,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             &["docker-compose.yml", "schemas/normalized-v1.schema.json"],
         );
         let runtime_data =
-            std::env::temp_dir().join(format!("bimyscribe-identity-data-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-identity-data-{}", uuid::Uuid::new_v4()));
         let before =
             describe_runtime(&root, &runtime_data, crate::jobs::RuntimeSource::External).unwrap();
         std::fs::write(root.join("schemas/normalized-v1.schema.json"), "changed").unwrap();
@@ -1407,7 +1732,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             crate::jobs::CreatedFrom::Cli,
         );
         let job_dir =
-            std::env::temp_dir().join(format!("bimyscribe-identity-job-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-identity-job-{}", uuid::Uuid::new_v4()));
         let result = run(TranscribeRequest {
             job_dir: &job_dir,
             normalized_wav: &job_dir.join("normalized.wav"),
@@ -1426,7 +1751,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     #[test]
     fn rejects_unknown_schema_version() {
         let path =
-            std::env::temp_dir().join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-schema-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&path, r#"{"schema_version":2,"segments":[]}"#).unwrap();
         assert!(matches!(
             parse_transcript(&path),
@@ -1441,8 +1766,8 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             r#"{"schema_version":1,"segments":[{"text":"你好","start_ms":0,"end_ms":1}]}"#,
             r#"{"schema_version":1,"segments":[{"text":"你好","start_ms":0,"end_ms":1,"speaker":7}]}"#,
         ] {
-            let path = std::env::temp_dir()
-                .join(format!("bimyscribe-schema-{}.json", uuid::Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("bi2read-schema-{}.json", uuid::Uuid::new_v4()));
             std::fs::write(&path, document).unwrap();
             assert!(parse_transcript(&path).is_err());
             std::fs::remove_file(path).ok();
@@ -1465,7 +1790,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
             ("HF_HOME", "huggingface"),
             ("TORCH_HOME", "torch"),
             ("TMPDIR", "tmp"),
-            ("BIMYSCRIBE_FUNASR_CACHE_DIR", "cache"),
+            ("BI2READ_FUNASR_CACHE_DIR", "cache"),
         ] {
             assert_eq!(
                 environment.get(std::ffi::OsStr::new(name)),
@@ -1488,12 +1813,10 @@ output_schema_file = "schemas/normalized-v1.schema.json"
 
     #[test]
     fn discovers_complete_runtime_next_to_packaged_executable() {
-        let root = std::env::temp_dir().join(format!(
-            "bimyscribe-packaged-runtime-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let executable = root.join("BiMyScribe.app/Contents/MacOS/bimyscribe");
-        let resources = root.join("BiMyScribe.app/Contents/Resources");
+        let root =
+            std::env::temp_dir().join(format!("bi2read-packaged-runtime-{}", uuid::Uuid::new_v4()));
+        let executable = root.join("bi2read.app/Contents/MacOS/bi2read");
+        let resources = root.join("bi2read.app/Contents/Resources");
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::create_dir_all(resources.join("runtime")).unwrap();
         std::fs::create_dir_all(resources.join("bin")).unwrap();
@@ -1510,11 +1833,11 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     #[test]
     fn packaged_runtime_requires_both_manifest_and_uv() {
         let root = std::env::temp_dir().join(format!(
-            "bimyscribe-incomplete-package-{}",
+            "bi2read-incomplete-package-{}",
             uuid::Uuid::new_v4()
         ));
-        let executable = root.join("BiMyScribe.app/Contents/MacOS/bimyscribe");
-        let resources = root.join("BiMyScribe.app/Contents/Resources");
+        let executable = root.join("bi2read.app/Contents/MacOS/bi2read");
+        let resources = root.join("bi2read.app/Contents/Resources");
         std::fs::create_dir_all(resources.join("runtime")).unwrap();
         std::fs::write(resources.join("runtime").join(RUNTIME_MANIFEST), "fixture").unwrap();
 
@@ -1526,7 +1849,95 @@ output_schema_file = "schemas/normalized-v1.schema.json"
     fn container_name_contains_instance_and_job() {
         let id = uuid::Uuid::new_v4();
         let name = container_name(&id, "0123456789abcdef");
-        assert_eq!(name, format!("bimyscribe-0123456789ab-{id}"));
+        assert_eq!(name, format!("bi2read-0123456789ab-{id}"));
+    }
+
+    #[test]
+    fn classify_runtime_exit_covers_success_oom_and_failed() {
+        // Clean exit, no container evidence at all (native-uv path).
+        assert_eq!(
+            classify_runtime_exit(0, None, false),
+            RuntimeExitClass::Success
+        );
+        // Docker backend, exit 137 with no inspect evidence (engine gone
+        // before `docker inspect` could run): still classified as OOM.
+        assert_eq!(
+            classify_runtime_exit(137, None, true),
+            RuntimeExitClass::OutOfMemory
+        );
+        // `docker inspect` confirms State.OOMKilled regardless of exit code.
+        assert_eq!(
+            classify_runtime_exit(
+                1,
+                Some(&ContainerExit {
+                    oom_killed: true,
+                    exit_code: Some(137),
+                }),
+                true,
+            ),
+            RuntimeExitClass::OutOfMemory
+        );
+        // Exit 137 on the native-uv backend has no Docker meaning; it must
+        // not be misread as an OOM kill.
+        assert_eq!(
+            classify_runtime_exit(137, None, false),
+            RuntimeExitClass::Failed
+        );
+        // Any other non-zero exit without OOM evidence is a plain failure.
+        assert_eq!(
+            classify_runtime_exit(
+                1,
+                Some(&ContainerExit {
+                    oom_killed: false,
+                    exit_code: Some(1),
+                }),
+                true,
+            ),
+            RuntimeExitClass::Failed
+        );
+    }
+
+    #[test]
+    fn runtime_timeout_floors_at_sixty_minutes() {
+        assert_eq!(runtime_timeout(None), Duration::from_secs(60 * 60));
+        // 30s audio * 10 = 5 minutes, well under the 60 minute floor.
+        assert_eq!(runtime_timeout(Some(30_000)), Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn runtime_timeout_scales_with_long_audio() {
+        // 10 minute audio * 10 = 100 minutes, above the 60 minute floor.
+        let ten_minutes_ms = 10 * 60 * 1_000;
+        assert_eq!(
+            runtime_timeout(Some(ten_minutes_ms)),
+            Duration::from_secs(100 * 60)
+        );
+    }
+
+    #[test]
+    fn runtime_exit_record_is_valid_json() {
+        let dir =
+            std::env::temp_dir().join(format!("bi2read-runtime-exit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_runtime_exit_record(
+            &dir,
+            &RuntimeExitRecord {
+                exit_code: Some(137),
+                oom_killed: true,
+                docker_reachable: true,
+                classification: "out-of-memory".into(),
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+        let path = dir.join("logs").join("runtime-exit.json");
+        let data = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(value["exit_code"], 137);
+        assert_eq!(value["oom_killed"], true);
+        assert_eq!(value["docker_reachable"], true);
+        assert_eq!(value["classification"], "out-of-memory");
+        assert!(value["recorded_at"].as_str().is_some());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1537,10 +1948,10 @@ output_schema_file = "schemas/normalized-v1.schema.json"
                 .map(PathBuf::from)
                 .unwrap_or_else(|| panic!("{name} must be set for this ignored test"))
         };
-        let project_dir = required_path("BIMYSCRIBE_RUNTIME_PROJECT");
-        let runtime_data = required_path("BIMYSCRIBE_RUNTIME_DATA_DIR");
-        let normalized_wav = required_path("BIMYSCRIBE_RUNTIME_SMOKE_WAV");
-        let smoke_root = required_path("BIMYSCRIBE_RUNTIME_SMOKE_ROOT");
+        let project_dir = required_path("BI2READ_RUNTIME_PROJECT");
+        let runtime_data = required_path("BI2READ_RUNTIME_DATA_DIR");
+        let normalized_wav = required_path("BI2READ_RUNTIME_SMOKE_WAV");
+        let smoke_root = required_path("BI2READ_RUNTIME_SMOKE_ROOT");
         let job_dir = smoke_root.join(format!("job-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&job_dir).unwrap();
 
@@ -1572,10 +1983,10 @@ output_schema_file = "schemas/normalized-v1.schema.json"
                 .map(PathBuf::from)
                 .unwrap_or_else(|| panic!("{name} must be set for this ignored test"))
         };
-        let project_dir = required_path("BIMYSCRIBE_NATIVE_RUNTIME_PROJECT");
-        let runtime_data = required_path("BIMYSCRIBE_NATIVE_RUNTIME_DATA_DIR");
-        let normalized_wav = required_path("BIMYSCRIBE_NATIVE_RUNTIME_SMOKE_WAV");
-        let smoke_root = required_path("BIMYSCRIBE_NATIVE_RUNTIME_SMOKE_ROOT");
+        let project_dir = required_path("BI2READ_NATIVE_RUNTIME_PROJECT");
+        let runtime_data = required_path("BI2READ_NATIVE_RUNTIME_DATA_DIR");
+        let normalized_wav = required_path("BI2READ_NATIVE_RUNTIME_SMOKE_WAV");
+        let smoke_root = required_path("BI2READ_NATIVE_RUNTIME_SMOKE_ROOT");
         let job_dir = smoke_root.join(format!("job-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&job_dir).unwrap();
 

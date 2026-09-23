@@ -30,13 +30,8 @@ export component JobRowView inherits Rectangle {
     // Single source of truth for stage-semantic colors (dot / bar / meta
     // text). Resolved once so every visual below reads the same kind.
     property <string> kind: StageStyle.kind(root.status-name, root.stage-name, root.has-error, root.total-progress);
-    // Meta-info line color: failed rows read `danger`, completed rows
-    // read `success`, everything else stays `text-secondary`.
-    // Driven by `kind`, not by `has-error`: a job whose stage is `failed`
-    // without an error string must still read as failed here, so the meta
-    // line can never disagree with the dot and the bar.
-    property <color> meta-color: root.kind == "failed" ? Theme.danger
-        : (root.kind == "done" ? Theme.success : Theme.text-secondary);
+    property <bool> progress-indeterminate: root.indeterminate
+        && (root.kind == "download" || root.kind == "transcribe" || root.kind == "polish");
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked();
     callback navigate(int);
@@ -74,9 +69,11 @@ export component JobRowView inherits Rectangle {
         background: root.selected ? Theme.surface-selected
                  : touch.pressed ? Theme.surface-pressed
                  : touch.has-hover ? Theme.surface-hover : Theme.surface;
+        // Inactive cards stay quiet, including failures; status icon/text carry
+        // the error meaning. Only selection and keyboard focus get a strong edge.
         border-color: root.has-focus ? Theme.focus-ring
-                     : (root.has-error ? Theme.danger : transparent);
-        border-width: root.has-focus ? 2px : (root.has-error ? 1px : 0px);
+                     : root.selected ? Theme.border-strong : Theme.border;
+        border-width: root.has-focus ? 2px : 1px;
 
         if root.selected : Rectangle {
             x: 0px;
@@ -84,82 +81,75 @@ export component JobRowView inherits Rectangle {
             width: 3px;
             height: parent.height - 2 * Theme.space-sm;
             border-radius: 1.5px;
-            background: Theme.accent;
+            background: Theme.selection;
         }
 
-        HorizontalLayout {
-            spacing: Theme.space-sm;
+        VerticalLayout {
             padding-left: Theme.space-sm;
             padding-right: Theme.space-sm;
             padding-top: Theme.space-xs;
             padding-bottom: Theme.space-xs;
+            spacing: Theme.space-xxs;
 
-            // Status pip
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                y: (parent.height - self.height) / 2;
-                border-radius: self.width / 2;
-                background: StageStyle.dot(root.kind);
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+                font-size: Theme.font-body;
+                font-weight: 600;
+                height: 20px;
+                overflow: elide;
+                vertical-alignment: center;
             }
-
-            VerticalLayout {
-                spacing: 4px;
-                HorizontalLayout {
-                    spacing: Theme.space-xs;
-                    Text {
-                        text: root.title;
-                        color: Theme.text-primary;
-                        font-size: Theme.font-body;
-                        font-weight: 600;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                    }
-                    Text {
-                        text: root.display-elapsed;
-                        color: Theme.text-muted;
-                        font-size: Theme.font-caption;
-                    }
+            HorizontalLayout {
+                height: 16px;
+                spacing: Theme.space-xs;
+                Text {
+                    text: root.bvid + (root.page > 1 ? "-P" + root.page : "");
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    vertical-alignment: center;
                 }
-                HorizontalLayout {
-                    spacing: Theme.space-xs;
-                    Text {
-                        text: root.bvid + (root.page > 1 ? "-P" + root.page : "");
-                        color: root.meta-color;
-                        font-size: Theme.font-caption;
-                    }
-                    Text {
-                        text: "·";
-                        color: root.meta-color;
-                        font-size: Theme.font-caption;
-                    }
-                    // A trailing "✓" / percentage `Text` used to sit here,
-                    // duplicating what this stage-label text already says
-                    // (e.g. "已完成 · 100%" followed by a lone "✓"). It ate
-                    // width from this elide-able text and caused the
-                    // percentage itself to get truncated first (issue 14
-                    // defect 5); the stage label + success/danger color
-                    // already carries the same information, so the
-                    // duplicate is removed rather than re-balanced.
-                    Text {
-                        text: root.stage-label
-                            + (root.has-error ? ""
-                                : (root.indeterminate ? " · 处理中" : " · " + root.stage-progress + "%"));
-                        color: root.meta-color;
-                        font-size: Theme.font-caption;
-                        horizontal-stretch: 1;
-                        overflow: elide;
-                    }
+                Text {
+                    text: root.display-elapsed;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
                 }
-                ProgressBar {
-                    // The bar and trailing number share one whole-job meaning.
-                    value: root.total-progress;
-                    indeterminate: root.indeterminate;
-                    height: 4px;
-                    label: "任务总进度";
-                    bar-color: StageStyle.bar(root.kind);
-                    track-color: root.selected ? Theme.selected-track : Theme.track;
+            }
+            HorizontalLayout {
+                height: 16px;
+                spacing: Theme.space-xs;
+                Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 3px;
+                    background: StageStyle.dot(root.kind);
                 }
+                Text {
+                    text: StageStyle.label(root.status-name, root.stage-name, root.has-error, root.total-progress, root.status-label);
+                    color: StageStyle.badge-text-color(root.kind);
+                    font-size: Theme.font-caption;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.progress-indeterminate ? "处理中" : root.total-progress + "%";
+                    color: StageStyle.bar-text-color(root.kind);
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+            }
+            ProgressBar {
+                value: root.total-progress;
+                indeterminate: root.progress-indeterminate;
+                height: 4px;
+                label: "任务总进度";
+                bar-color: StageStyle.bar(root.kind);
+                track-color: root.selected ? Theme.selected-track : Theme.track;
             }
         }
 

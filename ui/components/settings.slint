@@ -104,7 +104,7 @@ component SettingsNavItem inherits Rectangle {
         width: 3px;
         height: parent.height - Theme.space-md;
         border-radius: 2px;
-        background: Theme.accent;
+        background: Theme.selection;
     }
 
     Text {
@@ -457,7 +457,7 @@ export component SettingsModal inherits Rectangle {
                                 width: parent.width - Theme.space-lg;
                                 color: Theme.text-primary;
                                 font-size: Theme.font-title;
-                                font-weight: 700;
+                                font-weight: 600;
                                 vertical-alignment: center;
                             }
                         }
@@ -521,8 +521,8 @@ export component SettingsModal inherits Rectangle {
                             Text {
                                 text: root.page-title;
                                 color: Theme.text-primary;
-                                font-size: Theme.font-title;
-                                font-weight: 700;
+                                font-size: Theme.font-section;
+                                font-weight: 600;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
@@ -837,7 +837,7 @@ export component SettingsModal inherits Rectangle {
                                         }
                                     }
                                     Text {
-                                        text: "常见本地服务：Ollama http://127.0.0.1:11434/v1 · LM Studio http://127.0.0.1:1234/v1。BiMyScribe 只向你填写的地址发送文字内容，不下载或启动模型。";
+                                        text: "常见本地服务：Ollama http://127.0.0.1:11434/v1 · LM Studio http://127.0.0.1:1234/v1。bi2read 只向你填写的地址发送文字内容，不下载或启动模型。";
                                         color: Theme.text-muted;
                                         font-size: Theme.font-caption;
                                         wrap: word-wrap;
@@ -863,7 +863,7 @@ export component SettingsModal inherits Rectangle {
                                                 : root.connection-test-state == "failure" ? "测试失败"
                                                 : "未测试";
                                             color: root.connection-test-state == "failure" ? Theme.danger-text
-                                                : root.connection-test-state == "success" ? Theme.success : Theme.text-muted;
+                                                : root.connection-test-state == "success" ? Theme.success-text : Theme.text-muted;
                                             font-size: Theme.font-caption;
                                             vertical-alignment: center;
                                         }
@@ -892,7 +892,7 @@ export component SettingsModal inherits Rectangle {
                             spacing: Theme.space-xs;
                             Text {
                                 text: root.save-feedback.is-empty ? " " : root.save-feedback;
-                                color: root.save-feedback == "已保存" ? Theme.success : Theme.danger-text;
+                                color: root.save-feedback == "已保存" ? Theme.success-text : Theme.danger-text;
                                 font-size: Theme.font-caption;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;

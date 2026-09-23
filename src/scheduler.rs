@@ -75,6 +75,7 @@ impl JobRunner for PipelineJobRunner {
             Err(PipelineError::Cancelled) => JobResult::Cancelled,
             Err(PipelineError::DockerNotRunning) => JobResult::NeedsUserAction,
             Err(PipelineError::TranscriptionSelectionRequired(_)) => JobResult::NeedsUserAction,
+            Err(PipelineError::RuntimeIdentityChanged) => JobResult::NeedsUserAction,
             Err(PipelineError::DriveNotMounted) => JobResult::WaitingForDrive,
             Err(error) => JobResult::Failed(error.to_string()),
         }

@@ -1,4 +1,4 @@
-# BiMyScribe 架构
+# bi2read 架构
 
 版本：1.3
 状态：当前稳定架构，持续演进
@@ -73,7 +73,11 @@ ready 和 identity，再由两个 adapter 传递同一 requested language。norm
 `damo/speech_paraformer_asr-en-16k-vocab4199-pytorch`，避免默认 ModelScope alias 指向不适合
 英文的权重。`auto` 只使用 `iic/SenseVoiceSmall` 检测语言 token，随后路由到对应 Paraformer
 profile，检测失败不回退。英文 profile 传递 `en_post_proc=true` 并保留 VAD、标点和 speaker
-适配器组合；Runtime 适配器同时接受 FunASR 的 `text` 与 `sentence` 字段、过滤控制 token，
+适配器组合。`paraformer-en` 不输出词级时间戳，FunASR 因此把 `sentence_info` 回退为未加标点
+的 VAD 段；Runtime 在英文路径下改为消费顶层已加标点的整段文本，按句末标点切句，并用 VAD 段的
+时间范围按字符比例回填每句起止时间（保证单调且覆盖段端点），speaker 继承句子中点所在 VAD 段的
+说话人。zh 路径仍直接使用
+带时间戳的 `sentence_info`。Runtime 适配器同时接受 FunASR 的 `text` 与 `sentence` 字段、过滤控制 token，
 并在写 Evidence 前拒绝空文本、空 segments、未知 schema、倒置或越界时间和不匹配 identity。
 
 CLI 的 `--json` 与 `runtime status --json` 统一返回 `CliEnvelope<T>`（schema version 1）；
@@ -98,7 +102,7 @@ requested/reported language、model 与 Runtime identity。
 | `src/funasr.rs` | `describe_runtime`、`run(TranscribeRequest)` | v1/v2 manifest、fingerprint/readiness、语言 argv、normalized 解析和资源回收 |
 | `src/llm.rs` | `refine_utterances` | 协议 adapter、分批请求、响应校验和逐条回退 |
 | `src/document.rs` | raw/readable/final render | 基于 ContentSnapshot 的原始稿、faithful/readable 和按档位导出的唯一 `full.md` Presentation |
-| `src/process.rs` | subprocess spawn/run/cancel | 进程组、日志、终止升级和 Docker cleanup |
+| `src/process.rs` | subprocess spawn/run/cancel | 进程组、日志、可执行文件发现、终止升级和 Docker cleanup |
 | `src/config.rs`、`src/paths.rs` | 配置与平台路径 | 默认值、迁移、单实例锁、release-check 隔离 |
 
 这里的“模块”以接口和职责定义，不以文件大小定义。新的拆分必须通过删除测试：删掉模块后，
@@ -149,7 +153,19 @@ App 直接消费 `ContentSnapshotV1`；`document` 使用同一 snapshot 重建 `
 ## 错误与回退
 
 - metadata、下载、FFmpeg、FunASR、I/O 和最终文档失败是 fatal，任务保留失败阶段供重试。
-- Docker backend 未运行进入可操作等待状态，不 busy-loop。
+- Docker backend 未运行进入可操作等待状态，不 busy-loop。Docker 健康检查是有超时（10 s）
+  的 `docker version`，socket 存在但引擎无响应同样视为不可用。
+- Docker 转写容器不使用 `--rm`：Runtime 退出后 App 先 `docker inspect` 读取 `OOMKilled`
+  与退出码，再删除自有标签的容器。退出码 137 或 `OOMKilled` 归类为
+  `runtime-out-of-memory`；等待期间每 5 s 探测引擎，连续 3 次失联归类为
+  Docker 不可用；总时长超过 `max(60 min, 10 × 音频时长)` 归类为 `runtime-timeout`。
+  每次终结把 `{exit_code, oom_killed, docker_reachable, classification}` 写入任务目录
+  `logs/runtime-exit.json`。
+- 转写阶段发现任务冻结的 Runtime 身份与当前 Runtime 失配时，进入等待用户操作并持久化
+  `runtime-identity-changed` 错误码；该错误码开放“重建”入口（用当前 Runtime 以同一 URL
+  新建任务，原任务保持不变），重试不会再次尝试失配的 Runtime。
+- 启动恢复时，转写阶段处于 Running 的任务判定为“被中断”，进入 Failed 并保留 Retry；
+  不自动重排队，避免重放 OOM。其他阶段的 Running 仍重置为 Pending 并自动续跑。
 - LLM 是 optional enhancement：失败记录 `LlmFallback`，任务继续生成规则阅读稿。
 - v0.5 增强失败只更新对应 slot 的 `last_failure`；faithful AI 失败使用可追溯的规则 fallback，
   不遮蔽 Evidence 或其他 current。

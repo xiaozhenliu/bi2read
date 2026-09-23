@@ -29,7 +29,7 @@ height=$(sips -g pixelHeight "$source_png" | awk '/pixelHeight/{print $2}')
     exit 1
 }
 
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/bimyscribe-icon.XXXXXX")
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/bi2read-icon.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT
 iconset="$temporary_root/AppIcon.iconset"
 mkdir -p "$iconset" "$(dirname "$output_icns")"

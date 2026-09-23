@@ -119,7 +119,7 @@ export component StageRow inherits Rectangle {
                 ? (root.stage.indeterminate ? "，处理中" : "，进度 " + root.stage.progress + "%")
                 : "，等待中");
 
-    height: 34px;
+    height: 40px;
 
     HorizontalLayout {
         spacing: Theme.space-sm;
@@ -137,7 +137,7 @@ export component StageRow inherits Rectangle {
                 : @image-url("../icons/circle.svg");
             colorize: root.stage.error ? Theme.danger
                 : root.stage.done ? Theme.success
-                : root.stage.active ? Theme.accent
+                : root.stage.active ? Theme.selection
                 : root.stage.skipped ? Theme.text-disabled : Theme.text-muted;
         }
 
@@ -171,7 +171,7 @@ export component StageRow inherits Rectangle {
                 : root.stage.active ? (root.stage.indeterminate ? "处理中" : root.stage.progress + "%")
                 : "等待";
             color: root.stage.error ? Theme.danger
-                : root.stage.active ? Theme.accent-text : Theme.text-muted;
+                : root.stage.active ? Theme.progress-text : Theme.text-muted;
             font-size: Theme.font-caption;
             width: 64px;
             horizontal-alignment: right;
@@ -190,53 +190,46 @@ export component StageRow inherits Rectangle {
 export component SpeakerRow inherits Rectangle {
     in property <SpeakerEntry> entry;
     in property <bool> enabled: true;
+    in property <bool> last: false;
     callback name-edited(string);
 
     accessible-role: list-item;
     accessible-enabled: true;
     accessible-label: root.entry.raw-label
         + (root.entry.name.is-empty ? "，未设置显示名称" : "，显示为 " + root.entry.name);
+    height: root.last ? 100px : 72px;
 
-    // Caption line (12px) + 4px gaps above/between/below + 32px compact
-    // input = 60px, on the 4px spacing grid.
-    height: 60px;
-
-    // "原始标签 · 出现 N 段" (spec.md 第二节第 12 条); a `segment-count` of 0
-    // means the count is unavailable rather than "zero segments", so only
-    // the raw label is shown.
     property <string> caption-text: root.entry.segment-count > 0
         ? root.entry.raw-label + " · 出现 " + root.entry.segment-count + " 段"
         : root.entry.raw-label;
 
-    VerticalLayout {
-        padding-left: Theme.space-xs;
-        padding-right: Theme.space-xs;
-        padding-top: Theme.space-xxs;
-        padding-bottom: Theme.space-xxs;
-        spacing: Theme.space-xxs;
-
-        Text {
-            text: root.caption-text;
-            color: root.enabled ? Theme.text-secondary : Theme.text-disabled;
-            font-size: Theme.font-caption;
-            overflow: elide;
-        }
-
-        AppTextField {
-            accessible-label: root.entry.raw-label + " 的显示名称";
-            enabled: root.enabled;
-            compact: true;
-            text: root.entry.name;
-            placeholder-text: "输入显示名称…";
-            edited(value) => { root.name-edited(value); }
-        }
+    Text {
+        x: Theme.space-xs;
+        y: 0px;
+        width: parent.width - 2 * Theme.space-xs;
+        height: 16px;
+        text: root.caption-text;
+        color: Theme.text-secondary;
+        font-size: Theme.font-caption;
+        overflow: elide;
     }
-
-    Rectangle {
-        y: parent.height - 1px;
+    AppTextField {
+        x: Theme.space-xs;
+        y: 24px;
+        width: parent.width - 2 * Theme.space-xs;
+        accessible-label: root.entry.raw-label + " 的显示名称";
+        enabled: root.enabled;
+        compact: true;
+        text: root.entry.name;
+        placeholder-text: "输入显示名称…";
+        edited(value) => { root.name-edited(value); }
+    }
+    if root.last : Rectangle {
+        x: Theme.space-xs;
+        y: 80px;
         height: 1px;
-        width: parent.width;
-        background: Theme.separator;
+        width: parent.width - 2 * Theme.space-xs;
+        background: Theme.border;
     }
 }
 
@@ -336,7 +329,9 @@ export component JobDetail inherits Rectangle {
     property <bool> fixture-enabled: !root.verification-fixture.is-empty;
     property <bool> fixture-running: root.verification-fixture == "running";
     property <bool> fixture-failed: root.verification-fixture == "failed";
-    property <bool> fixture-completed: root.verification-fixture == "completed";
+    property <bool> fixture-completed: root.verification-fixture == "completed"
+        || root.verification-fixture == "speaker-empty"
+        || root.verification-fixture == "speaker-single";
     property <bool> display-has-job: root.has-job || root.fixture-enabled;
     property <string> display-title: root.fixture-enabled
         ? "这是一个用于验证详情滚动的超长视频标题：包含多个说话人、错误信息和任务阶段"
@@ -457,7 +452,9 @@ export component JobDetail inherits Rectangle {
         { speaker-id: 9, raw-label: "Speaker 9", name: "记录员", segment-count: 0 }
     ];
     property <[StageView]> display-stages: root.fixture-enabled ? root.fixture-stages : root.stages;
-    property <[SpeakerEntry]> display-speakers: root.fixture-enabled ? root.fixture-speakers : root.speakers;
+    property <[SpeakerEntry]> display-speakers: root.verification-fixture == "speaker-empty" ? []
+        : root.verification-fixture == "speaker-single" ? [root.fixture-speakers[0]]
+        : root.fixture-enabled ? root.fixture-speakers : root.speakers;
 
     // Default to collapsed at compact widths. Direct user interaction breaks
     // this initial binding and keeps the chosen state for the App session.
@@ -518,60 +515,46 @@ export component JobDetail inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle {
-                    // Content-driven height (running / failed / completed / queued
-                    // / no-actions must all fit without clipping); min-height only
-                    // guards the empty state (badge + title + meta + bar, no
-                    // actions, no feedback line) from collapsing.
-                    min-height: 102px;
+                    // The header keeps only visible information; the scroll area
+                    // receives remaining height, never blank feedback placeholders.
+                    min-height: 0px;
                     background: Theme.surface;
                     vertical-stretch: 0;
 
                     VerticalLayout {
                         padding-left: Theme.space-ml;
                         padding-right: Theme.space-ml;
-                        padding-top: Theme.space-md;
-                        padding-bottom: Theme.space-sm;
-                        spacing: Theme.space-xs;
-
-                        // Wrapped in its own row with a trailing stretch spacer
-                        // (issue 14 defect 1) so the badge's content-driven width
-                        // never gets read as this VerticalLayout's max-width: the
-                        // spacer's unbounded max-width keeps the row - and every
-                        // ancestor up to the center pane - free to grow.
-                        HorizontalLayout {
-                            StatusBadge {
-                                kind: StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress);
-                                text: StageStyle.label(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress, root.display-status);
-                                horizontal-stretch: 0;
-                                // Status text moved from the meta caption below (was a
-                                // duplicate of this badge); keep the live announcement
-                                // here so screen readers still learn about stage changes.
-                                accessible-live-region: polite;
-                            }
-                            Rectangle { horizontal-stretch: 1; }
-                        }
+                        padding-top: Theme.space-ml;
+                        padding-bottom: Theme.space-ml;
+                        spacing: Theme.space-sm;
+                        alignment: start;
 
                         Text {
                             text: root.display-title;
+                            height: 24px;
+                            vertical-stretch: 0;
                             color: Theme.text-primary;
                             font-size: Theme.font-title;
-                            font-weight: 700;
+                            font-weight: 600;
                             overflow: elide;
                             horizontal-stretch: 1;
                         }
 
                         HorizontalLayout {
                             spacing: Theme.space-xs;
-                            // BV number and the separator dot are grouped on the
-                            // left (both horizontal-stretch: 0, sized to content);
-                            // a single spacer soaks up all the leftover width so
-                            // "耗时" lands flush right without the dot drifting
-                            // into the middle of the row (issue 14 defect 6).
+                            StatusBadge {
+                                kind: StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress);
+                                text: StageStyle.label(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress, root.display-status);
+                                horizontal-stretch: 0;
+                                accessible-live-region: polite;
+                            }
                             Text {
                                 text: root.display-bvid + (root.display-page > 1 ? "-P" + root.display-page : "");
                                 color: Theme.text-secondary;
                                 font-size: Theme.font-caption;
-                                horizontal-stretch: 0;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                vertical-alignment: center;
                             }
                             // No separator dot here: the status text that used
                             // to follow it now lives in the StatusBadge above,
@@ -580,6 +563,7 @@ export component JobDetail inherits Rectangle {
                             Rectangle { horizontal-stretch: 1; }
                             Text {
                                 text: "耗时 " + root.display-elapsed;
+                                vertical-alignment: center;
                                 color: Theme.text-muted;
                                 font-size: Theme.font-caption;
                                 horizontal-stretch: 0;
@@ -597,11 +581,9 @@ export component JobDetail inherits Rectangle {
                             }
                             Text {
                                 text: (root.display-completed ? 100 : root.display-progress) + "%";
-                                // Follows the bar's stage kind: a pink number
-                                // next to a green "completed" bar reads as two
-                                // different states. `badge-text-color` is the
-                                // on-light-surface variant of each kind.
-                                color: StageStyle.badge-text-color(StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress));
+                                // Normal progress uses blue; exceptional states
+                                // keep their readable semantic text color.
+                                color: StageStyle.bar-text-color(StageStyle.kind(root.display-status-name, root.display-stage-name, root.display-error-visible, root.display-progress));
                                 font-size: Theme.font-caption;
                                 font-weight: 600;
                                 vertical-alignment: center;
@@ -611,7 +593,7 @@ export component JobDetail inherits Rectangle {
                         if root.display-has-actions || root.display-can-view-result : HorizontalLayout {
                             height: Theme.control-height;
                             spacing: Theme.space-xs;
-                            alignment: end;
+                            alignment: start;
                             if root.display-can-rebuild : PrimaryButton {
                                 text: "使用新设置重建任务";
                                 disabled: root.action-pending;
@@ -624,6 +606,10 @@ export component JobDetail inherits Rectangle {
                             }
                             if !root.display-can-retry && root.display-can-open : PrimaryButton {
                                 text: "打开 Markdown";
+                                base-color: Theme.accent;
+                                hover-color: Theme.brand-hover;
+                                pressed-color: Theme.brand-pressed;
+                                text-color: Theme.on-brand;
                                 disabled: root.action-pending;
                                 clicked => { root.open-md-clicked(); }
                             }
@@ -647,7 +633,7 @@ export component JobDetail inherits Rectangle {
                                 disabled: root.action-pending;
                                 clicked => { root.reveal-clicked(); }
                             }
-                            if root.display-can-cancel : DangerOutlineButton {
+                            if root.display-can-cancel : SecondaryButton {
                                 text: "取消任务";
                                 disabled: root.action-pending;
                                 clicked => { root.cancel-clicked(); }
@@ -659,12 +645,13 @@ export component JobDetail inherits Rectangle {
                             }
                         }
 
-                        if root.display-has-actions || root.display-can-view-result : Text {
-                            text: root.action-feedback.is-empty ? " " : root.action-feedback;
+                        if !root.action-feedback.is-empty : Text {
+                            text: root.action-feedback;
                             color: root.action-feedback-error ? Theme.danger-text
-                                : root.action-pending ? Theme.text-muted : Theme.success;
+                                : root.action-pending ? Theme.text-muted : Theme.success-text;
                             font-size: Theme.font-caption;
                             height: 18px;
+                            vertical-stretch: 0;
                             overflow: elide;
                             accessible-live-region: polite;
                         }
@@ -685,7 +672,8 @@ export component JobDetail inherits Rectangle {
                         padding-right: Theme.space-ml;
                         padding-top: Theme.space-md;
                         padding-bottom: Theme.space-lg;
-                        spacing: Theme.space-ml;
+                        spacing: Theme.space-md;
+                        alignment: start;
 
                         // `visible: false` does not release layout space in Slint
                         // (issue 14 defect 8) — a hidden `Rectangle` still reserves
@@ -794,7 +782,10 @@ export component JobDetail inherits Rectangle {
                                 vertical-alignment: center;
                             }
 
-                            for st in root.display-stages : StageRow { stage: st; }
+                            VerticalLayout {
+                                spacing: 0px;
+                                for st in root.display-stages : StageRow { stage: st; }
+                            }
                         }
                     }
                 }
@@ -871,7 +862,7 @@ export component JobDetail inherits Rectangle {
                 spacing: 0px;
 
                 Rectangle {
-                    height: 42px;
+                    height: 52px;
                     background: Theme.sidebar-background;
                     HorizontalLayout {
                         padding-left: Theme.space-sm;
@@ -879,8 +870,8 @@ export component JobDetail inherits Rectangle {
                         spacing: Theme.space-xs;
                         Text {
                             text: "检查器";
-                            color: Theme.text-secondary;
-                            font-size: Theme.font-caption;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-section;
                             font-weight: 600;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
@@ -965,9 +956,9 @@ export component JobDetail inherits Rectangle {
                     VerticalLayout {
                         padding-left: Theme.space-sm;
                         padding-right: Theme.space-sm;
-                        padding-top: Theme.space-sm;
-                        padding-bottom: Theme.space-sm;
-                        spacing: Theme.space-xs;
+                        padding-top: Theme.space-md;
+                        padding-bottom: Theme.space-md;
+                        spacing: Theme.space-md;
 
                         Text {
                             text: root.display-can-edit-speakers
@@ -976,15 +967,17 @@ export component JobDetail inherits Rectangle {
                             color: Theme.text-muted;
                             font-size: Theme.font-caption;
                             wrap: word-wrap;
-                            height: max(34px, self.preferred-height);
+                            height: self.preferred-height;
+                            vertical-stretch: 0;
                         }
 
-                        Text {
-                            text: root.speaker-feedback.is-empty ? " " : root.speaker-feedback;
+                        if !root.speaker-feedback.is-empty : Text {
+                            text: root.speaker-feedback;
                             color: root.speaker-feedback-error ? Theme.danger-text
-                                : root.speaker-feedback == "已保存" ? Theme.success : Theme.text-muted;
+                                : root.speaker-feedback == "已保存" ? Theme.success-text : Theme.text-muted;
                             font-size: Theme.font-caption;
                             height: 18px;
+                            vertical-stretch: 0;
                             overflow: elide;
                             accessible-live-region: polite;
                         }
@@ -1003,7 +996,8 @@ export component JobDetail inherits Rectangle {
                             vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-                            for sp in root.display-speakers : SpeakerRow {
+                            for sp[i] in root.display-speakers : SpeakerRow {
+                                last: i == root.display-speakers.length - 1;
                                 entry: sp;
                                 enabled: root.display-can-edit-speakers;
                                 name-edited(name) => { root.speaker-name-edited(sp.speaker-id, name); }

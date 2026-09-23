@@ -35,6 +35,8 @@ pub enum PipelineError {
     DockerNotRunning,
     #[error("{0}: task must be rebuilt with explicit transcription settings")]
     TranscriptionSelectionRequired(&'static str),
+    #[error("runtime-identity-changed: 任务冻结的 Runtime 已改变，请用当前 Runtime 重建任务")]
+    RuntimeIdentityChanged,
     #[error("external drive not mounted")]
     DriveNotMounted,
     #[error("cancelled")]
@@ -150,7 +152,11 @@ impl PipelineDeps for ProdDeps {
             let url = match crate::bilibili::fetch_playurl_audio(bvid, cid) {
                 Ok(u) => u,
                 Err(e) => {
+                    let terminal = matches!(&e, &crate::bilibili::MetadataError::NotAccessible);
                     last_err = Some(e.into());
+                    if terminal {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -644,6 +650,14 @@ fn stage_normalize_audio(
     if code != 0 {
         return Err(PipelineError::Ffmpeg(format!("ffmpeg exited {}", code)));
     }
+    let output_size = std::fs::metadata(&dest)
+        .map_err(|error| PipelineError::Ffmpeg(format!("normalized output: {error}")))?
+        .len();
+    if output_size == 0 {
+        return Err(PipelineError::Ffmpeg(
+            "ffmpeg produced an empty normalized output".into(),
+        ));
+    }
     // Verify output is readable & non-empty.
     let probe = crate::process::SubprocessSpec::new(vec![
         "ffprobe".into(),
@@ -654,8 +668,16 @@ fn stage_normalize_audio(
         "-of".into(),
         "default=noprint_wrappers=1".into(),
         dest.to_string_lossy().into_owned(),
-    ]);
-    let _ = crate::process::run(probe);
+    ])
+    .log(&log);
+    let probe_code =
+        crate::process::run(probe).map_err(|error| PipelineError::Ffmpeg(error.to_string()))?;
+    if probe_code != 0 {
+        return Err(PipelineError::Ffmpeg(format!(
+            "ffprobe rejected normalized output (exit {})",
+            probe_code
+        )));
+    }
     let _ = cfg; // future: configurable sample rate
     set_job_progress(app, job.id, 100);
     Ok(())
@@ -702,6 +724,24 @@ fn stage_transcribe(
             );
             crate::jobs::save_job_state(job)?;
             return Err(PipelineError::DockerNotRunning);
+        }
+        Err(crate::funasr::FunasrError::IdentityChanged) => {
+            // 冻结的 Runtime 身份已变：重试永远失配，只能用当前 Runtime 重建。
+            // 进入等待用户操作并持久化错误码，让 JobCapabilities 开放“重建”。
+            let error = PipelineError::RuntimeIdentityChanged;
+            job.stage = Stage::NeedsUserAction;
+            job.status = crate::jobs::JobStatus::NeedsUserAction;
+            job.error = Some(error.to_string());
+            set_job_stage(
+                app,
+                job.id,
+                Stage::NeedsUserAction.name(),
+                Stage::NeedsUserAction.label(),
+                false,
+            );
+            set_job_error(app, job.id, &error.to_string());
+            crate::jobs::save_job_state(job)?;
+            return Err(error);
         }
         Err(error) => return Err(error.into()),
     };
@@ -1022,7 +1062,7 @@ mod tests {
 
     #[test]
     fn ensure_work_dir_preserves_an_existing_job_path() {
-        let root = std::env::temp_dir().join(format!("bimyscribe-readable-job-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-readable-job-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let legacy = root.join("550e8400-e29b-41d4-a716-446655440000");
         let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1test".into(), 1);
@@ -1103,8 +1143,7 @@ mod tests {
 
     #[test]
     fn readable_content_cancellation_does_not_publish_or_mark_failed() {
-        let root =
-            std::env::temp_dir().join(format!("bimyscribe-readable-cancel-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-readable-cancel-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BV1cancel".into(), 1);
         job.content_setup = Some(crate::content_results::ContentSetupV1::disabled());
@@ -1211,7 +1250,7 @@ mod tests {
     #[ignore] // requires a matching external volume to be mounted
     fn drive_mounted_external_drive() {
         assert!(drive_mounted(std::path::Path::new(
-            "/Volumes/ExternalDisk/BiMyScribe/Jobs"
+            "/Volumes/ExternalDisk/bi2read/Jobs"
         )));
     }
 }

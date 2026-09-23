@@ -10,7 +10,7 @@ Usage:
     --runtime-data-dir /Volumes/<external-disk>/...
 
 Options:
-  --install-app PATH   Installation target (default: /Applications/BiMyScribe.app)
+  --install-app PATH   Installation target (default: /Applications/bi2read.app)
   --no-launch          Install and verify without launching the App
   -h, --help           Show this help
 
@@ -22,7 +22,7 @@ EOF
 build_root=""
 runtime_project=""
 runtime_data_dir=""
-install_app="/Applications/BiMyScribe.app"
+install_app="/Applications/bi2read.app"
 launch=true
 
 while [ "$#" -gt 0 ]; do
@@ -68,7 +68,8 @@ esac
 [ -d "$runtime_project" ] || { printf 'Runtime project is missing: %s\n' "$runtime_project" >&2; exit 1; }
 [ -d "$runtime_data_dir" ] || { printf 'Runtime data directory is missing: %s\n' "$runtime_data_dir" >&2; exit 1; }
 
-runtime_manifest="$runtime_project/bimyscribe-runtime.toml"
+runtime_manifest="$runtime_project/bi2read-runtime.toml"
+[ -f "$runtime_manifest" ] || runtime_manifest="$runtime_project/bimyscribe-runtime.toml"
 [ -f "$runtime_manifest" ] || { printf 'Runtime manifest is missing: %s\n' "$runtime_manifest" >&2; exit 1; }
 runtime_values=$(python3 - "$runtime_manifest" <<'PY'
 import pathlib, sys, tomllib
@@ -94,9 +95,9 @@ compose_file=$(printf '%s\n' "$runtime_values" | sed -n '3p')
     exit 1
 }
 
-config_file="$HOME/Library/Application Support/BiMyScribe/config.toml"
+config_file="$HOME/Library/Application Support/bi2read/config.toml"
 [ -f "$config_file" ] || {
-    printf 'Existing BiMyScribe state is required before Docker-local installation: %s\n' "$config_file" >&2
+    printf 'Existing bi2read state is required before Docker-local installation: %s\n' "$config_file" >&2
     printf 'Launch a regular build once to initialize state, then rerun this installer.\n' >&2
     exit 1
 }
@@ -107,11 +108,11 @@ cleanup() { rm -rf "$stage"; }
 trap cleanup EXIT
 
 export CARGO_TARGET_DIR="$build_root/cargo-target"
-"$cargo_bin" build --manifest-path "$repo_root/Cargo.toml" --release --locked --bin bimyscribe
-binary="$CARGO_TARGET_DIR/release/bimyscribe"
+"$cargo_bin" build --manifest-path "$repo_root/Cargo.toml" --release --locked --bin bi2read
+binary="$CARGO_TARGET_DIR/release/bi2read"
 [ -x "$binary" ] || { printf 'Release binary was not produced: %s\n' "$binary" >&2; exit 1; }
 file "$binary" | rg -q 'Mach-O 64-bit executable arm64' || {
-    printf 'BiMyScribe release binary is not arm64.\n' >&2
+    printf 'bi2read release binary is not arm64.\n' >&2
     exit 1
 }
 
@@ -121,19 +122,19 @@ import pathlib, sys, tomllib
 print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["build_number"])
 PY
 )
-app="$stage/BiMyScribe.app"
+app="$stage/bi2read.app"
 contents="$app/Contents"
 resources="$contents/Resources"
 mkdir -p "$contents/MacOS" "$resources/licenses"
-cp "$binary" "$contents/MacOS/bimyscribe"
+cp "$binary" "$contents/MacOS/bi2read"
 cp "$repo_root/packaging/macos/assets/AppIcon.icns" "$resources/AppIcon.icns"
-cp "$repo_root/LICENSE" "$resources/licenses/BiMyScribe-MIT.txt"
-chmod 755 "$contents/MacOS/bimyscribe"
+cp "$repo_root/LICENSE" "$resources/licenses/bi2read-MIT.txt"
+chmod 755 "$contents/MacOS/bi2read"
 sed -e "s/@APP_VERSION@/$app_version/g" -e "s/@BUILD_NUMBER@/$build_number/g" \
     "$repo_root/packaging/macos/Info.plist.in" > "$contents/Info.plist"
 plutil -lint "$contents/Info.plist" >/dev/null
 
-codesign --force --sign - --timestamp=none --options runtime "$contents/MacOS/bimyscribe"
+codesign --force --sign - --timestamp=none --options runtime "$contents/MacOS/bi2read"
 codesign --force --sign - --timestamp=none --options runtime \
     --entitlements "$repo_root/packaging/macos/entitlements.plist" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -141,7 +142,7 @@ codesign --verify --deep --strict --verbose=2 "$app"
     printf 'Docker-local bundle unexpectedly contains native Runtime or uv.\n' >&2
     exit 1
 }
-[ "$("$contents/MacOS/bimyscribe" --version)" = "bimyscribe $app_version" ] || {
+[ "$("$contents/MacOS/bi2read" --version)" = "bi2read $app_version" ] || {
     printf 'Installed binary version check failed.\n' >&2
     exit 1
 }
@@ -197,13 +198,13 @@ mv "$incoming" "$install_app"
     -f "$install_app"
 
 codesign --verify --deep --strict --verbose=2 "$install_app"
-installed_version=$("$install_app/Contents/MacOS/bimyscribe" --version)
-installed_sha=$(shasum -a 256 "$install_app/Contents/MacOS/bimyscribe" | awk '{print $1}')
+installed_version=$("$install_app/Contents/MacOS/bi2read" --version)
+installed_sha=$(shasum -a 256 "$install_app/Contents/MacOS/bi2read" | awk '{print $1}')
 if [ "$launch" = true ]; then
     open "$install_app"
 fi
 
-printf '\nDocker-local BiMyScribe installed.\n'
+printf '\nDocker-local bi2read installed.\n'
 printf 'App: %s\nVersion: %s\nSHA-256: %s\n' "$install_app" "$installed_version" "$installed_sha"
 printf 'Runtime project: %s\nRuntime data: %s\n' "$runtime_project" "$runtime_data_dir"
 printf 'Previous App backup: %s\nConfig backup: %s\n' "$backup_app" "$config_backup"

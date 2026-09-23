@@ -22,15 +22,17 @@ import { AppSwitch } from "components/switch.slint";
 export component App inherits Window {
     // Keep implementation status in task state, not in the window chrome.
     title: root.ui-verification-empty
-        ? "BiMyScribe — UI Fixture (empty)"
+        ? "bi2read — UI Fixture (empty)"
         : root.ui-verification-fixture.is-empty
-        ? "BiMyScribe"
-        : "BiMyScribe — UI Fixture (" + root.ui-verification-fixture + ")";
+        ? "bi2read"
+        : "bi2read — UI Fixture (" + root.ui-verification-fixture + ")";
     preferred-width: Theme.window-width;
     preferred-height: Theme.window-height;
     min-width: Theme.window-min-width;
     min-height: Theme.window-min-height;
     background: Theme.window-background;
+    default-font-size: Theme.font-body;
+    default-font-weight: 400;
 
     // Force built-in widgets (LineEdit/CheckBox/SpinBox) into light mode regardless
     // of the macOS system appearance, so they match our fixed-light Theme tokens.

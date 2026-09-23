@@ -1,4 +1,4 @@
-//! BiMyScribe application modules and Slint-generated view types.
+//! bi2read application modules and Slint-generated view types.
 
 // Slint generates `App` and the view structs from ui/app.slint.
 slint::include_modules!();

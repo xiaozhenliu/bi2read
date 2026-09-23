@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify deterministic BiMyScribe public snapshot manifests."""
+"""Generate and verify deterministic bi2read public snapshot manifests."""
 
 from __future__ import annotations
 
@@ -211,10 +211,10 @@ def check_release_inputs(root: Path) -> tuple[str, dict[str, object]]:
     with (root / "Cargo.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     lock_versions = [
-        item.get("version") for item in lock.get("package", []) if item.get("name") == "bimyscribe"
+        item.get("version") for item in lock.get("package", []) if item.get("name") == "bi2read"
     ]
     if lock_versions != [version]:
-        raise SnapshotError(f"Cargo.lock bimyscribe version mismatch: {lock_versions!r}")
+        raise SnapshotError(f"Cargo.lock bi2read version mismatch: {lock_versions!r}")
     return version, config
 
 

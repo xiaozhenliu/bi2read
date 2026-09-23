@@ -1375,7 +1375,7 @@ const RECIPE_VERSION: u32 = 1;
 const PROMPT_VERSION: u32 = 1;
 const RULES_VERSION: u32 = 1;
 const HTTP_CONTENT_TYPE: &str = "application/json";
-const HTTP_USER_AGENT: &str = "bimyscribe/0.5";
+const HTTP_USER_AGENT: &str = "bi2read/0.5";
 
 /// A request is assembled entirely by `ContentResults` before it reaches an
 /// adapter. The adapter cannot inspect Config or choose a recipe/default.
@@ -2371,7 +2371,7 @@ fn make_prompt(
         _ => String::new(),
     };
     let mut instruction_lines: Vec<&str> = vec![
-        "你是 BiMyScribe 的可信文字整理器。请严格按 JSON 输出。",
+        "你是 bi2read 的可信文字整理器。请严格按 JSON 输出。",
         "必须把本块全部 utterance id 放入 processed_utterance_ids，不能遗漏、重复或虚构。",
         "blocks 的 source_refs 只能引用输入 id，并填写精确 start_ms/end_ms；无法可靠关联时使用空 refs，不得伪造时间。",
         "faithful_text 必须保留事实、限定条件、数字、金额、日期、URL 和顺序，禁止摘要或删减。",
@@ -3768,8 +3768,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("bimyscribe-content-{label}-{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("bi2read-content-{label}-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -4230,7 +4229,7 @@ mod tests {
     #[test]
     fn invalid_store_path_never_creates_file() {
         let missing =
-            std::env::temp_dir().join(format!("bimyscribe-content-missing-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("bi2read-content-missing-{}", Uuid::new_v4()));
         assert!(ContentStore::new(&missing).is_err());
         assert!(!missing.exists());
     }
@@ -4394,10 +4393,10 @@ mod tests {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| panic!("{name} must be set for this ignored test"))
         };
-        let project_dir = required_path("BIMYSCRIBE_RUNTIME_PROJECT");
-        let runtime_data = required_path("BIMYSCRIBE_RUNTIME_DATA_DIR");
-        let normalized_wav = required_path("BIMYSCRIBE_RUNTIME_SMOKE_WAV");
-        let smoke_root = required_path("BIMYSCRIBE_RUNTIME_SMOKE_ROOT");
+        let project_dir = required_path("BI2READ_RUNTIME_PROJECT");
+        let runtime_data = required_path("BI2READ_RUNTIME_DATA_DIR");
+        let normalized_wav = required_path("BI2READ_RUNTIME_SMOKE_WAV");
+        let smoke_root = required_path("BI2READ_RUNTIME_SMOKE_ROOT");
 
         let ready = crate::funasr::install_runtime(&project_dir, &runtime_data).unwrap();
         assert_eq!(ready.device, "Docker CPU");
@@ -4525,7 +4524,7 @@ mod tests {
             "http://127.0.0.1:1234/v1/chat/completions"
         );
         assert_eq!(HTTP_CONTENT_TYPE, "application/json");
-        assert_eq!(HTTP_USER_AGENT, "bimyscribe/0.5");
+        assert_eq!(HTTP_USER_AGENT, "bi2read/0.5");
         let request = GenerationRequest {
             kind: ArtifactKindV1::DefaultSummary,
             chunk_index: 0,

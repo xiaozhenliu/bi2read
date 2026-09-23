@@ -1,8 +1,8 @@
-# BiMyScribe
+# bi2read
 
 将 Bilibili 视频转换为可阅读 Markdown 的本地桌面应用。
 
-BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录和文档生成，
+bi2read 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录和文档生成，
 并保留模型识别出的说话人信息。媒体文件和转录结果均在本地处理。
 
 ## 主要功能
@@ -22,22 +22,24 @@ BiMyScribe 会自动完成音频下载、FFmpeg 标准化、FunASR 本地转录�
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.92 或更高版本；仓库用
   `rust-toolchain.toml` 固定贡献者工具链为 1.95，`Cargo.toml` 的 1.92 是 MSRV
-- [FFmpeg](https://ffmpeg.org/)；命令需要位于 `PATH`
+- [FFmpeg](https://ffmpeg.org/)；终端运行时应位于 `PATH`，Finder 启动的 App
+  还会检查 `~/.local/bin`、Homebrew 和 MacPorts 的标准目录
 - [uv](https://docs.astral.sh/uv/)（通过 Cargo 运行原生 Runtime 时需要；构建 App
   的脚本会自动下载）
-- BiMyScribe FunASR Runtime contract v2（contract v1 仍可读取，但不能创建新任务）
+- bi2read FunASR Runtime contract v2（contract v1 仍可读取，但不能创建新任务）
 
-Runtime 项目根目录必须包含 `bimyscribe-runtime.toml`。模型和容器镜像不
-包含在本仓库中。Docker Desktop 仅在选择 Docker Runtime 时需要。
+Runtime 项目根目录应包含 `bi2read-runtime.toml`；旧项目中的
+`bimyscribe-runtime.toml` 仍可读取。模型和容器镜像不包含在本仓库中。
+Docker Desktop 仅在选择 Docker Runtime 时需要。
 
 ## 安装与启动
 
 App 版本以 [`Cargo.toml`](Cargo.toml) 为唯一来源；当前版本的完整中英文变化、兼容性与
-限制见 [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md)。
+限制见 [`docs/releases/v0.6.1.md`](docs/releases/v0.6.1.md)。
 
 ```bash
-git clone https://github.com/xiaozhenliu/bimyscribe.git
-cd bimyscribe
+git clone https://github.com/xiaozhenliu/bi2read.git
+cd bi2read
 cargo run --release
 ```
 
@@ -46,30 +48,30 @@ cargo run --release
 另行下载经过验证的原生 Runtime：
 
 ```bash
-git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
+git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bi2read-funasr-runtime.git
 ```
 
 ### 在自己的 Mac 上构建 App
 
 只需要 Rust、Xcode Command Line Tools、Git 和网络连接。脚本会自动下载固定版本
-的 Runtime 与 uv，构建 `BiMyScribe.app`，并在签名前询问签名身份：直接回车会
+的 Runtime 与 uv，构建 `bi2read.app`，并在签名前询问签名身份：直接回车会
 使用免费的 ad-hoc 签名，适合在当前 Mac 自用，不需要 Apple Developer 会员。
 
 ```bash
-git clone https://github.com/xiaozhenliu/bimyscribe.git
-cd bimyscribe
+git clone https://github.com/xiaozhenliu/bi2read.git
+cd bi2read
 scripts/build-macos-local.sh
 ```
 
-默认产物位于 `target/macos-local/output/BiMyScribe.app`。空间不足时可以把全部
+默认产物位于 `target/macos-local/output/bi2read.app`。空间不足时可以把全部
 构建数据放到其他磁盘：
 
 ```bash
-BIMYSCRIBE_BUILD_ROOT=/absolute/path/to/build scripts/build-macos-local.sh
+BI2READ_BUILD_ROOT=/absolute/path/to/build scripts/build-macos-local.sh
 ```
 
 如需使用自己的 Developer ID，在运行前设置
-`BIMYSCRIBE_SIGN_IDENTITY='Developer ID Application: …'`。Developer ID 签名
+`BI2READ_SIGN_IDENTITY='Developer ID Application: …'`。Developer ID 签名
 之后仍需 Apple 公证才能安全地对外分发；ad-hoc 签名包不应作为公开 Release。
 
 ### 通过终端转录
@@ -78,7 +80,7 @@ App 内的同一个可执行文件也提供无界面命令。以下示例先用�
 放入 `/Applications`，可以按实际位置修改：
 
 ```bash
-CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
+CLI='/Applications/bi2read.app/Contents/MacOS/bi2read'
 "$CLI" --help
 "$CLI" transcribe 'https://www.bilibili.com/video/BV...' --language zh
 ```
@@ -90,16 +92,16 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 ```bash
 "$CLI" runtime status
 "$CLI" runtime status --json
-"$CLI" runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime
+"$CLI" runtime install --runtime-data-dir /Volumes/Data/bi2read-Runtime
 ```
 
 需要把大文件明确放到外挂盘，或让 Agent 读取结构化结果时，可以运行：
 
 ```bash
 "$CLI" transcribe 'BV...' \
-  --work-dir /Volumes/Data/BiMyScribe-Jobs \
-  --output-dir /Volumes/Data/BiMyScribe-Markdown \
-  --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime \
+  --work-dir /Volumes/Data/bi2read-Jobs \
+  --output-dir /Volumes/Data/bi2read-Markdown \
+  --runtime-data-dir /Volumes/Data/bi2read-Runtime \
   --json
 ```
 
@@ -112,7 +114,7 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 也可以通过原生目录选择器修改：
 
 1. **工作目录**：默认位于应用数据目录的 `Jobs`，保存任务中间产物。
-2. **Markdown 输出目录**：默认为 `~/Documents/BiMyScribe`。
+2. **Markdown 输出目录**：默认为 `~/Documents/bi2read`。
 3. **FunASR Runtime 项目目录**：本机构建的 App 会自动使用内置 Runtime；通过
    Cargo 运行或需要 Docker 后端时，可在此选择自定义 Runtime v2 项目。旧 v1 Runtime
    可以查看状态，但创建任务前必须升级。
@@ -136,7 +138,7 @@ CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
 6. 在任务详情中检查识别出的说话人；需要时修改显示名称，然后打开唯一最终文稿，或在 Finder
    中显示输出目录。
 
-修改说话人名称后，BiMyScribe 会直接重建 Markdown，不会重复转录音频。
+修改说话人名称后，bi2read 会直接重建 Markdown，不会重复转录音频。
 
 ## 输出文件
 
@@ -165,12 +167,23 @@ v0.5.0 新任务保留单一最终 `full.md` 出口；legacy 任务继续使用�
 - 仅支持匿名访问，不支持需要登录或 Cookie 的视频。
 - 截图提取功能尚未开放。
 - FFmpeg 仍需单独安装；自构建 App 已内置 Runtime 与 uv，Docker 只用于可选后端。
+- Docker 后端的 FunASR 模型集合占用较多内存。`auto` 语言会先加载语言检测模型再加载
+  识别、VAD 与标点模型；若任务以“Runtime 在转写时内存不足”失败，请为 Docker Desktop
+  分配更多内存，或为该任务选择明确的中文/英文语言后重试。Docker 引擎无响应时任务会在
+  探测失败后进入“等待用户操作”，不会永久停在运行中。每次转写的退出码与失败分类记录在
+  任务目录的 `logs/runtime-exit.json`。
+- 转写进行中 App 被退出或崩溃时，重启后该任务标记为失败并提供重试，不会自动重放，
+  以免再次耗尽内存；需要时请手动重试。
+- 任务冻结的 Runtime 被更换后，该任务无法直接重试，会进入“等待用户操作”；按提示重建
+  任务即可使用当前 Runtime 重新转写。
+- 内置原生 Runtime v2.0.0 的英文结果按 VAD 段输出，可能缺少句末标点；英文按句分段需要
+  后续 Runtime 版本。
 
 ## 产品与设计文档
 
 - [当前路线图](docs/roadmap.md)
 - [架构与模块接口](docs/architecture.md)
-- [界面设计规范](docs/design/bimyscribe-design-spec.md)
+- [界面设计规范](docs/design/bi2read-design-spec.md)
 
 ## 许可证
 
@@ -181,7 +194,7 @@ v0.5.0 新任务保留单一最终 `full.md` 出口；legacy 任务继续使用�
 
 ## About
 
-BiMyScribe is a local macOS desktop application that turns Bilibili videos into
+bi2read is a local macOS desktop application that turns Bilibili videos into
 readable Markdown. It downloads the audio, normalizes it with FFmpeg,
 transcribes it through a local FunASR runtime, and preserves detected
 speaker information.
@@ -201,10 +214,11 @@ speaker information.
 - macOS
 - Rust 1.92 or newer; `rust-toolchain.toml` pins the contributor toolchain to
   1.95, while 1.92 in `Cargo.toml` remains the MSRV
-- FFmpeg available on `PATH`
+- FFmpeg available on `PATH`; Finder-launched App builds also check the standard
+  `~/.local/bin`, Homebrew, and MacPorts locations
 - uv when running the native runtime through Cargo; the app build script
   downloads it automatically
-- BiMyScribe FunASR Runtime contract v2 (contract v1 remains readable but cannot create new jobs)
+- bi2read FunASR Runtime contract v2 (contract v1 remains readable but cannot create new jobs)
 
 FunASR models are not bundled. Docker Desktop is required only for the optional
 Docker runtime.
@@ -212,19 +226,19 @@ Docker runtime.
 ### Install and run
 
 [`Cargo.toml`](Cargo.toml) is the single source of truth for the app version.
-See [`docs/releases/v0.6.0.md`](docs/releases/v0.6.0.md) for the current bilingual
+See [`docs/releases/v0.6.1.md`](docs/releases/v0.6.1.md) for the current bilingual
 release notes, compatibility details, and limitations.
 
 ```bash
-git clone https://github.com/xiaozhenliu/bimyscribe.git
-cd bimyscribe
+git clone https://github.com/xiaozhenliu/bi2read.git
+cd bi2read
 cargo run --release
 ```
 
 Download the verified native runtime separately:
 
 ```bash
-git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-funasr-runtime.git
+git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bi2read-funasr-runtime.git
 ```
 
 ### Build the macOS app locally
@@ -232,18 +246,18 @@ git clone --branch v2.0.0 --depth 1 https://github.com/xiaozhenliu/bimyscribe-fu
 With Rust, Xcode Command Line Tools, Git, and network access installed, run:
 
 ```bash
-git clone https://github.com/xiaozhenliu/bimyscribe.git
-cd bimyscribe
+git clone https://github.com/xiaozhenliu/bi2read.git
+cd bi2read
 scripts/build-macos-local.sh
 ```
 
 The script downloads pinned Runtime and uv releases, builds the app, and asks
 for a signing identity. Press Enter for free ad-hoc signing suitable for use on
 the same Mac. The app is written to
-`target/macos-local/output/BiMyScribe.app` by default. Set an absolute
-`BIMYSCRIBE_BUILD_ROOT` to build on another disk.
+`target/macos-local/output/bi2read.app` by default. Set an absolute
+`BI2READ_BUILD_ROOT` to build on another disk.
 
-To use your own Developer ID, set `BIMYSCRIBE_SIGN_IDENTITY` before running the
+To use your own Developer ID, set `BI2READ_SIGN_IDENTITY` before running the
 script. Developer ID builds still require Apple notarization before public
 distribution. Do not publish the ad-hoc signed build as a Release asset.
 
@@ -252,7 +266,7 @@ distribution. Do not publish the ad-hoc signed build as a Release asset.
 The executable inside the app also provides a non-interactive CLI:
 
 ```bash
-CLI='/Applications/BiMyScribe.app/Contents/MacOS/bimyscribe'
+CLI='/Applications/bi2read.app/Contents/MacOS/bi2read'
 "$CLI" --help
 "$CLI" transcribe 'https://www.bilibili.com/video/BV...' --language en
 ```
@@ -264,7 +278,7 @@ available without opening the GUI:
 ```bash
 "$CLI" runtime status
 "$CLI" runtime status --json
-"$CLI" runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime
+"$CLI" runtime install --runtime-data-dir /Volumes/Data/bi2read-Runtime
 ```
 
 Use `--work-dir`, `--output-dir`, and `--runtime-data-dir` to keep large data on
@@ -281,7 +295,7 @@ Settings. Older v1 Runtimes remain inspectable but must be upgraded before creat
 a new job. Choose a Runtime Data directory with several gigabytes of free space;
 it may be on an external drive. Install or validate the runtime from Settings. Job data defaults
 to the macOS Application Support directory, while Markdown defaults to
-`~/Documents/BiMyScribe`; both locations can be changed with the native folder
+`~/Documents/bi2read`; both locations can be changed with the native folder
 picker. Choose a retention policy for intermediate files.
 Local LLM refinement is optional; authenticated remote LLM services are not
 supported in this release.
@@ -321,12 +335,29 @@ JSON, raw Markdown, refined Markdown, and a final `full.md` document. v0.5.0 new
 - Screenshot extraction is not available yet.
 - FFmpeg must still be installed separately. Locally built apps bundle Runtime
   and uv; Docker remains optional.
+- The Docker FunASR model set needs a lot of memory. `auto` loads the language
+  detector before the ASR, VAD, and punctuation models. If a job fails with
+  "Runtime ran out of memory", give Docker Desktop more memory or retry the job
+  with an explicit Chinese/English language. When the Docker engine stops
+  responding, the job moves to "needs user action" after the probe fails
+  instead of staying in "running" forever. Each transcription records its exit
+  code and failure classification in `logs/runtime-exit.json` in the job
+  directory.
+- If the app quits or crashes during transcription, the job is marked failed
+  with a retry action after restart instead of being replayed automatically, so
+  an out-of-memory run is not repeated; retry it manually when appropriate.
+- After the Runtime a job was frozen to is replaced, the job cannot be retried
+  directly and moves to "needs user action"; rebuild it to transcribe with the
+  current Runtime.
+- English output from the bundled native Runtime v2.0.0 follows VAD segments and
+  may lack sentence punctuation; sentence-level English segmentation needs a
+  later Runtime release.
 
 ### Product and design documents
 
 - [Current roadmap (Chinese)](docs/roadmap.md)
 - [Architecture and module interfaces (Chinese)](docs/architecture.md)
-- [UI design specification (Chinese)](docs/design/bimyscribe-design-spec.md)
+- [UI design specification (Chinese)](docs/design/bi2read-design-spec.md)
 
 ### License
 

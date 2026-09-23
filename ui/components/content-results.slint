@@ -89,24 +89,10 @@ component ContentResultRow inherits Rectangle {
     // The row itself is the only place where source details appear.  There is
     // no nested ScrollView/ListView, so a long source remains part of the same
     // virtual row model and follows the center pane's one scroll position.
-    // Off-layout measurement nodes keep the variable row height stable even
-    // while their visible counterparts are conditionally instantiated.
-    measure-body := Text {
-        text: root.item.declaration.is-empty ? root.item.text
-            : root.item.declaration + (root.item.text.is-empty ? "" : "\n" + root.item.text);
-        width: parent.width - Theme.space-lg;
-        wrap: word-wrap;
-        visible: false;
-    }
-    measure-source := Text {
-        text: root.item.source-text;
-        width: parent.width - Theme.space-xl;
-        wrap: word-wrap;
-        visible: false;
-    }
+    // Measure the actual conditional content, including declarations, warnings,
+    // source controls and expanded evidence, instead of an estimated text height.
     height: root.item.kind == "section"
-        ? max(74px, measure-body.preferred-height + 54px)
-        : max(78px, measure-body.preferred-height + (root.expanded ? measure-source.preferred-height + 112px : 48px));
+        ? section-content.preferred-height : block-content.preferred-height;
     background: root.item.kind == "section" ? Theme.surface-muted : Theme.surface;
     border-color: Theme.separator;
     border-width: 0px;
@@ -118,154 +104,165 @@ component ContentResultRow inherits Rectangle {
         clicked => { root.jump-clicked(root.item.source-url); }
     }
 
-    if root.item.kind == "section" : VerticalLayout {
-        padding-left: Theme.space-md;
-        padding-right: Theme.space-md;
-        padding-top: Theme.space-sm;
-        padding-bottom: Theme.space-sm;
-        spacing: Theme.space-xs;
-
-        HorizontalLayout {
+    section-content := Rectangle {
+        visible: root.item.kind == "section";
+        width: parent.width;
+        height: self.preferred-height;
+        VerticalLayout {
+            padding-left: Theme.space-md;
+            padding-right: Theme.space-md;
+            padding-top: Theme.space-sm;
+            padding-bottom: Theme.space-sm;
             spacing: Theme.space-xs;
-            Text {
-                text: root.item.title;
-                color: Theme.text-primary;
-                font-size: Theme.font-section;
-                font-weight: 600;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
+
+            HorizontalLayout {
+                spacing: Theme.space-xs;
+                Text {
+                    text: root.item.title;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-section;
+                    font-weight: 600;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                if !root.item.status-label.is-empty : Text {
+                    text: root.item.status-label;
+                    color: root.item.status-kind == "failure" ? Theme.danger-text
+                        : root.item.status-kind == "pending" ? Theme.selection
+                        : root.item.status-kind == "limited" ? Theme.warning-text
+                        : Theme.success-text;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+                if !root.item.action-kind.is-empty : SecondaryButton {
+                    text: root.item.action-pending
+                        || (root.operation-pending && root.item.action-kind == root.operation-target-kind)
+                        ? "处理中…" : root.item.action-label;
+                    disabled: root.item.action-pending || root.operation-pending;
+                    clicked => { root.action-clicked(root.item.action-kind); }
+                }
             }
-            if !root.item.status-label.is-empty : Text {
-                text: root.item.status-label;
-                color: root.item.status-kind == "failure" ? Theme.danger-text
-                    : root.item.status-kind == "pending" ? Theme.accent-text
-                    : root.item.status-kind == "limited" ? Theme.warning-text
-                    : Theme.success-text;
+            if !root.item.action-caption.is-empty : Text {
+                text: root.item.action-caption;
+                color: Theme.text-muted;
                 font-size: Theme.font-caption;
-                vertical-alignment: center;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                height: self.preferred-height;
             }
-            if !root.item.action-kind.is-empty : SecondaryButton {
-                text: root.item.action-pending
-                    || (root.operation-pending && root.item.action-kind == root.operation-target-kind)
-                    ? "处理中…" : root.item.action-label;
-                disabled: root.item.action-pending || root.operation-pending;
-                clicked => { root.action-clicked(root.item.action-kind); }
+            section-text := Text {
+                text: root.item.declaration.is-empty ? root.item.text : root.item.declaration;
+                color: Theme.text-secondary;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                height: self.preferred-height;
+                accessible-role: text;
+                accessible-label: root.item.title + "，" + self.text;
             }
-        }
-        if !root.item.action-caption.is-empty : Text {
-            text: root.item.action-caption;
-            color: Theme.text-muted;
-            font-size: Theme.font-caption;
-            wrap: word-wrap;
-            horizontal-stretch: 1;
-            height: self.preferred-height;
-        }
-        section-text := Text {
-            text: root.item.declaration.is-empty ? root.item.text : root.item.declaration;
-            color: Theme.text-secondary;
-            font-size: Theme.font-body;
-            wrap: word-wrap;
-            horizontal-stretch: 1;
-            height: self.preferred-height;
-            accessible-role: text;
-            accessible-label: root.item.title + "，" + self.text;
-        }
-        if !root.item.text.is-empty && !root.item.declaration.is-empty : Text {
-            text: root.item.text;
-            color: root.item.status-kind == "failure" ? Theme.danger-text : Theme.text-secondary;
-            font-size: Theme.font-body;
-            wrap: word-wrap;
-            horizontal-stretch: 1;
-            height: self.preferred-height;
+            if !root.item.text.is-empty && !root.item.declaration.is-empty : Text {
+                text: root.item.text;
+                color: root.item.status-kind == "failure" ? Theme.danger-text : Theme.text-secondary;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                height: self.preferred-height;
+            }
         }
     }
 
-    if root.item.kind != "section" : VerticalLayout {
-        padding-left: Theme.space-md;
-        padding-right: Theme.space-md;
-        padding-top: Theme.space-sm;
-        padding-bottom: Theme.space-sm;
-        spacing: Theme.space-xs;
-
-        HorizontalLayout {
+    block-content := Rectangle {
+        visible: root.item.kind != "section";
+        width: parent.width;
+        height: self.preferred-height;
+        VerticalLayout {
+            padding-left: Theme.space-md;
+            padding-right: Theme.space-md;
+            padding-top: Theme.space-sm;
+            padding-bottom: Theme.space-sm;
             spacing: Theme.space-xs;
-            Text {
-                text: root.item.title;
-                color: Theme.text-primary;
-                font-size: Theme.font-body;
-                font-weight: root.item.kind == "raw" ? 600 : 400;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            if !root.item.status-label.is-empty : Text {
-                text: root.item.status-label;
-                color: root.item.status-kind == "limited" ? Theme.warning-text
-                    : root.item.status-kind == "failure" ? Theme.danger-text
-                    : Theme.success-text;
-                font-size: Theme.font-caption;
-                vertical-alignment: center;
-            }
-        }
 
-        body-text := Text {
-            text: root.item.text;
-            color: Theme.text-primary;
-            font-size: Theme.font-body;
-            wrap: word-wrap;
-            horizontal-stretch: 1;
-            height: self.preferred-height;
-            accessible-role: text;
-            accessible-label: root.item.title + "，" + self.text;
-        }
-
-        if root.item.status-kind == "limited" : Text {
-            text: "暂时无法关联到原始片段，因此不能精确跳转。";
-            color: Theme.warning-text;
-            font-size: Theme.font-body;
-            wrap: word-wrap;
-            horizontal-stretch: 1;
-            height: self.preferred-height;
-        }
-
-        if root.item.can-source : HorizontalLayout {
-            height: Theme.control-height-compact;
-            spacing: Theme.space-xs;
-            SecondaryButton {
-                text: root.expanded ? "收起来源" : "查看来源";
-                clicked => { root.source-clicked(root.item.source-url); }
-            }
-            if root.item.can-jump : SecondaryButton {
-                text: "跳回视频 ↗";
-                clicked => { root.jump-clicked(root.item.source-url); }
-            }
-        }
-
-        if root.expanded && root.item.can-source : Rectangle {
-            background: Theme.surface-muted;
-            border-radius: Theme.radius-sm;
-            border-color: Theme.border;
-            border-width: 1px;
-            height: max(74px, source-text.preferred-height + 48px);
-
-            VerticalLayout {
-                padding: Theme.space-sm;
-                spacing: Theme.space-xxs;
+            HorizontalLayout {
+                spacing: Theme.space-xs;
                 Text {
-                    text: "原始片段" + (root.item.source-speaker.is-empty ? "" : " · " + root.item.source-speaker)
-                        + (root.item.source-range.is-empty ? "" : " · " + root.item.source-range);
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-caption;
-                    wrap: word-wrap;
-                    horizontal-stretch: 1;
-                }
-                source-text := Text {
-                    text: root.item.source-text;
+                    text: root.item.title;
                     color: Theme.text-primary;
                     font-size: Theme.font-body;
-                    wrap: word-wrap;
+                    font-weight: root.item.kind == "raw" ? 600 : 400;
                     horizontal-stretch: 1;
-                    height: self.preferred-height;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if !root.item.status-label.is-empty : Text {
+                    text: root.item.status-label;
+                    color: root.item.status-kind == "limited" ? Theme.warning-text
+                        : root.item.status-kind == "failure" ? Theme.danger-text
+                        : Theme.success-text;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+            }
+
+            body-text := Text {
+                text: root.item.text;
+                color: Theme.text-primary;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                height: self.preferred-height;
+                accessible-role: text;
+                accessible-label: root.item.title + "，" + self.text;
+            }
+
+            if root.item.status-kind == "limited" : Text {
+                text: "暂时无法关联到原始片段，因此不能精确跳转。";
+                color: Theme.warning-text;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                height: self.preferred-height;
+            }
+
+            if root.item.can-source : HorizontalLayout {
+                height: Theme.control-height;
+                alignment: start;
+                spacing: Theme.space-xs;
+                SecondaryButton {
+                    text: root.expanded ? "收起来源" : "查看来源";
+                    clicked => { root.source-clicked(root.item.source-url); }
+                }
+                if root.item.can-jump : SecondaryButton {
+                    text: "跳回视频 ↗";
+                    clicked => { root.jump-clicked(root.item.source-url); }
+                }
+            }
+
+            if root.expanded && root.item.can-source : Rectangle {
+                background: Theme.surface-muted;
+                border-radius: Theme.radius-sm;
+                border-color: Theme.border;
+                border-width: 1px;
+                vertical-stretch: 0;
+
+                VerticalLayout {
+                    padding: Theme.space-sm;
+                    spacing: Theme.space-xxs;
+                    Text {
+                        text: "原始片段" + (root.item.source-speaker.is-empty ? "" : " · " + root.item.source-speaker)
+                            + (root.item.source-range.is-empty ? "" : " · " + root.item.source-range);
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-caption;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    source-text := Text {
+                        text: root.item.source-text;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-body;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        height: self.preferred-height;
+                    }
                 }
             }
         }
@@ -356,13 +353,14 @@ export component ContentResults inherits FocusScope {
             spacing: 0px;
 
         Rectangle {
-            height: 132px;
+            vertical-stretch: 0;
             background: Theme.surface;
             VerticalLayout {
-                padding-left: Theme.space-md;
-                padding-right: Theme.space-md;
-                padding-top: Theme.space-sm;
-                padding-bottom: Theme.space-xs;
+                padding-left: Theme.space-ml;
+                padding-right: Theme.space-ml;
+                padding-top: Theme.space-md;
+                padding-bottom: Theme.space-md;
+                alignment: start;
                 spacing: Theme.space-xs;
                 HorizontalLayout {
                     spacing: Theme.space-xs;
@@ -376,7 +374,7 @@ export component ContentResults inherits FocusScope {
                         text: "消费结果";
                         color: Theme.text-primary;
                         font-size: Theme.font-title;
-                        font-weight: 700;
+                        font-weight: 600;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
                     }
@@ -414,7 +412,7 @@ export component ContentResults inherits FocusScope {
                         clicked => { root.show-explainer = !root.show-explainer; }
                         explainer-label := Text {
                             text: root.show-explainer ? "收起说明" : "如何计算";
-                            color: Theme.accent;
+                            color: Theme.selection;
                             font-size: Theme.font-caption;
                             vertical-alignment: center;
                         }
@@ -431,7 +429,6 @@ export component ContentResults inherits FocusScope {
                 }
                 HorizontalLayout {
                     spacing: Theme.space-xs;
-                    Rectangle { horizontal-stretch: 1; }
                     search-field := AppTextField {
                         accessible-label: "搜索当前视频内容";
                         placeholder-text: "搜索当前视频内容";
@@ -528,7 +525,7 @@ export component ContentResults inherits FocusScope {
                 text: root.operation-pending
                     ? "正在处理文字结果；已保留当前内容。"
                     : root.operation-feedback;
-                color: root.operation-feedback-error ? Theme.danger-text : Theme.accent-text;
+                color: root.operation-feedback-error ? Theme.danger-text : Theme.selection;
                 font-size: Theme.font-body;
                 wrap: word-wrap;
                 x: Theme.space-md;

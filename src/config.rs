@@ -16,7 +16,7 @@ use crate::paths::AppPaths;
 pub struct Config {
     pub working_dir: PathBuf,
     pub output_dir: PathBuf,
-    /// Path to a compatible BiMyScribe FunASR Runtime project.
+    /// Path to a compatible bi2read FunASR Runtime project.
     pub runtime_project: Option<PathBuf>,
     /// Python environment, dependency, model, and temporary cache root.
     pub runtime_data_dir: PathBuf,
@@ -52,10 +52,10 @@ impl Default for Config {
         AppPaths::discover()
             .map(|paths| Self::for_paths(&paths))
             .unwrap_or_else(|_| Self {
-                working_dir: PathBuf::from("BiMyScribe/Jobs"),
-                output_dir: PathBuf::from("BiMyScribe/Documents"),
+                working_dir: PathBuf::from("bi2read/Jobs"),
+                output_dir: PathBuf::from("bi2read/Documents"),
                 runtime_project: None,
-                runtime_data_dir: PathBuf::from("BiMyScribe/Runtime"),
+                runtime_data_dir: PathBuf::from("bi2read/Runtime"),
                 llm_enabled: false,
                 llm_connection: None,
                 default_screenshots: false,
@@ -424,7 +424,7 @@ fn validate_writable_directory(path: &std::path::Path, label: &str) -> Result<Pa
         (resolved_ancestor, resolved)
     };
 
-    let probe = probe_parent.join(format!(".bimyscribe-write-probe-{}", uuid::Uuid::new_v4()));
+    let probe = probe_parent.join(format!(".bi2read-write-probe-{}", uuid::Uuid::new_v4()));
     let file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -490,8 +490,7 @@ mod tests {
 
     #[test]
     fn v1_runtime_is_readable_but_new_job_creation_requires_upgrade() {
-        let root =
-            std::env::temp_dir().join(format!("bimyscribe-config-v1-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-config-v1-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("schemas")).unwrap();
         std::fs::write(
             root.join(crate::funasr::RUNTIME_MANIFEST),
@@ -514,10 +513,8 @@ output_schema_file = "schemas/normalized-v1.schema.json"
         }
         let config = Config {
             runtime_project: Some(root.clone()),
-            runtime_data_dir: std::env::temp_dir().join(format!(
-                "bimyscribe-config-v1-data-{}",
-                uuid::Uuid::new_v4()
-            )),
+            runtime_data_dir: std::env::temp_dir()
+                .join(format!("bi2read-config-v1-data-{}", uuid::Uuid::new_v4())),
             ..Config::default()
         };
         let error = config
@@ -529,7 +526,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
 
     #[test]
     fn missing_fields_use_explicit_platform_defaults() {
-        let home = std::env::temp_dir().join(format!("bimyscribe-config-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("bi2read-config-{}", uuid::Uuid::new_v4()));
         let paths = AppPaths::for_home(&home);
         std::fs::create_dir_all(paths.application_support()).unwrap();
         std::fs::write(paths.config_file(), "llm_enabled = true\n").unwrap();
@@ -543,7 +540,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
 
     #[test]
     fn legacy_runtime_field_loads_but_only_new_field_is_saved() {
-        let home = std::env::temp_dir().join(format!("bimyscribe-config-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("bi2read-config-{}", uuid::Uuid::new_v4()));
         let paths = AppPaths::for_home(&home);
         std::fs::create_dir_all(paths.application_support()).unwrap();
         let runtime = home.join("runtime");
@@ -563,7 +560,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
 
     #[test]
     fn writable_directory_validation_resolves_symlink_and_does_not_create_target() {
-        let root = std::env::temp_dir().join(format!("bimyscribe-path-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-path-{}", uuid::Uuid::new_v4()));
         let actual = root.join("actual");
         std::fs::create_dir_all(&actual).unwrap();
 
@@ -594,7 +591,7 @@ output_schema_file = "schemas/normalized-v1.schema.json"
                 .contains("绝对路径")
         );
 
-        let root = std::env::temp_dir().join(format!("bimyscribe-path-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-path-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("ordinary-file");
         std::fs::write(&file, "fixture").unwrap();

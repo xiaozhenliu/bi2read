@@ -17,15 +17,15 @@ use std::process::ExitCode;
 use slint::{ComponentHandle, Weak};
 use uuid::Uuid;
 
-use bimyscribe::config::Config;
-use bimyscribe::jobs::{
+use bi2read::config::Config;
+use bi2read::jobs::{
     CreatedFrom, Job, RetentionPolicy, RuntimeBackend, RuntimeSource, SourceLanguage, StageState,
     TranscriptionSelection,
 };
-use bimyscribe::pipeline;
+use bi2read::pipeline;
 
-const E2E_WORKING_ROOT: &str = "/tmp/BiMyScribe/e2e-jobs";
-const E2E_OUTPUT_ROOT: &str = "/tmp/BiMyScribe/e2e-output";
+const E2E_WORKING_ROOT: &str = "/tmp/bi2read/e2e-jobs";
+const E2E_OUTPUT_ROOT: &str = "/tmp/bi2read/e2e-output";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RunMode {
@@ -76,7 +76,7 @@ fn run_cli(args: &[String], paths: &E2ePaths, mode: RunMode) -> ExitCode {
     let input = &args[0];
 
     // Parse the input to a BVID + page.
-    let parsed = match bimyscribe::bilibili::parse_url(input) {
+    let parsed = match bi2read::bilibili::parse_url(input) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("URL parse failed: {e}");
@@ -128,7 +128,7 @@ fn run_cli(args: &[String], paths: &E2ePaths, mode: RunMode) -> ExitCode {
         RetentionPolicy::Recommended,
     );
     job.source_url = Some(input.clone());
-    for s in bimyscribe::jobs::pipeline_stages() {
+    for s in bi2read::jobs::pipeline_stages() {
         job.set_stage_state(s, StageState::Pending);
     }
 
@@ -155,7 +155,7 @@ fn run_resume(args: &[String], keep: bool, paths: &E2ePaths, mode: RunMode) -> E
         }
     };
     let state_json = job_dir.join("state.json");
-    let mut job = match bimyscribe::jobs::load_job_state(&job_dir) {
+    let mut job = match bi2read::jobs::load_job_state(&job_dir) {
         Some(j) => j,
         None => {
             eprintln!("no state.json at {}", state_json.display());
@@ -177,14 +177,14 @@ fn run_resume(args: &[String], keep: bool, paths: &E2ePaths, mode: RunMode) -> E
         "loaded crashed job: stage={} status={} transcribe_state={:?}",
         job.stage.name(),
         job.status.label(),
-        job.stage_state(bimyscribe::jobs::Stage::Transcribe)
+        job.stage_state(bi2read::jobs::Stage::Transcribe)
     );
 
     // Run the queue recovery: resets Running -> Pending, revalidates Completed.
-    let mut queue = bimyscribe::jobs::Queue {
+    let mut queue = bi2read::jobs::Queue {
         jobs: vec![job.clone()],
     };
-    let reports = bimyscribe::jobs::recover(&mut queue);
+    let reports = bi2read::jobs::recover(&mut queue);
     let r = &reports[0];
     eprintln!(
         "after recover: reset={:?} revalidated={:?}",
@@ -194,7 +194,7 @@ fn run_resume(args: &[String], keep: bool, paths: &E2ePaths, mode: RunMode) -> E
     eprintln!(
         "post-recover stage={} transcribe_state={:?}",
         job.stage.name(),
-        job.stage_state(bimyscribe::jobs::Stage::Transcribe)
+        job.stage_state(bi2read::jobs::Stage::Transcribe)
     );
 
     // The validated job directory is `<E2E_WORKING_ROOT>/<job-id>`, matching
@@ -218,16 +218,16 @@ fn execute_job(
         RunMode::Execute => {
             // Take a weak handle, then drop the strong handle so this headless
             // binary never shows a window. UI updates become no-ops.
-            let app: bimyscribe::App = match bimyscribe::App::new() {
+            let app: bi2read::App = match bi2read::App::new() {
                 Ok(app) => app,
                 Err(e) => {
                     eprintln!("failed to init App (needed for Weak handle): {e}");
                     return ExitCode::from(1);
                 }
             };
-            let weak: Weak<bimyscribe::App> = app.as_weak();
+            let weak: Weak<bi2read::App> = app.as_weak();
             drop(app);
-            let cancel_token = bimyscribe::cancel::CancellationToken::new();
+            let cancel_token = bi2read::cancel::CancellationToken::new();
             pipeline::run_job(job, cfg, &weak, &cancel_token)
         }
         #[cfg(test)]
@@ -295,7 +295,7 @@ fn is_direct_job_dir(root: &Path, job_dir: &Path) -> bool {
 /// Set and persist the state normally supplied by the production scheduler.
 fn begin_run(job: &mut Job, work_dir: PathBuf) {
     prepare_run_state(job, work_dir);
-    if let Err(e) = bimyscribe::jobs::save_job_state(job) {
+    if let Err(e) = bi2read::jobs::save_job_state(job) {
         eprintln!("warning: failed to persist E2E start state: {e}");
     }
 }
@@ -308,14 +308,14 @@ fn prepare_run_state(job: &mut Job, work_dir: PathBuf) {
 
 /// Print the outcome (artifacts produced) for a completed or failed run.
 fn report(
-    result: &Result<(), bimyscribe::pipeline::PipelineError>,
+    result: &Result<(), bi2read::pipeline::PipelineError>,
     job: &mut Job,
     cfg: &Config,
     start: std::time::Instant,
     keep: bool,
 ) -> ExitCode {
     finish_run(job);
-    if let Err(e) = bimyscribe::jobs::save_job_state(job) {
+    if let Err(e) = bi2read::jobs::save_job_state(job) {
         eprintln!("warning: failed to persist final E2E state: {e}");
     }
 
@@ -442,7 +442,7 @@ mod tests {
         assert!(!is_direct_job_dir(root, &root.join(&job_id).join("nested")));
         assert!(!is_direct_job_dir(
             root,
-            Path::new("/tmp/BiMyScribe/production-jobs")
+            Path::new("/tmp/bi2read/production-jobs")
                 .join(&job_id)
                 .as_path()
         ));
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn cli_new_and_resume_execution_leave_production_queue_byte_identical() {
         let _home_lock = HOME_LOCK.lock().unwrap();
-        let sandbox = std::env::temp_dir().join(format!("bimyscribe-e2e-smoke-{}", Uuid::new_v4()));
+        let sandbox = std::env::temp_dir().join(format!("bi2read-e2e-smoke-{}", Uuid::new_v4()));
         let home = sandbox.join("home");
         let working_root = sandbox.join("e2e-jobs");
         let output_root = sandbox.join("e2e-output");
@@ -492,7 +492,7 @@ mod tests {
         let production_queue = home
             .join("Library")
             .join("Application Support")
-            .join("BiMyScribe")
+            .join("bi2read")
             .join("queue.json");
         std::fs::create_dir_all(production_queue.parent().unwrap()).unwrap();
         let sentinel = br#"{"production":"queue must stay byte-identical"}"#;
@@ -520,7 +520,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .path();
-        let smoke_state = bimyscribe::jobs::load_job_state(&smoke_job_dir).unwrap();
+        let smoke_state = bi2read::jobs::load_job_state(&smoke_job_dir).unwrap();
         let smoke_json = serde_json::to_value(smoke_state).unwrap();
         assert!(smoke_json["transcription_selection"].is_object());
         assert!(smoke_json["content_setup"].is_object());
@@ -530,10 +530,10 @@ mod tests {
         std::fs::create_dir_all(&job_dir).unwrap();
         let mut job = Job::new(id, "BV1xx411c7mD".into(), 1);
         job.work_dir = Some(job_dir.clone());
-        job.status = bimyscribe::jobs::JobStatus::Running;
-        job.stage = bimyscribe::jobs::Stage::Transcribe;
-        job.set_stage_state(bimyscribe::jobs::Stage::Transcribe, StageState::Running);
-        bimyscribe::jobs::save_job_state(&job).unwrap();
+        job.status = bi2read::jobs::JobStatus::Running;
+        job.stage = bi2read::jobs::Stage::Transcribe;
+        job.set_stage_state(bi2read::jobs::Stage::Transcribe, StageState::Running);
+        bi2read::jobs::save_job_state(&job).unwrap();
 
         let before_resume = std::fs::read(&production_queue).unwrap();
         let resume_args = vec![
@@ -546,7 +546,7 @@ mod tests {
             ExitCode::SUCCESS
         );
         assert_eq!(std::fs::read(&production_queue).unwrap(), before_resume);
-        let resumed = bimyscribe::jobs::load_job_state(&job_dir).unwrap();
+        let resumed = bi2read::jobs::load_job_state(&job_dir).unwrap();
         assert!(resumed.started_at.is_some());
         assert!(resumed.finished_at.is_some());
     }

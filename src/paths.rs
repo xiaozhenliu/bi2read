@@ -12,8 +12,11 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::jobs::Queue;
 
-const APP_NAME: &str = "BiMyScribe";
+const APP_NAME: &str = "bi2read";
 const LEGACY_APP_NAME: &str = "Bilibili Reader";
+const PREVIOUS_BRAND_APP_NAME: &str = "BiMyScribe";
+const PREVIOUS_BRAND_LOCK_FILE: &str = ".bimyscribe.lock";
+const PREVIOUS_BRAND_STAGING_PREFIX: &str = ".BiMyScribe.staging-";
 const STATE_SCHEMA: u32 = 1;
 static RELEASE_CHECK_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
@@ -30,7 +33,7 @@ pub fn set_release_check_root(root: PathBuf, token: &str) -> io::Result<()> {
             "release-check token must be at least 32 hexadecimal characters",
         ));
     }
-    let marker = root.join(".bimyscribe-release-check");
+    let marker = root.join(".bi2read-release-check");
     if root.exists() {
         if fs::read_to_string(&marker).ok().as_deref() != Some(token) {
             return Err(io::Error::new(
@@ -87,6 +90,11 @@ impl AppPaths {
         self.application_support_parent().join(LEGACY_APP_NAME)
     }
 
+    pub fn previous_brand_application_support(&self) -> PathBuf {
+        self.application_support_parent()
+            .join(PREVIOUS_BRAND_APP_NAME)
+    }
+
     pub fn config_file(&self) -> PathBuf {
         self.application_support().join("config.toml")
     }
@@ -120,7 +128,7 @@ impl AppPaths {
     }
 
     fn lock_file(&self) -> PathBuf {
-        self.application_support_parent().join(".bimyscribe.lock")
+        self.application_support_parent().join(".bi2read.lock")
     }
 }
 
@@ -131,6 +139,7 @@ pub struct InstanceLock {
 
 impl InstanceLock {
     pub fn acquire(paths: &AppPaths) -> io::Result<Self> {
+        migrate_renamed_brand_state(paths)?;
         fs::create_dir_all(paths.application_support_parent())?;
         let file = OpenOptions::new()
             .create(true)
@@ -140,7 +149,7 @@ impl InstanceLock {
             .open(paths.lock_file())?;
         file.try_lock_exclusive().map_err(|error| {
             if error.kind() == io::ErrorKind::WouldBlock {
-                io::Error::new(io::ErrorKind::WouldBlock, "BiMyScribe is already running")
+                io::Error::new(io::ErrorKind::WouldBlock, "bi2read is already running")
             } else {
                 error
             }
@@ -153,6 +162,69 @@ impl Drop for InstanceLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
+}
+
+/// One-time brand-rename migration: the previous brand's state directory moves
+/// atomically to the current name before the single-instance lock is taken.
+/// Defaults that lived inside the renamed directory are re-pointed to the new
+/// location; user-selected paths and the Documents output directory are never
+/// touched.
+fn migrate_renamed_brand_state(paths: &AppPaths) -> io::Result<()> {
+    let target = paths.application_support();
+    if target.exists() {
+        return Ok(());
+    }
+    let previous = paths.previous_brand_application_support();
+    if !previous.exists() {
+        return Ok(());
+    }
+    fs::rename(&previous, &target)?;
+    sync_dir(&paths.application_support_parent())?;
+    let repointed = repoint_renamed_brand_defaults(paths, &target);
+    // 旧品牌锁文件属于旧身份；目录已迁移，清掉避免残留。
+    let _ = fs::remove_file(
+        paths
+            .application_support_parent()
+            .join(PREVIOUS_BRAND_LOCK_FILE),
+    );
+    repointed
+}
+
+/// Defaults recorded inside the renamed directory keep pointing at the old
+/// path after the move. They are derived values, not user choices, so they
+/// follow the directory; the persisted marker has already been validated by a
+/// previous launch of the previous brand, so rewriting these files does not
+/// invalidate the state summary.
+fn repoint_renamed_brand_defaults(paths: &AppPaths, target: &Path) -> io::Result<()> {
+    let previous_jobs_dir = paths.previous_brand_application_support().join("Jobs");
+    let config_path = target.join("config.toml");
+    let queue_path = target.join("queue.json");
+    if !config_path.is_file() || !queue_path.is_file() {
+        return Ok(()); // 不完整状态交给 validate_existing_state 报错
+    }
+    let mut config = Config::load_from(&config_path, paths)?;
+    let mut queue = Queue::load_from(&queue_path)?;
+    let mut changed = false;
+    if config.working_dir == previous_jobs_dir {
+        config.working_dir = paths.jobs_dir();
+        changed = true;
+    }
+    for job in &mut queue.jobs {
+        if let Some(work_dir) = &mut job.work_dir {
+            if let Ok(relative) = work_dir.strip_prefix(&previous_jobs_dir) {
+                *work_dir = paths.jobs_dir().join(relative);
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let config_data = toml::to_string_pretty(&config).map_err(io::Error::other)?;
+    let queue_data = serde_json::to_vec_pretty(&queue).map_err(io::Error::other)?;
+    replace_synced(&config_path, config_data.as_bytes())?;
+    replace_synced(&queue_path, &queue_data)?;
+    sync_dir(target)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,10 +302,7 @@ fn validate_existing_state(target: &Path) -> io::Result<()> {
     if !marker_path.is_file() || !config.is_file() || !queue.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "incomplete BiMyScribe state directory: {}",
-                target.display()
-            ),
+            format!("incomplete bi2read state directory: {}", target.display()),
         ));
     }
     let mut marker: StateMarker =
@@ -250,7 +319,7 @@ fn validate_existing_state(target: &Path) -> io::Result<()> {
     if invalid_marker || invalid_summary {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "BiMyScribe state marker does not match persisted state",
+            "bi2read state marker does not match persisted state",
         ));
     }
     if !marker.validated {
@@ -272,10 +341,8 @@ fn remove_stale_staging(paths: &AppPaths) -> io::Result<()> {
     }
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".BiMyScribe.staging-")
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(".bi2read.staging-") || name.starts_with(PREVIOUS_BRAND_STAGING_PREFIX)
         {
             fs::remove_dir_all(entry.path())?;
         }
@@ -311,9 +378,7 @@ mod tests {
     use super::*;
 
     fn temp_paths() -> AppPaths {
-        AppPaths::for_home(
-            std::env::temp_dir().join(format!("bimyscribe-paths-{}", Uuid::new_v4())),
-        )
+        AppPaths::for_home(std::env::temp_dir().join(format!("bi2read-paths-{}", Uuid::new_v4())))
     }
 
     #[test]
@@ -321,16 +386,16 @@ mod tests {
         let paths = AppPaths::for_home("/tmp/person");
         assert_eq!(
             paths.application_support(),
-            PathBuf::from("/tmp/person/Library/Application Support/BiMyScribe")
+            PathBuf::from("/tmp/person/Library/Application Support/bi2read")
         );
         assert_eq!(paths.jobs_dir(), paths.application_support().join("Jobs"));
         assert_eq!(
             paths.markdown_output_dir(),
-            PathBuf::from("/tmp/person/Documents/BiMyScribe")
+            PathBuf::from("/tmp/person/Documents/bi2read")
         );
         assert_eq!(
             paths.funasr_runtime_data_dir(),
-            PathBuf::from("/tmp/person/Library/Caches/BiMyScribe/FunASR")
+            PathBuf::from("/tmp/person/Library/Caches/bi2read/FunASR")
         );
         assert_eq!(
             paths.funasr_model_cache_dir(),
@@ -462,13 +527,18 @@ default_retention = "recommended"
         fs::write(legacy.join("queue.json"), r#"{"jobs":[]}"#).unwrap();
         let staging = paths
             .application_support_parent()
-            .join(".BiMyScribe.staging-interrupted");
+            .join(".bi2read.staging-interrupted");
         fs::create_dir_all(&staging).unwrap();
         fs::write(staging.join("partial"), "incomplete").unwrap();
+        let previous_brand_staging = paths
+            .application_support_parent()
+            .join(".BiMyScribe.staging-leftover");
+        fs::create_dir_all(&previous_brand_staging).unwrap();
 
         let _lock = InstanceLock::acquire(&paths).unwrap();
         initialize_or_migrate(&paths).unwrap();
         assert!(!staging.exists());
+        assert!(!previous_brand_staging.exists());
         assert!(paths.config_file().is_file());
         fs::remove_dir_all(paths.home).ok();
     }
@@ -525,6 +595,84 @@ default_retention = "recommended"
         fs::write(paths.config_file(), "").unwrap();
         let error = initialize_or_migrate(&paths).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        fs::remove_dir_all(paths.home).ok();
+    }
+
+    #[test]
+    fn renames_previous_brand_state_dir_and_repoints_state_defaults() {
+        let paths = temp_paths();
+        let previous = paths.previous_brand_application_support();
+        let previous_jobs = previous.join("Jobs");
+        fs::create_dir_all(&previous_jobs).unwrap();
+        let documents_output = paths.home.join("Documents").join("BiMyScribe");
+        let config_path = previous.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "working_dir = {:?}\noutput_dir = {:?}\n",
+                previous_jobs.to_string_lossy(),
+                documents_output.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut job = crate::jobs::Job::new(Uuid::new_v4(), "BVTEST".into(), 1);
+        job.work_dir = Some(previous_jobs.join(job.id.to_string()));
+        let queue_path = previous.join("queue.json");
+        fs::write(
+            &queue_path,
+            serde_json::to_vec_pretty(&Queue {
+                jobs: vec![job.clone()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let marker = StateMarker {
+            schema_version: STATE_SCHEMA,
+            kind: "initialization".into(),
+            source: None,
+            config_bytes: fs::metadata(&config_path).unwrap().len(),
+            queue_bytes: fs::metadata(&queue_path).unwrap().len(),
+            queue_jobs: 1,
+            complete: true,
+            validated: true,
+        };
+        fs::write(
+            previous.join("migration.json"),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+
+        let _lock = InstanceLock::acquire(&paths).unwrap();
+        initialize_or_migrate(&paths).unwrap();
+
+        assert!(!previous.exists());
+        let migrated = Config::load_from(&paths.config_file(), &paths).unwrap();
+        assert_eq!(migrated.working_dir, paths.jobs_dir());
+        assert_eq!(migrated.output_dir, documents_output);
+        let migrated_queue = Queue::load_from(&paths.queue_file()).unwrap();
+        assert_eq!(
+            migrated_queue.jobs[0].work_dir,
+            Some(paths.jobs_dir().join(job.id.to_string()))
+        );
+        assert!(!paths
+            .application_support_parent()
+            .join(PREVIOUS_BRAND_LOCK_FILE)
+            .exists());
+        fs::remove_dir_all(paths.home).ok();
+    }
+
+    #[test]
+    fn previous_brand_dir_left_alone_when_current_state_exists() {
+        let paths = temp_paths();
+        let _lock = InstanceLock::acquire(&paths).unwrap();
+        initialize_or_migrate(&paths).unwrap();
+        let previous = paths.previous_brand_application_support();
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("config.toml"), "").unwrap();
+
+        initialize_or_migrate(&paths).unwrap();
+
+        assert!(previous.join("config.toml").is_file());
         fs::remove_dir_all(paths.home).ok();
     }
 }

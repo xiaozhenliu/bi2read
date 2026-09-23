@@ -1018,7 +1018,7 @@ mod tests {
             ValidationCheckV1, ValidationReportV1,
         };
 
-        let root = std::env::temp_dir().join(format!("bimyscribe-renderer-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("bi2read-renderer-{}", Uuid::new_v4()));
         let work = root.join("work");
         let output = root.join("output");
         std::fs::create_dir_all(&work).unwrap();
@@ -1214,7 +1214,7 @@ mod tests {
     #[test]
     fn rewrite_reading_time_metadata_omits_profile_when_language_is_auto_or_missing() {
         let id = Uuid::new_v4();
-        let root = std::env::temp_dir().join(format!("bimyscribe-doc-reading-time-{id}"));
+        let root = std::env::temp_dir().join(format!("bi2read-doc-reading-time-{id}"));
         let cfg = crate::config::Config::for_paths(
             &crate::paths::AppPaths::discover().expect("app paths"),
         );

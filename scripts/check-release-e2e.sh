@@ -16,7 +16,7 @@ while [ "$#" -gt 0 ]; do
         *) usage ;;
     esac
 done
-[ -x "$app/Contents/MacOS/bimyscribe" ] || usage
+[ -x "$app/Contents/MacOS/bi2read" ] || usage
 case "$check_root" in /*) ;; *) usage ;; esac
 case "$evidence" in /*) ;; *) usage ;; esac
 [ ! -e "$check_root" ] || { printf 'release-check root must be fresh: %s\n' "$check_root" >&2; exit 1; }
@@ -35,7 +35,7 @@ fixture_bvid=$(printf '%s\n' "$fixture_values" | sed -n '2p')
 fixture_page=$(printf '%s\n' "$fixture_values" | sed -n '3p')
 minimum_utterances=$(printf '%s\n' "$fixture_values" | sed -n '4p')
 maximum_duration_ms=$(printf '%s\n' "$fixture_values" | sed -n '5p')
-binary="$app/Contents/MacOS/bimyscribe"
+binary="$app/Contents/MacOS/bi2read"
 check_token=$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')
 
 hash_path() {
@@ -52,8 +52,8 @@ for path in sorted(paths):
 print(digest.hexdigest())
 PY
 }
-before_file=$(mktemp /private/tmp/bimyscribe-protected-before.XXXXXX)
-after_file=$(mktemp /private/tmp/bimyscribe-protected-after.XXXXXX)
+before_file=$(mktemp /private/tmp/bi2read-protected-before.XXXXXX)
+after_file=$(mktemp /private/tmp/bi2read-protected-after.XXXXXX)
 trap 'rm -f "$before_file" "$after_file"' EXIT
 for path in "${protected_paths[@]}"; do printf '%s %s\n' "$(hash_path "$path")" "$path"; done > "$before_file"
 
@@ -69,9 +69,11 @@ $binary --release-check-root "$check_root" --release-check-token "$check_token" 
 result=$($binary --release-check-root "$check_root" --release-check-token "$check_token" transcribe "$fixture_url" --no-llm \
     --retention keep-all --work-dir "$check_root/work" --output-dir "$check_root/output" --json)
 
+bundled_runtime_manifest="$app/Contents/Resources/runtime/bi2read-runtime.toml"
+[ -f "$bundled_runtime_manifest" ] || bundled_runtime_manifest="$app/Contents/Resources/runtime/bimyscribe-runtime.toml"
 python3 - "$result" "$fixture_bvid" "$fixture_page" "$minimum_utterances" "$maximum_duration_ms" \
     "$check_root" "$status_output" "$docker_available" "$evidence" \
-    "$app/Contents/Resources/runtime/bimyscribe-runtime.toml" <<'PY'
+    "$bundled_runtime_manifest" <<'PY'
 import hashlib, json, os, re, sys, time, tomllib
 result=json.loads(sys.argv[1]); bvid=sys.argv[2]; page=int(sys.argv[3]); minimum=int(sys.argv[4]); maximum=int(sys.argv[5])
 root=os.path.realpath(sys.argv[6]); status=sys.argv[7]; docker_available=sys.argv[8]=="true"; evidence=sys.argv[9]; runtime_path=sys.argv[10]

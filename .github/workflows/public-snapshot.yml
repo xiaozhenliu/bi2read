@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   public-snapshot:
-    if: github.repository == 'xiaozhenliu/bimyscribe'
+    if: github.repository == 'xiaozhenliu/bi2read'
     name: public-snapshot
     runs-on: macos-14
     steps:

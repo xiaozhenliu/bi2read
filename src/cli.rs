@@ -17,7 +17,7 @@ use crate::jobs::{
 use crate::paths::{AppPaths, InstanceLock};
 use crate::App;
 
-const AFTER_HELP: &str = "Examples:\n  bimyscribe transcribe 'https://www.bilibili.com/video/BV...' --language zh\n  bimyscribe transcribe BV... --language en --output-dir /Volumes/Data/Markdown --json\n  bimyscribe runtime status --json\n  bimyscribe runtime install --runtime-data-dir /Volumes/Data/BiMyScribe-Runtime\n\nRun bimyscribe <COMMAND> --help for command-specific options.\nWith no command, BiMyScribe opens the desktop interface.";
+const AFTER_HELP: &str = "Examples:\n  bi2read transcribe 'https://www.bilibili.com/video/BV...' --language zh\n  bi2read transcribe BV... --language en --output-dir /Volumes/Data/Markdown --json\n  bi2read runtime status --json\n  bi2read runtime install --runtime-data-dir /Volumes/Data/bi2read-Runtime\n\nRun bi2read <COMMAND> --help for command-specific options.\nWith no command, bi2read opens the desktop interface.";
 const CLI_SCHEMA_VERSION: u32 = 1;
 const EXIT_INVALID_ARGUMENTS: u8 = 2;
 const EXIT_RUNTIME: u8 = 3;
@@ -98,6 +98,11 @@ fn cli_error_from_anyhow(error: &anyhow::Error) -> CliError {
                 error.to_string(),
                 Some("使用新 Runtime 与语言设置重建任务"),
             ),
+            crate::pipeline::PipelineError::RuntimeIdentityChanged => cli_error(
+                "runtime-identity-changed",
+                error.to_string(),
+                Some("使用当前 Runtime 重建任务"),
+            ),
             crate::pipeline::PipelineError::Funasr(message) => cli_error_from_message(message),
             crate::pipeline::PipelineError::Document(message) => cli_error(
                 "artifact-failed",
@@ -140,6 +145,16 @@ fn cli_error_from_funasr(error: &crate::funasr::FunasrError) -> CliError {
             error.to_string(),
             Some("启动 Docker Desktop 后重试"),
         ),
+        crate::funasr::FunasrError::OutOfMemory(_) => cli_error(
+            "runtime-out-of-memory",
+            error.to_string(),
+            Some("为 Docker Desktop 分配更多内存，或选择明确语言后重试"),
+        ),
+        crate::funasr::FunasrError::Timeout(_) => cli_error(
+            "runtime-timeout",
+            error.to_string(),
+            Some("检查 Docker 引擎状态后重试"),
+        ),
         crate::funasr::FunasrError::Validation(message) => cli_error_from_message(message),
         crate::funasr::FunasrError::Parse(_) => cli_error(
             "invalid-evidence",
@@ -155,6 +170,20 @@ fn cli_error_from_funasr(error: &crate::funasr::FunasrError) -> CliError {
 }
 
 fn cli_error_from_message(message: &str) -> CliError {
+    if message.contains("runtime-out-of-memory") {
+        return cli_error(
+            "runtime-out-of-memory",
+            message,
+            Some("为 Docker Desktop 分配更多内存，或选择明确语言后重试"),
+        );
+    }
+    if message.contains("runtime-timeout") {
+        return cli_error(
+            "runtime-timeout",
+            message,
+            Some("检查 Docker 引擎状态后重试"),
+        );
+    }
     if message.contains("runtime-contract-upgrade-required") {
         return cli_error(
             "runtime-contract-upgrade-required",
@@ -211,6 +240,8 @@ fn exit_code_for(error: &CliError) -> ExitCode {
         | "runtime-contract-upgrade-required"
         | "runtime-identity-changed"
         | "runtime-failed"
+        | "runtime-out-of-memory"
+        | "runtime-timeout"
         | "external-drive-not-mounted"
         | "legacy-job-rebuild-required" => EXIT_RUNTIME,
         "artifact-failed" | "invalid-evidence" => EXIT_ARTIFACT,
@@ -222,7 +253,7 @@ fn exit_code_for(error: &CliError) -> ExitCode {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "bimyscribe",
+    name = "bi2read",
     version,
     about = "Turn Bilibili videos into local Markdown transcripts",
     after_help = AFTER_HELP,
@@ -441,7 +472,7 @@ fn production_context() -> anyhow::Result<ProductionContext> {
     let lock = InstanceLock::acquire(&paths).map_err(|error| {
         if error.kind() == std::io::ErrorKind::WouldBlock {
             anyhow::anyhow!(
-                "BiMyScribe is already running; quit the app or wait for the other CLI command"
+                "bi2read is already running; quit the app or wait for the other CLI command"
             )
         } else {
             error.into()
@@ -491,7 +522,7 @@ fn transcribe(args: TranscribeArgs) -> anyhow::Result<ExitCode> {
     job.status = JobStatus::Running;
     job.started_at = Some(chrono::Utc::now());
     replace_queued_job(&mut queue, &job)?;
-    eprintln!("BiMyScribe: transcribing {} page {}", job.bvid, job.page);
+    eprintln!("bi2read: transcribing {} page {}", job.bvid, job.page);
 
     let token = CancellationToken::new();
     let result = crate::pipeline::run_job(&mut job, &context.config, &weak, &token);
@@ -574,7 +605,7 @@ fn runtime_install(args: RuntimePathArgs) -> anyhow::Result<ExitCode> {
     apply_runtime_overrides(&mut context.config, &args)?;
     let project = require_runtime_project(&context.config)?;
     eprintln!(
-        "BiMyScribe: installing Runtime in {}",
+        "bi2read: installing Runtime in {}",
         context.config.runtime_data_dir.display()
     );
     let ready = crate::funasr::install_runtime(&project, &context.config.runtime_data_dir)?;
@@ -720,7 +751,7 @@ mod tests {
     #[test]
     fn parses_transcribe_with_machine_readable_output_and_path_overrides() {
         let cli = Cli::try_parse_from([
-            "bimyscribe",
+            "bi2read",
             "transcribe",
             "BV1example",
             "--work-dir",
@@ -748,36 +779,26 @@ mod tests {
             ("zh", SourceLanguage::Zh),
             ("en", SourceLanguage::En),
         ] {
-            let cli = Cli::try_parse_from([
-                "bimyscribe",
-                "transcribe",
-                "BV1example",
-                "--language",
-                value,
-            ])
-            .unwrap();
+            let cli =
+                Cli::try_parse_from(["bi2read", "transcribe", "BV1example", "--language", value])
+                    .unwrap();
             let Command::Transcribe(args) = cli.command else {
                 panic!("expected transcribe command");
             };
             assert_eq!(args.language, expected);
         }
         let error =
-            Cli::try_parse_from(["bimyscribe", "transcribe", "BV1example", "--language", "fr"])
+            Cli::try_parse_from(["bi2read", "transcribe", "BV1example", "--language", "fr"])
                 .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
     fn parses_runtime_status_json_and_explicit_auto_matches_default() {
-        let implicit = Cli::try_parse_from(["bimyscribe", "transcribe", "BV1example"]).unwrap();
-        let explicit = Cli::try_parse_from([
-            "bimyscribe",
-            "transcribe",
-            "BV1example",
-            "--language",
-            "auto",
-        ])
-        .unwrap();
+        let implicit = Cli::try_parse_from(["bi2read", "transcribe", "BV1example"]).unwrap();
+        let explicit =
+            Cli::try_parse_from(["bi2read", "transcribe", "BV1example", "--language", "auto"])
+                .unwrap();
         let Command::Transcribe(implicit) = implicit.command else {
             panic!("expected transcribe command");
         };
@@ -786,7 +807,7 @@ mod tests {
         };
         assert_eq!(implicit.language, explicit.language);
 
-        let cli = Cli::try_parse_from(["bimyscribe", "runtime", "status", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["bi2read", "runtime", "status", "--json"]).unwrap();
         let Command::Runtime(RuntimeArgs {
             command: RuntimeCommand::Status(args),
         }) = cli.command
@@ -828,7 +849,7 @@ mod tests {
 
     #[test]
     fn transcribe_requires_an_input() {
-        let error = Cli::try_parse_from(["bimyscribe", "transcribe"]).unwrap_err();
+        let error = Cli::try_parse_from(["bi2read", "transcribe"]).unwrap_err();
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument

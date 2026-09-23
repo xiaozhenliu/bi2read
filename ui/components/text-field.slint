@@ -15,7 +15,7 @@ import { Theme } from "../theme.slint";
 // `edited(text: string)`; functions `select-all()` / `clear-selection()` /
 // `cut()` / `copy()` / `paste()`.
 //
-// BiMyScribe-specific additions:
+// bi2read-specific additions:
 //   - `leading-icon`: optional 14px icon drawn before the text, colorized
 //     with `text-muted`. Left unset, no icon column is reserved.
 //   - `compact`: false (default) = `control-height-lg`(36) + `radius-md`(8);
@@ -91,11 +91,13 @@ export component AppTextField inherits Rectangle {
         }
     }
 
-    background: root.enabled ? Theme.surface : Theme.surface-disabled;
+    // White fields keep forms light, including disabled/read-only states.
+    // Text color and input enablement communicate availability.
+    background: Theme.surface;
     border-radius: root.compact ? Theme.radius-sm : Theme.radius-md;
     border-width: text-input.has-focus ? 2px : 1px;
     border-color: !root.enabled ? Theme.border
-        : text-input.has-focus ? Theme.accent
+        : text-input.has-focus ? Theme.focus-ring
         : Theme.border;
 
     HorizontalLayout {
